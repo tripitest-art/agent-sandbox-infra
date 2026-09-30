@@ -1,0 +1,10 @@
+[Unit]
+Description=Qwen Code Worker alle 5 Minuten
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

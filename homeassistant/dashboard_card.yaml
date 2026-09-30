@@ -1,0 +1,58 @@
+# Im Home Assistant Dashboard (Lovelace) als 'Manueller Code' oder 'Vertikaler Stapel' einfügen:
+type: vertical-stack
+cards:
+  - type: entities
+    title: 🖥️ Lokaler KI-Server (Ollama & WoL)
+    entities:
+      - entity: sensor.llm_gaming_pc
+        icon: mdi:desktop-tower
+        name: PC Status
+      - type: attribute
+        entity: sensor.llm_gaming_pc
+        attribute: active_requests
+        name: Aktive Agenten-Requests
+        icon: mdi:robot-outline
+
+  # GPU VRAM & Power Metriken
+  - type: entities
+    title: ⚡ AMD RX 6800 XT Telemetrie
+    entities:
+      - type: attribute
+        entity: sensor.llm_gaming_pc
+        attribute: hw.gpu.vram_used_gb
+        name: VRAM Belegung (GB)
+        icon: mdi:expansion-card
+      - type: attribute
+        entity: sensor.llm_gaming_pc
+        attribute: hw.gpu.power_w
+        name: GPU Verbrauch (Watt)
+        icon: mdi:flash
+      - type: attribute
+        entity: sensor.llm_gaming_pc
+        attribute: hw.gpu.temp_junction_c
+        name: Hotspot Temperatur (°C)
+        icon: mdi:thermometer
+
+  # Live-Log Anzeige (Markdown)
+  - type: markdown
+    title: 🧠 Qwen Agent Live-Log
+    content: >
+      ```text
+      {{ state_attr('sensor.qwen_worker_log', 'log') }}
+      ```
+
+  # Steuerungs-Buttons
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: PC Wecken (WoL)
+        icon: mdi:power
+        tap_action:
+          action: call-service
+          service: rest_command.wake_llm_pc
+      - type: button
+        name: Takt Starten
+        icon: mdi:play-network
+        tap_action:
+          action: call-service
+          service: shell_command.start_qwen_worker

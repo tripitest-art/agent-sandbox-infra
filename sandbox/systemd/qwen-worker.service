@@ -1,0 +1,13 @@
+[Unit]
+Description=Qwen Code Worker Taktgeber (sc-digger & Multi-Agent)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/sc-digger
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/sc-digger/sandbox/worker_tick.py
+StandardOutput=append:/root/worker.log
+StandardError=append:/root/worker.log

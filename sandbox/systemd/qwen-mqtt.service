@@ -1,0 +1,12 @@
+[Unit]
+Description=Stream Qwen Log to MQTT (Home Assistant)
+After=network.target
+
+[Service]
+# IP, Port, User und Password an das eigene Setup anpassen:
+ExecStart=/bin/bash -c "tail -n 0 -F /root/worker.log | mosquitto_pub -h 192.168.0.148 -u 'LLM' -P 'Subaru_277' -t 'sc_digger/worker/log' -l"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

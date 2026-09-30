@@ -1,0 +1,44 @@
+# In die configuration.yaml von Home Assistant einfügen:
+
+# 1. REST-Sensor für den WoL-Proxy / Ollama Host
+sensor:
+  - platform: rest
+    name: "LLM Gaming PC"
+    resource: http://192.168.0.210:11434/proxy/status
+    scan_interval: 10
+    value_template: >
+      {% if value_json.ollama_up %}
+        Arbeitet (Ollama Online)
+      {% elif value_json.pc_up %}
+        Fährt hoch / Idle
+      {% else %}
+        Schläft
+      {% endif %}
+    json_attributes:
+      - hw
+      - last_wake
+      - active_requests
+
+# 2. MQTT-Trigger-Sensor für das Live-Log (umgeht das 255-Zeichen-Limit via Attribut)
+template:
+  - trigger:
+      - platform: mqtt
+        topic: "sc_digger/worker/log"
+    sensor:
+      - name: "Qwen Worker Log"
+        state: "OK"
+        attributes:
+          log: >
+            {% set current_log = state_attr('sensor.qwen_worker_log', 'log') | default('', true) %}
+            {% set new_log = current_log ~ '\n' ~ trigger.payload %}
+            {{ new_log[-2000:] }}
+
+# 3. Steuerungsbefehle
+rest_command:
+  wake_llm_pc:
+    url: "http://192.168.0.210:11434/api/ps"
+    method: get
+    timeout: 2
+
+shell_command:
+  start_qwen_worker: "ssh -i /config/.ssh/id_rsa root@agent-sandbox 'systemctl start --no-block qwen-worker.service'"
