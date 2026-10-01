@@ -16,8 +16,8 @@ flowchart TD
 
     subgraph LLM_Host["Gaming-PC (LLM Server)"]
         WOL_PROXY["WoL-Proxy (:11434)<br>• Auto-Sleep nach 5 min Idle<br>• /api/ps weckt Host per WoL"]
-        OLLAMA["Ollama (:11434)<br>• qwen3-coder:30b-a3b-instruct-q8_0<br>• 64k Kontextfenster<br>• Q8_0 KV-Cache"]
-        GPU["AMD Radeon RX 6800 XT (16 GB)<br>• 150 W Power Cap (statt 300 W)<br>• 2100 MHz Core Cap, -100 mV Offset<br>• 50.2 Tokens/s stabil"]
+        OLLAMA["Ollama (:11434)<br>• qwen3-coder-64k (30B MoE, Q4_K_M)<br>• 64k Kontextfenster<br>• Flash Attention + Q8_0 KV-Cache"]
+        GPU["AMD Radeon RX 6800 XT (16 GB)<br>• 255 W Power-Limit (Karten-Minimum)<br>• 2100 MHz Core Cap, -90 mV Offset<br>• ~37 Tokens/s bei 64k, ~160 W unter Last"]
         WOL_PROXY --> OLLAMA
         OLLAMA --> GPU
     end
@@ -46,7 +46,7 @@ flowchart TD
 |---|---|
 | [`proxmox/`](proxmox/) | Shell-Skripte zur Erstellung des unprivilegierten Debian 12 LXC-Containers auf Proxmox VE. |
 | [`sandbox/`](sandbox/) | Setup-Skripte (`install.sh`), der autonome Taktgeber (`worker_tick.py`) und systemd-Units (`qwen-worker`, `qwen-mqtt`). |
-| [`hardware/`](hardware/) | GPU-Hardware-Tuning für AMD RDNA2 (150W Cap, LACT, Undervolting) und Ollama-Service Overrides. |
+| [`hardware/`](hardware/) | GPU-Hardware-Tuning für AMD RDNA2 (LACT, 2100 MHz, −90 mV, 255 W) mit Messwerten und Ollama-Service Overrides. |
 | [`homeassistant/`](homeassistant/) | YAML-Konfigurationen für REST- und MQTT-Sensoren sowie die Lovelace-Dashboard-Karte. |
 | [`tests/`](tests/) | Unit-Tests für den Taktgeber (`test_worker_tick.py`), läuft ohne Netzwerk mit Mocks. |
 
@@ -55,9 +55,9 @@ flowchart TD
 ## 🚀 Schnelleinrichtung in 4 Schritten
 
 ### 1. Hardware & Ollama vorbereiten (LLM-Host)
-* Kernel-Overdrive freischalten: `amdgpu.ppfeaturemask=0xffffffff` im Bootloader eintragen.
-* Power-Cap auf 150 W, Core auf 2100 MHz und Voltage-Offset auf -100 mV begrenzen (Details in [`hardware/amd-rdna2-tuning.md`](hardware/amd-rdna2-tuning.md)).
-* Ollama mit `OLLAMA_KV_CACHE_TYPE=q8_0` konfigurieren (Achtung: `OLLAMA_FLASH_ATTENTION=1` auf RDNA2 deaktiviert lassen!).
+* Kernel-Overdrive per `/etc/modprobe.d/amdgpu-overdrive.conf` (`ppfeaturemask=0xfff7ffff`) freischalten – kein Bootloader-Eingriff nötig.
+* Mit LACT: Power-Limit 255 W (Minimum der Karte), Core 2100 MHz, Offset −90 mV, VRAM 1040 MHz (Details und Messwerte in [`hardware/amd-rdna2-tuning.md`](hardware/amd-rdna2-tuning.md)).
+* Ollama mit `OLLAMA_FLASH_ATTENTION=1` **und** `OLLAMA_KV_CACHE_TYPE=q8_0` konfigurieren – q8_0 lädt ohne Flash Attention nicht.
 
 ### 2. Sandbox auf Proxmox anlegen
 Auf dem Proxmox VE Host:
