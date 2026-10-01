@@ -2,16 +2,24 @@
 # Richtet die Worker-Sandbox ein oder bringt sie auf den Stand von main. Läuft IM Container
 # (CT 112) als root und darf beliebig oft laufen. Anleitung: sandbox/README.md.
 #
-#   bash /root/sc-digger/sandbox/install.sh            # einrichten / aktualisieren
+#   bash /root/agent-sandbox-infra/sandbox/install.sh  # einrichten / aktualisieren
+#   BACKEND=ollama bash …                              # Qwen3-Coder auf dem Gaming-PC statt LiteLLM
 #   MODEL=qwen3-coder-64k OLLAMA=http://… bash …       # andere Werte als die Vorgaben
 #   AGENT=opencode bash …                              # OpenCode statt Qwen Code
 #   WAKE_PC=1 TAKT=30min bash …                        # PC bei Arbeit wecken, seltener schauen
 #
 # Der GitHub-Zugang wird hier bewusst NICHT eingerichtet: den Token gibt Stephan selbst
 # verdeckt ein (README, Schritt 3). Das Skript prüft nur, ob er da ist.
+# Geheimnisse stehen nie im Repo (es ist öffentlich): Der LiteLLM-Key kommt nach
+# /etc/qwen-worker.env, das MQTT-Passwort nach /etc/qwen-mqtt.env (beide 600). Fehlen sie,
+# fragt das Skript verdeckt danach (nur im Terminal).
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # sandbox/ dieses Repos
 REPO_DIR=/root/sc-digger
+BACKEND=${BACKEND:-litellm}                     # litellm (DeepSeek über LXC 113) oder ollama
+LITELLM=${LITELLM:-http://192.168.0.211:4000}
+LITELLM_MODEL=${LITELLM_MODEL:-coder}           # Alias im LiteLLM-Proxy
 OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
 AGENT=${AGENT:-qwen-code}                       # oder opencode
@@ -23,7 +31,7 @@ export DEBIAN_FRONTEND=noninteractive
 echo "== Pakete"
 apt-get update -qq
 apt-get install -y -qq git curl ca-certificates python3 python3-venv python3-pip ffmpeg \
-  libsndfile1 libchromaprint-tools >/dev/null
+  libsndfile1 libchromaprint-tools mosquitto-clients >/dev/null
 # gh aus dem Paketarchiv von GitHub, nicht von Debian: Debians 2.23 fragt bei `gh pr edit` und
 # `gh pr view` noch „Projects (classic)“ ab und bricht mit einem GraphQL-Fehler ab. Qwen hielt
 # das für Erfolg; der PR-Text von #103 kam zweimal nicht an.
@@ -44,6 +52,24 @@ git config --global user.email >/dev/null || git config --global user.email "tri
 /root/venv/bin/pip install -q -r "$REPO_DIR/requirements.txt" pytest
 grep -q 'source /root/venv/bin/activate' /root/.bashrc || echo 'source /root/venv/bin/activate' >> /root/.bashrc
 
+echo "== Geheimnisse (nur lokal, nie im Repo)"
+# ask_secret DATEI VARIABLE TEXT: fehlt VARIABLE in DATEI, verdeckt abfragen (nur im Terminal).
+ask_secret() {
+  local file=$1 var=$2 text=$3 val
+  if [ -f "$file" ] && grep -q "^$var=." "$file"; then echo "$var: vorhanden ($file)"; return 0; fi
+  if [ ! -t 0 ]; then echo "$var fehlt in $file (Skript im Terminal starten, dann wird gefragt)"; return 1; fi
+  read -rsp "$text: " val; echo
+  [ -n "$val" ] || { echo "$var leer – übersprungen"; return 1; }
+  ( umask 077; { grep -v "^$var=" "$file" 2>/dev/null || true; printf '%s=%s\n' "$var" "$val"; } > "$file.tmp" )
+  mv "$file.tmp" "$file"; chmod 600 "$file"
+  echo "$var gespeichert ($file)"
+}
+secrets_ok=1
+if [ "$BACKEND" = litellm ]; then
+  ask_secret /etc/qwen-worker.env LITELLM_API_KEY "LiteLLM-Key »worker« (aus Vaultwarden)" || secrets_ok=0
+fi
+ask_secret /etc/qwen-mqtt.env MQTT_PASS "MQTT-Passwort für Benutzer LLM" || true   # nur Log-Stream
+
 echo "== OpenCode"
 [ -x /root/.opencode/bin/opencode ] || curl -fsSL https://opencode.ai/install | bash
 mkdir -p /root/.config/opencode
@@ -58,9 +84,15 @@ cat > /root/.config/opencode/opencode.json <<JSON
       "name": "Ollama (Gaming-PC)",
       "options": { "baseURL": "$OLLAMA/v1" },
       "models": { "$MODEL": { "name": "$MODEL" } }
+    },
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LiteLLM (LXC 113)",
+      "options": { "baseURL": "$LITELLM/v1", "apiKey": "{env:LITELLM_API_KEY}" },
+      "models": { "$LITELLM_MODEL": { "name": "$LITELLM_MODEL" } }
     }
   },
-  "model": "ollama/$MODEL",
+  "model": "$([ "$BACKEND" = litellm ] && echo "litellm/$LITELLM_MODEL" || echo "ollama/$MODEL")",
   "permission": { "edit": "allow", "bash": "allow", "webfetch": "deny" }
 }
 JSON
@@ -96,18 +128,30 @@ cat > /root/.qwen/settings.json <<JSON
           "contextWindowSize": 65536,
           "samplingParams": { "temperature": 0.7, "top_p": 0.8, "top_k": 20 }
         }
+      },
+      {
+        "id": "$LITELLM_MODEL",
+        "name": "$LITELLM_MODEL (LiteLLM, DeepSeek)",
+        "envKey": "LITELLM_API_KEY",
+        "baseUrl": "$LITELLM/v1",
+        "generationConfig": {
+          "timeout": 600000,
+          "streamIdleTimeoutMs": 300000,
+          "maxRetries": 1,
+          "contextWindowSize": 131072
+        }
       }
     ]
   },
   "security": { "auth": { "selectedType": "openai" } },
-  "model": { "name": "$MODEL" },
+  "model": { "name": "$([ "$BACKEND" = litellm ] && echo "$LITELLM_MODEL" || echo "$MODEL")" },
   "privacy": { "usageStatisticsEnabled": false },
   "telemetry": { "enabled": false }
 }
 JSON
 
 echo "== Taktgeber"
-install -m 755 "$REPO_DIR/sandbox/worker_tick.py" /root/worker_tick.py
+install -m 755 "$SCRIPT_DIR/worker_tick.py" /root/worker_tick.py
 cat > /etc/systemd/system/qwen-worker.service <<UNIT
 [Unit]
 Description=Qwen-Worker: ein Auftrag pro Takt (sandbox/worker_tick.py)
@@ -115,6 +159,11 @@ Description=Qwen-Worker: ein Auftrag pro Takt (sandbox/worker_tick.py)
 Type=oneshot
 # Ohne HOME finden gh, git und OpenCode ihre Konfiguration nicht (gh endet mit Exit 4).
 Environment=HOME=/root
+# LITELLM_API_KEY (BACKEND=litellm); fehlt die Datei, startet der Takt trotzdem (ollama).
+EnvironmentFile=-/etc/qwen-worker.env
+Environment=BACKEND=$BACKEND
+Environment=LITELLM=$LITELLM
+Environment=LITELLM_MODEL=$LITELLM_MODEL
 Environment=OLLAMA=$OLLAMA
 Environment=MODEL=$MODEL
 Environment=AGENT=$AGENT
@@ -134,14 +183,31 @@ OnUnitActiveSec=$TAKT
 [Install]
 WantedBy=timers.target
 UNIT
+
+echo "== Log-Stream nach Home Assistant (MQTT)"
+install -m 644 "$SCRIPT_DIR/systemd/qwen-mqtt.service" /etc/systemd/system/qwen-mqtt.service
 systemctl daemon-reload
+if [ -f /etc/qwen-mqtt.env ]; then
+  systemctl enable qwen-mqtt.service >/dev/null; systemctl restart qwen-mqtt.service
+  echo "qwen-mqtt: $(systemctl is-active qwen-mqtt.service)"
+else
+  systemctl disable --now qwen-mqtt.service >/dev/null 2>&1 || true
+  echo "qwen-mqtt: aus (/etc/qwen-mqtt.env fehlt)"
+fi
 
 echo "== Prüfung"
-ok=1
+ok=$secrets_ok
 gh --version | head -1
-echo "Agent: $AGENT (Qwen Code $(qwen --version 2>/dev/null || echo fehlt))"
+echo "Agent: $AGENT (Qwen Code $(qwen --version 2>/dev/null || echo fehlt)), Backend: $BACKEND"
 if gh auth status >/dev/null 2>&1; then echo "GitHub: angemeldet"; else echo "GitHub: NICHT angemeldet (README, Schritt 3)"; ok=0; fi
-if curl -s -m 10 "$OLLAMA/api/tags" | grep -q "\"$MODEL"; then echo "Ollama: $MODEL vorhanden"
+if [ "$BACKEND" = litellm ]; then
+  # Key nur an curl übergeben, nie ausgeben. 200 = Key gültig und Modell freigegeben.
+  code=$(set -a; . /etc/qwen-worker.env 2>/dev/null; set +a
+         curl -s -m 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${LITELLM_API_KEY:-}" \
+           "$LITELLM/v1/models" || echo 000)
+  if [ "$code" = 200 ]; then echo "LiteLLM: erreichbar, Key gültig ($LITELLM_MODEL)"
+  else echo "LiteLLM: HTTP $code (Proxy aus oder Key falsch)"; ok=0; fi
+elif curl -s -m 10 "$OLLAMA/api/tags" | grep -q "\"$MODEL"; then echo "Ollama: $MODEL vorhanden"
 else echo "Ollama: $MODEL nicht erreichbar (PC aus, Bildmodus oder Modell fehlt)"; fi
 (cd "$REPO_DIR" && /root/venv/bin/python -m pytest -q 2>&1 | tail -1)
 
@@ -151,5 +217,5 @@ if [ "$ok" = 1 ]; then
   echo "Timer aktiv:"; systemctl list-timers qwen-worker.timer --no-pager | sed -n 2p
 else
   systemctl disable --now qwen-worker.timer >/dev/null 2>&1 || true
-  echo "Timer bleibt aus, bis GitHub angemeldet ist. Danach dieses Skript erneut ausführen."
+  echo "Timer bleibt aus, bis GitHub angemeldet und (bei litellm) der Key gültig ist. Danach dieses Skript erneut ausführen."
 fi

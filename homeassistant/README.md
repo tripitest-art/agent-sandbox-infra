@@ -13,8 +13,12 @@ Dieses Modul bindet die Proxmox-Sandbox und den LLM-Host in Home Assistant ein:
 2. Einen Benutzer anlegen:
    * **Einstellungen -> Personen -> Benutzer**
    * Benutzer: `LLM`
-   * Passwort vergeben (z. B. `Subaru_277` oder ein eigenes sicheres Passwort).
-3. In der Sandbox `mosquitto-clients` installieren und den Service `sandbox/systemd/qwen-mqtt.service` mit der IP deiner Home Assistant Instanz aktivieren.
+   * Ein eigenes, langes Passwort vergeben – **nie in dieses Repo schreiben** (es ist öffentlich).
+   * Den Benutzer ohne Administratorrechte und mit „Nur aus dem lokalen Netzwerk anmelden“ anlegen:
+     Die Mosquitto-App prüft MQTT-Logins gegen die HA-Benutzer, das Passwort öffnet also auch HA.
+3. In der Sandbox `bash sandbox/install.sh` ausführen: Es installiert `mosquitto-clients` und
+   `sandbox/systemd/qwen-mqtt.service` und fragt das Passwort verdeckt ab
+   (gespeichert nur in `/etc/qwen-mqtt.env`, Rechte 600).
 
 ---
 

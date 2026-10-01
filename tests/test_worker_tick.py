@@ -518,3 +518,51 @@ def test_main_logs_busy_ollama_once(monkeypatch, tmp_path, capsys):
     for _ in range(3):
         assert w.main() == 0
     assert capsys.readouterr().out.count("Ollama belegt (qwen3.5:9b)") == 1
+
+
+# --- BACKEND=litellm: Modell über den LiteLLM-Proxy, Gaming-PC egal ---
+
+def _litellm(monkeypatch, tmp_path, up=True):
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "pc_status", lambda: pytest.fail("PC-Status gefragt, obwohl LiteLLM aktiv"))
+    monkeypatch.setattr(w, "ollama_free", lambda *a, **k: pytest.fail("Ollama gefragt, obwohl LiteLLM aktiv"))
+    monkeypatch.setattr(w, "litellm_ready", lambda: None if up else "LiteLLM nicht erreichbar")
+
+
+def test_main_litellm_runs_job_without_pc(monkeypatch, tmp_path, capsys):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+    prompts = []
+    monkeypatch.setattr(w, "run_agent", lambda prompt: prompts.append(prompt) or 0)
+    assert w.main() == 0
+    assert len(prompts) == 1 and "Issue #102" in prompts[0]
+    assert "LiteLLM erreichbar (coder)" in capsys.readouterr().out
+
+
+def test_main_litellm_down_waits_without_asking_github(monkeypatch, tmp_path, capsys):
+    _litellm(monkeypatch, tmp_path, up=False)
+    monkeypatch.setattr(w, "gh", NoGH())
+    assert w.main() == 0
+    assert w.main() == 0      # gleicher Zustand: nur eine Zeile
+    assert capsys.readouterr().out.count("LiteLLM nicht erreichbar, warte.") == 1
+
+
+def test_litellm_ready(monkeypatch):
+    monkeypatch.setattr(w, "LITELLM", "http://litellm.test:4000")
+    assert w.litellm_ready() == "LiteLLM nicht erreichbar"   # Fixture: kein Netz
+
+    class Ok:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    urls = []
+    monkeypatch.setattr(w.urllib.request, "urlopen", lambda url, timeout: urls.append(url) or Ok())
+    assert w.litellm_ready() is None
+    assert urls == ["http://litellm.test:4000/health/liveliness"]
+
+
+def test_agent_cmd_opencode_litellm(monkeypatch):
+    monkeypatch.setattr(w, "AGENT", "opencode")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    assert w.agent_cmd("tu was")[:4] == ["opencode", "run", "-m", "litellm/coder"]

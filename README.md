@@ -71,9 +71,14 @@ CTID=$(pvesh get /cluster/nextid) bash host-create.sh
 * Im Container per `gh auth login --with-token` einen feingranularen Token hinterlegen.
 * Den Taktgeber-Timer scharfschalten: `systemctl enable --now qwen-worker.timer`.
 
-### 4. Home Assistant anbinden
-* MQTT-User `LLM` im Home Assistant anlegen.
-* `sandbox/systemd/qwen-mqtt.service` mit der HA-IP starten.
+### 4. Modell-Backend & Home Assistant anbinden
+* Standard ist `BACKEND=litellm`: Der Worker nutzt den Alias `coder` (DeepSeek) über den
+  LiteLLM-Proxy (LXC 113, `http://192.168.0.211:4000`) mit eigenem Virtual Key und Tagesbudget.
+  `BACKEND=ollama bash sandbox/install.sh` schaltet zurück auf Qwen3-Coder am Gaming-PC.
+* MQTT-User `LLM` im Home Assistant anlegen (siehe [`homeassistant/README.md`](homeassistant/README.md)).
+* `bash sandbox/install.sh` im Container fragt fehlende Geheimnisse verdeckt ab
+  (LiteLLM-Key → `/etc/qwen-worker.env`, MQTT-Passwort → `/etc/qwen-mqtt.env`, beide 600)
+  und richtet `qwen-mqtt.service` ein. **Keine Geheimnisse ins Repo** – es ist öffentlich.
 * YAML-Snippets aus [`homeassistant/`](homeassistant/) in die `configuration.yaml` und das Dashboard einfügen.
 
 ---

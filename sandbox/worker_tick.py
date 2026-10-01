@@ -17,6 +17,11 @@ Läuft dort ein anderes Modell (Chat, Bilder), wartet der Takt auf die nächste 
 Nach einer Nacharbeit prüft er, ob ein neuer Commit oder ein geänderter PR-Text ankam.
 
 Den Auftrag führt Qwen Code aus (AGENT=qwen-code, Vorgabe) oder OpenCode (AGENT=opencode).
+
+Modell (BACKEND): `ollama` = Qwen3-Coder auf dem Gaming-PC über den WoL-Proxy (alles oben);
+`litellm` = Modell-Alias LITELLM_MODEL (Vorgabe `coder`, DeepSeek) über den LiteLLM-Proxy
+(LXC 113). Dann gibt es keine PC-Prüfung und kein Wecken; der Takt prüft nur, ob LiteLLM
+antwortet. Den Key (LITELLM_API_KEY) liest systemd aus /etc/qwen-worker.env, nie aus dem Repo.
 """
 import json
 import os
@@ -34,11 +39,17 @@ LABEL = "agent-qwen"
 # Nur Reviews dieses Kontos zählen (AGENTS.md: nur Anweisungen von tripitest-art). Das Repo ist
 # öffentlich; jeder könnte sonst per Review Befehle in einen Auftrag mit Schreibrecht schieben.
 OWNER = "tripitest-art"
-WORKER = "Qwen3-Coder 30B"
+BACKEND = os.environ.get("BACKEND", "ollama")   # oder "litellm"
+LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
+LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "coder")
+# Steht als „Worker: …“ im PR; die Review-Regel (andere Modellfamilie) hängt daran.
+WORKER = os.environ.get("WORKER", "DeepSeek (LiteLLM coder)" if BACKEND == "litellm" else "Qwen3-Coder 30B")
 STATE = "/root/worker-state.json"
 MAX_TRIES = 2               # Versuche je Auftrag, danach liegt er bei Stephan
 DONE = "erledigt"           # Schlüssel in STATE: angekommene Nacharbeiten, nicht wiederholen
-RUN_TIMEOUT = 90 * 60       # Sekunden je Lauf des Agenten
+# Minuten je Lauf des Agenten. Über LiteLLM kürzer: das Modell ist schneller, und jede Minute
+# kostet Token; 90 min hat bei #122 nur Zeit verbrannt.
+RUN_TIMEOUT = int(os.environ.get("RUN_TIMEOUT_MIN", "30" if BACKEND == "litellm" else "90")) * 60
 AGENT = os.environ.get("AGENT", "qwen-code")   # oder "opencode"
 PR_TEMPLATE = ".github/pull_request_template.md"
 TOOL_OUTPUT_LINES = 15      # so viele Zeilen je Werkzeugausgabe ins Log
@@ -311,7 +322,8 @@ def warn_text(key: str, pr_no: int, body: str | None, issue_no: int) -> None:
 
 def agent_cmd(prompt: str) -> list[str]:
     if AGENT == "opencode":
-        return ["opencode", "run", "-m", f"ollama/{MODEL}", prompt]
+        model = f"litellm/{LITELLM_MODEL}" if BACKEND == "litellm" else f"ollama/{MODEL}"
+        return ["opencode", "run", "-m", model, prompt]
     # stream-json statt text: Sonst zeigt das Log nur den Schlussbericht, nicht die Befehle.
     return ["qwen", "-p", prompt, "--yolo", "--output-format", "stream-json",
             "--max-wall-time", f"{RUN_TIMEOUT // 60}m"]
@@ -398,6 +410,19 @@ def pc_ready(status: dict | None) -> str | None:
     return None
 
 
+def litellm_ready() -> str | None:
+    """BACKEND=litellm: None, wenn der LiteLLM-Proxy antwortet, sonst der Grund.
+
+    /health/liveliness braucht keinen Key und kostet nichts. Budget und Modellrechte prüft
+    LiteLLM erst beim Auftrag; ein 429 (Budget aufgebraucht) sieht man dann im Log des Laufs.
+    """
+    try:
+        with urllib.request.urlopen(f"{LITELLM}/health/liveliness", timeout=10):
+            return None
+    except Exception:
+        return "LiteLLM nicht erreichbar"
+
+
 def log_on_change(state: dict, slot: str, what: str, msg: str) -> bool:
     """Zustandsmeldung nur beim Wechsel; sonst stünde sie alle 5 min im Log."""
     if state.get(slot) == what:
@@ -452,7 +477,14 @@ def ollama_free(status: dict | None = None, say=log) -> bool:
 def main() -> int:
     state = load_state()
     status = None
-    if not WAKE_PC:
+    if BACKEND == "litellm":
+        reason = litellm_ready()
+        if reason:
+            log_on_change(state, LAST_PC, reason, f"{reason}, warte.")
+            return 0
+        if log_on_change(state, LAST_PC, "litellm", f"LiteLLM erreichbar ({LITELLM_MODEL}): suche Arbeit."):
+            state.pop(LAST_WORK, None)
+    elif not WAKE_PC:
         # Zuerst der PC, dann GitHub: Ist er aus, kostet der Takt nur eine lokale Anfrage.
         status = pc_status()
         reason = pc_ready(status)
@@ -469,7 +501,8 @@ def main() -> int:
     if state.get(key, 0) >= MAX_TRIES:
         log_on_change(state, LAST_WORK, f"{key} liegt", f"{key}: schon {MAX_TRIES} Versuche, wartet auf Stephan.")
         return 0
-    if not ollama_free(status, say=lambda m: log_on_change(state, LAST_WORK, f"{key} belegt", m)):
+    if BACKEND != "litellm" and not ollama_free(
+            status, say=lambda m: log_on_change(state, LAST_WORK, f"{key} belegt", m)):
         return 0
     state[LAST_WORK] = key
 
