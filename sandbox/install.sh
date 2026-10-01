@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Richtet die Worker-Sandbox ein oder bringt sie auf den Stand von main. Läuft IM Container
-# (CT 112) als root und darf beliebig oft laufen. Anleitung: sandbox/README.md.
+# (CT 112) als root und darf beliebig oft laufen. Anleitung: README.md.
 #
 #   bash /root/agent-sandbox-infra/sandbox/install.sh  # einrichten / aktualisieren
 #   BACKEND=ollama bash …                              # Qwen3-Coder auf dem Gaming-PC statt LiteLLM
@@ -212,6 +212,43 @@ if [ -f /etc/qwen-webhook.env ] && grep -q '^HA_WEBHOOK_URL=.' /etc/qwen-webhook
 else
   systemctl disable --now qwen-webhook.service >/dev/null 2>&1 || true
   echo "qwen-webhook: aus (/etc/qwen-webhook.env fehlt)"
+fi
+
+echo "== Infra-Repo: Deploy-Key (nur lesen)"
+# Das Repo ist privat. git pull läuft über einen eigenen SSH-Schlüssel, der nur dieses Repo
+# lesen darf (GitHub → Settings → Deploy keys, ohne Schreibrecht). Bewusst nicht über den
+# GitHub-Token des Workers: Der Agent soll die Regeln seiner eigenen Sandbox nicht lesen
+# oder ändern können.
+INFRA_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+INFRA_REPO=tripitest-art/agent-sandbox-infra
+DEPLOY_KEY=/root/.ssh/agent_infra_deploy
+install -d -m 700 /root/.ssh
+[ -f "$DEPLOY_KEY" ] || ssh-keygen -q -t ed25519 -N "" -C "ct112 agent-sandbox-infra (nur lesen)" -f "$DEPLOY_KEY"
+# Host-Schlüssel von GitHub fest (api.github.com/meta, ssh_keys), kein Vertrauen beim ersten Kontakt
+GH_HOSTKEY="github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+touch /root/.ssh/known_hosts; chmod 600 /root/.ssh/known_hosts
+grep -qxF "$GH_HOSTKEY" /root/.ssh/known_hosts || echo "$GH_HOSTKEY" >> /root/.ssh/known_hosts
+if ! grep -q '^Host github-infra$' /root/.ssh/config 2>/dev/null; then
+  cat >> /root/.ssh/config <<CFG
+Host github-infra
+  HostName github.com
+  User git
+  IdentityFile $DEPLOY_KEY
+  IdentitiesOnly yes
+CFG
+fi
+chmod 600 /root/.ssh/config
+# GitHub antwortet auch bei Erfolg mit Exit 1 (kein Shell-Zugang); entscheidend ist der Text.
+# Erst in eine Variable: mit pipefail wäre „ssh … | grep“ sonst immer falsch.
+auth=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -T github-infra 2>&1 || true)
+if grep -q "successfully authenticated" <<<"$auth"; then
+  git -C "$INFRA_DIR" remote set-url origin "git@github-infra:$INFRA_REPO.git"
+  echo "Deploy-Key: gültig, git pull läuft über SSH"
+else
+  echo "Deploy-Key: noch nicht bei GitHub eingetragen. In $INFRA_REPO → Settings → Deploy keys →"
+  echo "Add deploy key, OHNE „Allow write access“, diesen öffentlichen Schlüssel eintragen:"
+  cat "$DEPLOY_KEY.pub"
+  echo "Danach dieses Skript erneut ausführen. Bis dahin bleibt git pull wie bisher (HTTPS)."
 fi
 
 echo "== Prüfung"

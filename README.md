@@ -62,13 +62,18 @@ flowchart TD
 ### 2. Sandbox auf Proxmox anlegen
 Auf dem Proxmox VE Host:
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/tripitest-art/agent-sandbox-infra/main/proxmox/host-create.sh
+# Repo ist privat: host-create.sh vom eigenen Rechner kopieren, z. B. scp proxmox/host-create.sh pve:/root/
 CTID=$(pvesh get /cluster/nextid) bash host-create.sh
 ```
 
 ### 3. SSH-Schlüssel & GitHub-Token hinterlegen
 * SSH-Zugang für Steuerungs-Agenten in den Container eintragen (siehe [`proxmox/README.md`](proxmox/README.md)).
-* Im Container per `gh auth login --with-token` einen feingranularen Token hinterlegen.
+* Im Container per `gh auth login --with-token` einen feingranularen Token hinterlegen (nur für das Arbeitsrepo).
+* Dieses Repo ist **privat**. `install.sh` legt einen Deploy-Key nur zum Lesen an
+  (`/root/.ssh/agent_infra_deploy`) und gibt den öffentlichen Schlüssel aus. Ihn unter
+  Settings → Deploy keys **ohne** Schreibrecht eintragen und `install.sh` erneut ausführen; dann
+  läuft `git pull` über SSH. Erstes Klonen, solange noch kein Key existiert: Repo per `scp`
+  in den Container kopieren oder mit einem kurzlebigen Token klonen.
 * Den Taktgeber-Timer scharfschalten: `systemctl enable --now qwen-worker.timer`.
 
 ### 4. Modell-Backend & Home Assistant anbinden
