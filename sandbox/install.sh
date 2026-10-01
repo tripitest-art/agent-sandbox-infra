@@ -20,6 +20,8 @@ REPO_DIR=/root/sc-digger
 BACKEND=${BACKEND:-litellm}                     # litellm (DeepSeek über LXC 113) oder ollama
 LITELLM=${LITELLM:-http://192.168.0.211:4000}
 LITELLM_MODEL=${LITELLM_MODEL:-coder}           # Alias im LiteLLM-Proxy
+# Ausweichmodelle, wenn LITELLM_MODEL die Probe vor dem Lauf nicht besteht (worker_tick.py)
+LITELLM_FALLBACKS=${LITELLM_FALLBACKS:-coder-free}
 OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
 AGENT=${AGENT:-qwen-code}                       # oder opencode
@@ -27,6 +29,8 @@ TAKT=${TAKT:-5min}                              # so oft sucht der Worker Arbeit
 WAKE_PC=${WAKE_PC:-0}                           # 1: Gaming-PC bei Arbeit per WoL wecken
 QWEN_CODE_VERSION=${QWEN_CODE_VERSION:-0.24.7}  # fest: ein Update soll bewusst passieren
 export DEBIAN_FRONTEND=noninteractive
+# Alle LiteLLM-Aliase, die der Worker nutzen kann (Hauptmodell zuerst, ohne Doppelte)
+LITELLM_ALL=$(printf '%s\n' "$LITELLM_MODEL" ${LITELLM_FALLBACKS//,/ } | awk 'NF && !seen[$0]++')
 
 echo "== Pakete"
 apt-get update -qq
@@ -91,7 +95,7 @@ cat > /root/.config/opencode/opencode.json <<JSON
       "npm": "@ai-sdk/openai-compatible",
       "name": "LiteLLM (LXC 113)",
       "options": { "baseURL": "$LITELLM/v1", "apiKey": "{env:LITELLM_API_KEY}" },
-      "models": { "$LITELLM_MODEL": { "name": "$LITELLM_MODEL" } }
+      "models": { $(for m in $LITELLM_ALL; do printf '"%s": { "name": "%s" }, ' "$m" "$m"; done | sed 's/, $//') }
     }
   },
   "model": "$([ "$BACKEND" = litellm ] && echo "litellm/$LITELLM_MODEL" || echo "ollama/$MODEL")",
@@ -131,9 +135,10 @@ cat > /root/.qwen/settings.json <<JSON
           "samplingParams": { "temperature": 0.7, "top_p": 0.8, "top_k": 20 }
         }
       },
+$(for m in $LITELLM_ALL; do cat <<ENTRY
       {
-        "id": "$LITELLM_MODEL",
-        "name": "$LITELLM_MODEL (LiteLLM, DeepSeek)",
+        "id": "$m",
+        "name": "$m (LiteLLM)",
         "envKey": "LITELLM_API_KEY",
         "baseUrl": "$LITELLM/v1",
         "generationConfig": {
@@ -142,7 +147,9 @@ cat > /root/.qwen/settings.json <<JSON
           "maxRetries": 1,
           "contextWindowSize": 131072
         }
-      }
+      },
+ENTRY
+done | sed '$ s/},$/}/')
     ]
   },
   "security": { "auth": { "selectedType": "openai" } },
@@ -166,6 +173,7 @@ EnvironmentFile=-/etc/qwen-worker.env
 Environment=BACKEND=$BACKEND
 Environment=LITELLM=$LITELLM
 Environment=LITELLM_MODEL=$LITELLM_MODEL
+Environment=LITELLM_FALLBACKS=$LITELLM_FALLBACKS
 Environment=OLLAMA=$OLLAMA
 Environment=MODEL=$MODEL
 Environment=AGENT=$AGENT

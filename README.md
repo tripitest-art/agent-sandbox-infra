@@ -75,6 +75,10 @@ CTID=$(pvesh get /cluster/nextid) bash host-create.sh
 * Standard ist `BACKEND=litellm`: Der Worker nutzt den Alias `coder` (DeepSeek) über den
   LiteLLM-Proxy (LXC 113, `http://192.168.0.211:4000`) mit eigenem Virtual Key und Tagesbudget.
   `BACKEND=ollama bash sandbox/install.sh` schaltet zurück auf Qwen3-Coder am Gaming-PC.
+* Vor jedem Lauf prüft der Worker mit einer Mini-Anfrage (45 s), ob `coder` antwortet. Sonst
+  nimmt er das erste Ausweichmodell aus `LITELLM_FALLBACKS` (Vorgabe `coder-free` = Codestral,
+  kostenlos), und die Worker-Zeile im PR nennt dieses Modell. Antwortet keins, wartet er, ohne
+  einen Versuch zu verbrauchen. Beispiel: `LITELLM_FALLBACKS=coder-free,coder-glm bash sandbox/install.sh`.
 * Webhook-ID in HA `secrets.yaml` anlegen (siehe [`homeassistant/README.md`](homeassistant/README.md)); kein MQTT-Login mehr.
 * `bash sandbox/install.sh` im Container fragt fehlende Geheimnisse verdeckt ab
   (LiteLLM-Key → `/etc/qwen-worker.env`, Webhook-URL → `/etc/qwen-webhook.env`, beide 600)
