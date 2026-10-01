@@ -115,3 +115,45 @@ def test_step_caps_pending():
     pending = q.step(f, [], "u", sender=lambda u, lines: False)
     assert sum(len(x) + 1 for x in pending) <= q.MAX_CHARS
     assert pending and pending[-1] == "y" * 900   # die neuesten Zeilen bleiben
+
+
+# --- Webhook-ID oder URL; das Geheimnis erscheint nie in Ausgaben ---
+
+SECRET = "3a" * 24   # Platzhalter in der Form einer echten ID (48 Hex-Zeichen)
+
+
+def test_webhook_url_accepts_bare_id():
+    assert q.webhook_url(SECRET, "http://ha.test:8123/") == f"http://ha.test:8123/api/webhook/{SECRET}"
+
+
+def test_webhook_url_accepts_full_url():
+    url = f"http://192.168.0.148:8123/api/webhook/{SECRET}"
+    assert q.webhook_url(f"  {url}\n") == url
+
+
+@pytest.mark.parametrize("value", ["", "kurz", "ftp://x/api/webhook/abc", "http://ha.test:8123/", "id mit leerzeichen 1234567890"])
+def test_webhook_url_rejects_invalid(value):
+    assert q.webhook_url(value) is None
+
+
+def test_main_invalid_value_does_not_print_it(monkeypatch, capsys):
+    monkeypatch.setenv("HA_WEBHOOK_URL", "geheim " + SECRET)   # ungültig (Leerzeichen)
+    with pytest.raises(SystemExit) as exc:
+        q.main()
+    out = capsys.readouterr()
+    assert SECRET not in str(exc.value) + out.out + out.err
+
+
+def test_send_error_does_not_print_url(capsys):
+    def opener(req, timeout):
+        raise ValueError(f"unknown url type: {req.full_url}")   # so sah der Fehler am 01.10. aus
+    assert q.send(f"http://ha.test/api/webhook/{SECRET}", ["x"], opener=opener) is False
+    out = capsys.readouterr()
+    assert SECRET not in out.out + out.err
+    assert "ValueError" in out.err
+
+
+def test_send_bad_url_is_caught_without_leak(capsys):
+    assert q.send(SECRET, ["x"]) is False        # keine URL -> Request wirft, wird abgefangen
+    out = capsys.readouterr()
+    assert SECRET not in out.out + out.err
