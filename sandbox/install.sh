@@ -69,8 +69,8 @@ if [ "$BACKEND" = litellm ]; then
   ask_secret /etc/qwen-worker.env LITELLM_API_KEY "LiteLLM-Key »worker« (aus Vaultwarden)" || secrets_ok=0
 fi
 # Nur für das Live-Log im HA-Dashboard; fehlt sie, läuft der Worker trotzdem.
-ask_secret /etc/qwen-webhook.env HA_WEBHOOK_URL \
-  "HA-Webhook-URL (http://192.168.0.148:8123/api/webhook/<ID aus Vaultwarden>)" || true
+# Es reicht die Webhook-ID; eine volle URL http://<HA>:8123/api/webhook/<ID> geht auch.
+ask_secret /etc/qwen-webhook.env HA_WEBHOOK_URL "HA-Webhook-ID (aus Vaultwarden)" || true
 
 echo "== OpenCode"
 [ -x /root/.opencode/bin/opencode ] || curl -fsSL https://opencode.ai/install | bash
