@@ -26,6 +26,9 @@ def _repo_workdir(monkeypatch, tmp_path):
     # Die PR-Vorlage liest der Taktgeber aus WORKDIR; in Tests ist das dieses Repo.
     monkeypatch.setattr(w, "WORKDIR", str(REPO_ROOT))
     monkeypatch.setattr(w, "STATE", str(tmp_path / "state-default.json"))
+    # use_model() ändert diese Globalen; nach jedem Test zurück auf die Vorgabe.
+    monkeypatch.setattr(w, "WORKER", w.WORKER)
+    monkeypatch.setattr(w, "ACTIVE_MODEL", w.LITELLM_MODEL)
 
     def no_network(url, timeout):   # nie den echten Proxy fragen; wie „kein Proxy“
         raise urllib.error.URLError("kein Netz im Test")
@@ -528,6 +531,7 @@ def _litellm(monkeypatch, tmp_path, up=True):
     monkeypatch.setattr(w, "pc_status", lambda: pytest.fail("PC-Status gefragt, obwohl LiteLLM aktiv"))
     monkeypatch.setattr(w, "ollama_free", lambda *a, **k: pytest.fail("Ollama gefragt, obwohl LiteLLM aktiv"))
     monkeypatch.setattr(w, "litellm_ready", lambda: None if up else "LiteLLM nicht erreichbar")
+    monkeypatch.setattr(w, "probe_model", lambda model: None)
 
 
 def test_main_litellm_runs_job_without_pc(monkeypatch, tmp_path, capsys):
@@ -566,3 +570,119 @@ def test_agent_cmd_opencode_litellm(monkeypatch):
     monkeypatch.setattr(w, "AGENT", "opencode")
     monkeypatch.setattr(w, "BACKEND", "litellm")
     assert w.agent_cmd("tu was")[:4] == ["opencode", "run", "-m", "litellm/coder"]
+
+
+def test_agent_cmd_qwen_litellm_passes_model(monkeypatch):
+    monkeypatch.setattr(w, "AGENT", "qwen-code")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    cmd = w.agent_cmd("tu was")
+    assert cmd[-2:] == ["-m", "coder"]
+    w.use_model("coder-free")
+    assert w.agent_cmd("tu was")[-2:] == ["-m", "coder-free"]
+    monkeypatch.setattr(w, "AGENT", "opencode")
+    assert w.agent_cmd("tu was")[:4] == ["opencode", "run", "-m", "litellm/coder-free"]
+
+
+# --- Probe vor dem Lauf: hängt DeepSeek, nimmt der Worker das Ausweichmodell ---
+
+class _Resp:
+    def __init__(self, data): self.data = data
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self, *a): return json.dumps(self.data).encode()
+
+
+def test_probe_model_ok_sends_small_request_without_fallback(monkeypatch):
+    monkeypatch.setattr(w, "LITELLM", "http://litellm.test:4000")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-geheim")
+    seen = {}
+
+    def opener(req, timeout):
+        seen.update(url=req.full_url, body=json.loads(req.data), auth=req.get_header("Authorization"),
+                    timeout=timeout)
+        return _Resp({"choices": [{"message": {"content": "ok"}}]})
+    monkeypatch.setattr(w.urllib.request, "urlopen", opener)
+    assert w.probe_model("coder") is None
+    assert seen["url"] == "http://litellm.test:4000/v1/chat/completions"
+    assert seen["body"]["model"] == "coder" and seen["body"]["disable_fallbacks"] is True
+    assert seen["body"]["stream"] is False and seen["body"]["max_tokens"] <= 16
+    assert seen["auth"] == "Bearer sk-geheim" and seen["timeout"] == w.PROBE_TIMEOUT
+
+
+@pytest.mark.parametrize("error, reason", [
+    (urllib.error.HTTPError("u", 429, "zu viel", {}, io.BytesIO(b"")), "HTTP 429"),
+    (TimeoutError("timed out"), "TimeoutError"),
+])
+def test_probe_model_failures(monkeypatch, error, reason):
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-geheim")
+
+    def opener(req, timeout):
+        raise error
+    monkeypatch.setattr(w.urllib.request, "urlopen", opener)
+    got = w.probe_model("coder")
+    assert got == reason and "sk-geheim" not in got
+
+
+def test_probe_model_empty_answer(monkeypatch):
+    monkeypatch.setattr(w.urllib.request, "urlopen", lambda req, timeout: _Resp({"error": "x"}))
+    assert w.probe_model("coder") == "leere Antwort"
+
+
+def test_choose_model_order(monkeypatch):
+    monkeypatch.setattr(w, "LITELLM_FALLBACKS", ["coder-free", "coder-glm"])
+    asked = []
+    answers = {"coder": "TimeoutError", "coder-free": "HTTP 429", "coder-glm": None}
+    monkeypatch.setattr(w, "probe_model", lambda m: asked.append(m) or answers[m])
+    assert w.choose_model() == ("coder-glm", ["coder: TimeoutError", "coder-free: HTTP 429"])
+    assert asked == ["coder", "coder-free", "coder-glm"]
+
+
+def test_choose_model_primary_ok_asks_only_once(monkeypatch):
+    asked = []
+    monkeypatch.setattr(w, "probe_model", lambda m: asked.append(m) or None)
+    assert w.choose_model() == ("coder", [])
+    assert asked == ["coder"]
+
+
+def test_main_litellm_falls_back_and_names_model(monkeypatch, tmp_path, capsys):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "LITELLM_FALLBACKS", ["coder-free"])
+    monkeypatch.setattr(w, "probe_model", lambda m: "TimeoutError" if m == "coder" else None)
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+    runs = []
+    monkeypatch.setattr(w, "run_agent", lambda prompt: runs.append((prompt, w.agent_cmd(prompt))) or 0)
+    assert w.main() == 0
+    prompt, cmd = runs[0]
+    assert "Worker: Codestral (LiteLLM coder-free)" in prompt and "DeepSeek" not in prompt
+    assert cmd[cmd.index("-m") + 1] in ("coder-free", "litellm/coder-free")
+    out = capsys.readouterr().out
+    assert "coder: TimeoutError – weiche auf coder-free aus." in out
+    assert "starte Qwen Code mit coder-free" in out
+    assert json.loads((tmp_path / "state.json").read_text())["issue102"] == 1
+
+
+def test_main_litellm_no_model_keeps_attempts(monkeypatch, tmp_path, capsys):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "LITELLM_FALLBACKS", ["coder-free"])
+    monkeypatch.setattr(w, "probe_model", lambda m: "TimeoutError")
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: pytest.fail("Lauf ohne Modell gestartet"))
+    assert w.main() == 0
+    assert w.main() == 0      # gleicher Zustand: nur eine Zeile
+    out = capsys.readouterr().out
+    assert out.count("kein Modell antwortet") == 1 and "Versuch zählt nicht" in out
+    assert "issue102" not in json.loads((tmp_path / "state.json").read_text())
+
+
+def test_main_litellm_without_work_does_not_probe(monkeypatch, tmp_path):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "gh", FakeGH())
+    monkeypatch.setattr(w, "probe_model", lambda m: pytest.fail("Probe ohne Arbeit"))
+    assert w.main() == 0
+
+
+def test_worker_names():
+    assert w.worker_name("coder") == "DeepSeek (LiteLLM coder)"
+    assert w.worker_name("coder-glm") == "GLM 5.3 Flash (LiteLLM coder-glm)"
+    assert w.worker_name("neu") == "neu (LiteLLM)"

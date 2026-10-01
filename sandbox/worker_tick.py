@@ -22,6 +22,11 @@ Modell (BACKEND): `ollama` = Qwen3-Coder auf dem Gaming-PC über den WoL-Proxy (
 `litellm` = Modell-Alias LITELLM_MODEL (Vorgabe `coder`, DeepSeek) über den LiteLLM-Proxy
 (LXC 113). Dann gibt es keine PC-Prüfung und kein Wecken; der Takt prüft nur, ob LiteLLM
 antwortet. Den Key (LITELLM_API_KEY) liest systemd aus /etc/qwen-worker.env, nie aus dem Repo.
+Vor jedem Lauf schickt der Takt eine Mini-Anfrage an LITELLM_MODEL. Antwortet es nicht binnen
+PROBE_TIMEOUT, nimmt er das erste Ausweichmodell aus LITELLM_FALLBACKS, das antwortet; die
+Worker-Zeile nennt dann dieses Modell. Antwortet keins, wartet er, ohne einen Versuch zu zählen.
+LiteLLMs eigener Fallback reicht nicht: Bei der DeepSeek-Störung am 01.10. kam HTTP 200, dann
+hing der Stream ohne Daten; stream_timeout griff nicht.
 """
 import json
 import os
@@ -29,6 +34,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 REPO = "tripitest-art/sc-digger"
@@ -42,8 +48,24 @@ OWNER = "tripitest-art"
 BACKEND = os.environ.get("BACKEND", "ollama")   # oder "litellm"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "coder")
+# Ausweichmodelle (Aliase im LiteLLM-Proxy, der Key »worker« muss sie dürfen), durch Komma getrennt.
+LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "coder-free").split(",") if m.strip()]
+PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT", "45"))   # Sekunden je Probe
 # Steht als „Worker: …“ im PR; die Review-Regel (andere Modellfamilie) hängt daran.
-WORKER = os.environ.get("WORKER", "DeepSeek (LiteLLM coder)" if BACKEND == "litellm" else "Qwen3-Coder 30B")
+WORKER_NAMES = {
+    "coder": "DeepSeek (LiteLLM coder)",
+    "coder-pro": "DeepSeek V4 Pro (LiteLLM coder-pro)",
+    "coder-free": "Codestral (LiteLLM coder-free)",
+    "coder-glm": "GLM 5.3 Flash (LiteLLM coder-glm)",
+}
+
+
+def worker_name(model: str) -> str:
+    return WORKER_NAMES.get(model, f"{model} (LiteLLM)")
+
+
+WORKER = os.environ.get("WORKER", worker_name(LITELLM_MODEL) if BACKEND == "litellm" else "Qwen3-Coder 30B")
+ACTIVE_MODEL = LITELLM_MODEL   # BACKEND=litellm: Alias dieses Laufs, nach der Probe ggf. ein Ausweichmodell
 STATE = "/root/worker-state.json"
 MAX_TRIES = 2               # Versuche je Auftrag, danach liegt er bei Stephan
 DONE = "erledigt"           # Schlüssel in STATE: angekommene Nacharbeiten, nicht wiederholen
@@ -322,11 +344,14 @@ def warn_text(key: str, pr_no: int, body: str | None, issue_no: int) -> None:
 
 def agent_cmd(prompt: str) -> list[str]:
     if AGENT == "opencode":
-        model = f"litellm/{LITELLM_MODEL}" if BACKEND == "litellm" else f"ollama/{MODEL}"
+        model = f"litellm/{ACTIVE_MODEL}" if BACKEND == "litellm" else f"ollama/{MODEL}"
         return ["opencode", "run", "-m", model, prompt]
     # stream-json statt text: Sonst zeigt das Log nur den Schlussbericht, nicht die Befehle.
-    return ["qwen", "-p", prompt, "--yolo", "--output-format", "stream-json",
-            "--max-wall-time", f"{RUN_TIMEOUT // 60}m"]
+    cmd = ["qwen", "-p", prompt, "--yolo", "--output-format", "stream-json",
+           "--max-wall-time", f"{RUN_TIMEOUT // 60}m"]
+    if BACKEND == "litellm":
+        cmd += ["-m", ACTIVE_MODEL]   # muss in ~/.qwen/settings.json (modelProviders) stehen
+    return cmd
 
 
 def _clip(text: str, lines: int = TOOL_OUTPUT_LINES) -> str:
@@ -423,6 +448,51 @@ def litellm_ready() -> str | None:
         return "LiteLLM nicht erreichbar"
 
 
+def probe_model(model: str) -> str | None:
+    """None, wenn `model` über LiteLLM binnen PROBE_TIMEOUT antwortet, sonst der Grund.
+
+    Ohne Streaming: Dann schickt LiteLLM erst mit der fertigen Antwort Daten, und der Timeout
+    greift auch, wenn der Anbieter die Verbindung nur offen hält. disable_fallbacks, damit die
+    Probe das Modell selbst prüft und nicht still dessen Fallback. Der Key erscheint nie im Log.
+    """
+    body = json.dumps({"model": model, "max_tokens": 16, "stream": False, "disable_fallbacks": True,
+                       "messages": [{"role": "user", "content": "Antworte nur mit: ok"}]}).encode()
+    req = urllib.request.Request(
+        f"{LITELLM}/v1/chat/completions", data=body, method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {os.environ.get('LITELLM_API_KEY', '')}"})
+    try:
+        with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        return f"HTTP {e.code}"
+    except Exception as e:  # Timeout, Verbindung, kaputtes JSON: nur der Typ
+        return type(e).__name__
+    return None if isinstance(data, dict) and data.get("choices") else "leere Antwort"
+
+
+def choose_model() -> tuple[str | None, list[str]]:
+    """Erstes Modell aus LITELLM_MODEL + LITELLM_FALLBACKS, das antwortet, und die Fehlschläge davor."""
+    failed = []
+    for model in dict.fromkeys([LITELLM_MODEL, *LITELLM_FALLBACKS]):
+        reason = probe_model(model)
+        if reason is None:
+            return model, failed
+        failed.append(f"{model}: {reason}")
+    return None, failed
+
+
+def use_model(model: str) -> None:
+    """Modell für diesen Lauf; die Worker-Zeile nennt bei einem Ausweichmodell dieses."""
+    global ACTIVE_MODEL, WORKER
+    if model != ACTIVE_MODEL:
+        ACTIVE_MODEL, WORKER = model, worker_name(model)
+
+
+def find_job(state: dict):
+    return rework_job(frozenset(state.get(DONE, []))) or text_fix_job() or issue_job()
+
+
 def log_on_change(state: dict, slot: str, what: str, msg: str) -> bool:
     """Zustandsmeldung nur beim Wechsel; sonst stünde sie alle 5 min im Log."""
     if state.get(slot) == what:
@@ -493,7 +563,7 @@ def main() -> int:
             return 0
         if log_on_change(state, LAST_PC, "bereit", "Gaming-PC an, Chat aktiv: suche Arbeit."):
             state.pop(LAST_WORK, None)   # Ergebnis der ersten Suche wieder zeigen
-    job = rework_job(frozenset(state.get(DONE, []))) or text_fix_job() or issue_job()
+    job = find_job(state)
     if not job:
         log_on_change(state, LAST_WORK, "keine", "Keine Arbeit.")
         return 0
@@ -504,6 +574,25 @@ def main() -> int:
     if BACKEND != "litellm" and not ollama_free(
             status, say=lambda m: log_on_change(state, LAST_WORK, f"{key} belegt", m)):
         return 0
+    if BACKEND == "litellm":
+        # Erst hier prüfen: ohne Arbeit kostet der Takt keine Anfrage. Vor dem Zähler, damit ein
+        # gestörter Anbieter keine Versuche verbraucht.
+        model, failed = choose_model()
+        if model is None:
+            log_on_change(state, LAST_WORK, f"{key} kein Modell",
+                          f"{key}: kein Modell antwortet ({'; '.join(failed)}), warte. Versuch zählt nicht.")
+            return 0
+        if failed:
+            log(f"{'; '.join(failed)} – weiche auf {model} aus.")
+        if model != ACTIVE_MODEL:
+            use_model(model)
+            # Die Aufträge enthalten „Worker: …“; mit dem neuen Namen neu bauen.
+            job = find_job(state)
+            if not job:
+                return 0
+            key, task, pr_no, before = job
+            if state.get(key, 0) >= MAX_TRIES:
+                return 0
     state[LAST_WORK] = key
 
     state[key] = state.get(key, 0) + 1
@@ -521,6 +610,8 @@ def main() -> int:
               "4. ESKALATION: Arbeite ohne Rückfragen. Kommst du nicht weiter, schreibe das Problem als Kommentar ins Issue bzw. den PR und beende deine Arbeit.\n\n"
               "Nutze gh für alle GitHub-Schritte.")
     name = "OpenCode" if AGENT == "opencode" else "Qwen Code"
+    if BACKEND == "litellm":
+        name += f" mit {ACTIVE_MODEL}"
     log(f"{key} (Versuch {state[key]}): starte {name}.")
     rc = run_agent(prompt)
     if rc == 124:
