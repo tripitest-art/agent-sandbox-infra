@@ -11,8 +11,8 @@
 # Der GitHub-Zugang wird hier bewusst NICHT eingerichtet: den Token gibt Stephan selbst
 # verdeckt ein (README, Schritt 3). Das Skript prüft nur, ob er da ist.
 # Geheimnisse stehen nie im Repo (es ist öffentlich): Der LiteLLM-Key kommt nach
-# /etc/qwen-worker.env, das MQTT-Passwort nach /etc/qwen-mqtt.env (beide 600). Fehlen sie,
-# fragt das Skript verdeckt danach (nur im Terminal).
+# /etc/qwen-worker.env, die Webhook-URL für das Live-Log nach /etc/qwen-webhook.env (beide 600).
+# Fehlen sie, fragt das Skript verdeckt danach (nur im Terminal).
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # sandbox/ dieses Repos
@@ -31,7 +31,7 @@ export DEBIAN_FRONTEND=noninteractive
 echo "== Pakete"
 apt-get update -qq
 apt-get install -y -qq git curl ca-certificates python3 python3-venv python3-pip ffmpeg \
-  libsndfile1 libchromaprint-tools mosquitto-clients >/dev/null
+  libsndfile1 libchromaprint-tools >/dev/null
 # gh aus dem Paketarchiv von GitHub, nicht von Debian: Debians 2.23 fragt bei `gh pr edit` und
 # `gh pr view` noch „Projects (classic)“ ab und bricht mit einem GraphQL-Fehler ab. Qwen hielt
 # das für Erfolg; der PR-Text von #103 kam zweimal nicht an.
@@ -68,7 +68,9 @@ secrets_ok=1
 if [ "$BACKEND" = litellm ]; then
   ask_secret /etc/qwen-worker.env LITELLM_API_KEY "LiteLLM-Key »worker« (aus Vaultwarden)" || secrets_ok=0
 fi
-ask_secret /etc/qwen-mqtt.env MQTT_PASS "MQTT-Passwort für Benutzer LLM" || true   # nur Log-Stream
+# Nur für das Live-Log im HA-Dashboard; fehlt sie, läuft der Worker trotzdem.
+ask_secret /etc/qwen-webhook.env HA_WEBHOOK_URL \
+  "HA-Webhook-URL (http://192.168.0.148:8123/api/webhook/<ID aus Vaultwarden>)" || true
 
 echo "== OpenCode"
 [ -x /root/.opencode/bin/opencode ] || curl -fsSL https://opencode.ai/install | bash
@@ -184,15 +186,24 @@ OnUnitActiveSec=$TAKT
 WantedBy=timers.target
 UNIT
 
-echo "== Log-Stream nach Home Assistant (MQTT)"
-install -m 644 "$SCRIPT_DIR/systemd/qwen-mqtt.service" /etc/systemd/system/qwen-mqtt.service
-systemctl daemon-reload
-if [ -f /etc/qwen-mqtt.env ]; then
-  systemctl enable qwen-mqtt.service >/dev/null; systemctl restart qwen-mqtt.service
-  echo "qwen-mqtt: $(systemctl is-active qwen-mqtt.service)"
-else
+echo "== Log-Stream nach Home Assistant (Webhook)"
+# Früher MQTT: Der Login konnte am Broker alles lesen/schreiben (Zendure, Frigate, Zigbee);
+# die ACL der Mosquitto-App greift nicht. Alten Dienst und sein Passwort entfernen.
+if [ -e /etc/systemd/system/qwen-mqtt.service ] || [ -e /etc/qwen-mqtt.env ]; then
   systemctl disable --now qwen-mqtt.service >/dev/null 2>&1 || true
-  echo "qwen-mqtt: aus (/etc/qwen-mqtt.env fehlt)"
+  rm -f /etc/systemd/system/qwen-mqtt.service
+  [ -e /etc/qwen-mqtt.env ] && shred -u /etc/qwen-mqtt.env
+  echo "qwen-mqtt: entfernt (inkl. /etc/qwen-mqtt.env)"
+fi
+install -m 755 "$SCRIPT_DIR/qwen_webhook.py" /root/qwen_webhook.py
+install -m 644 "$SCRIPT_DIR/systemd/qwen-webhook.service" /etc/systemd/system/qwen-webhook.service
+systemctl daemon-reload
+if [ -f /etc/qwen-webhook.env ] && grep -q '^HA_WEBHOOK_URL=.' /etc/qwen-webhook.env; then
+  systemctl enable qwen-webhook.service >/dev/null; systemctl restart qwen-webhook.service
+  echo "qwen-webhook: $(systemctl is-active qwen-webhook.service)"
+else
+  systemctl disable --now qwen-webhook.service >/dev/null 2>&1 || true
+  echo "qwen-webhook: aus (/etc/qwen-webhook.env fehlt)"
 fi
 
 echo "== Prüfung"

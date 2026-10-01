@@ -19,18 +19,23 @@ sensor:
       - last_wake
       - active_requests
 
-# 2. MQTT-Trigger-Sensor für das Live-Log (umgeht das 255-Zeichen-Limit via Attribut)
+# 2. Webhook-Trigger-Sensor für das Live-Log (umgeht das 255-Zeichen-Limit via Attribut).
+#    Die Sandbox schickt neue Zeilen per POST {"lines": "..."} (sandbox/qwen_webhook.py).
+#    Webhook-ID nur in secrets.yaml: qwen_worker_webhook_id: "<zufällig, z. B. openssl rand -hex 24>"
 template:
-  - trigger:
-      - platform: mqtt
-        topic: "sc_digger/worker/log"
+  - triggers:
+      - trigger: webhook
+        webhook_id: !secret qwen_worker_webhook_id
+        allowed_methods: [POST]
+        local_only: true
     sensor:
       - name: "Qwen Worker Log"
+        unique_id: qwen_worker_log
         state: "OK"
         attributes:
           log: >
             {% set current_log = state_attr('sensor.qwen_worker_log', 'log') | default('', true) %}
-            {% set new_log = current_log ~ '\n' ~ trigger.payload %}
+            {% set new_log = current_log ~ '\n' ~ (trigger.json.lines | default('')) %}
             {{ new_log[-2000:] }}
 
 # 3. Steuerungsbefehle

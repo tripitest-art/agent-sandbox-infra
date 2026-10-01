@@ -10,8 +10,8 @@
 flowchart TD
     subgraph Proxmox["Proxmox VE Server"]
         LXC["Debian 12 LXC (agent-sandbox)<br>• Taktgeber (worker_tick.py)<br>• OpenCode / Qwen-Code CLI<br>• systemd Timer (alle 5 min)"]
-        MQTT_PUB["mosquitto_pub Service<br>(Streamt worker.log)"]
-        LXC -->|tail -F worker.log| MQTT_PUB
+        WEBHOOK["qwen-webhook Service<br>(sendet neue Zeilen aus worker.log)"]
+        LXC -->|folgt worker.log| WEBHOOK
     end
 
     subgraph LLM_Host["Gaming-PC (LLM Server)"]
@@ -27,14 +27,14 @@ flowchart TD
     end
 
     subgraph SmartHome["Home Assistant"]
-        HA["Home Assistant OS (:8123)<br>• Mosquitto MQTT Broker<br>• REST-Sensor (:11434/proxy/status)<br>• Live-Log Dashboard Card"]
+        HA["Home Assistant OS (:8123)<br>• Webhook-Trigger-Sensor (Live-Log)<br>• REST-Sensor (:11434/proxy/status)<br>• Live-Log Dashboard Card"]
     end
 
     LXC -->|1. Holt Issues / PRs| REPO
     LXC -->|2. HTTP Request an Ollama| WOL_PROXY
     WOL_PROXY -.->|Magic Packet bei Bedarf| LLM_Host
     LXC -->|3. Erstellt PRs & Commits| REPO
-    MQTT_PUB -->|MQTT Port 1883| HA
+    WEBHOOK -->|HTTP POST Webhook :8123| HA
     HA -->|REST Polling| WOL_PROXY
 ```
 
@@ -45,9 +45,9 @@ flowchart TD
 | Verzeichnis | Beschreibung |
 |---|---|
 | [`proxmox/`](proxmox/) | Shell-Skripte zur Erstellung des unprivilegierten Debian 12 LXC-Containers auf Proxmox VE. |
-| [`sandbox/`](sandbox/) | Setup-Skripte (`install.sh`), der autonome Taktgeber (`worker_tick.py`) und systemd-Units (`qwen-worker`, `qwen-mqtt`). |
+| [`sandbox/`](sandbox/) | Setup-Skripte (`install.sh`), der autonome Taktgeber (`worker_tick.py`) und systemd-Units (`qwen-worker`, `qwen-webhook`). |
 | [`hardware/`](hardware/) | GPU-Hardware-Tuning für AMD RDNA2 (LACT, 2100 MHz, −90 mV, 255 W) mit Messwerten und Ollama-Service Overrides. |
-| [`homeassistant/`](homeassistant/) | YAML-Konfigurationen für REST- und MQTT-Sensoren sowie die Lovelace-Dashboard-Karte. |
+| [`homeassistant/`](homeassistant/) | YAML-Konfigurationen für REST- und Webhook-Sensoren sowie die Lovelace-Dashboard-Karte. |
 | [`tests/`](tests/) | Unit-Tests für den Taktgeber (`test_worker_tick.py`), läuft ohne Netzwerk mit Mocks. |
 
 ---
@@ -75,10 +75,10 @@ CTID=$(pvesh get /cluster/nextid) bash host-create.sh
 * Standard ist `BACKEND=litellm`: Der Worker nutzt den Alias `coder` (DeepSeek) über den
   LiteLLM-Proxy (LXC 113, `http://192.168.0.211:4000`) mit eigenem Virtual Key und Tagesbudget.
   `BACKEND=ollama bash sandbox/install.sh` schaltet zurück auf Qwen3-Coder am Gaming-PC.
-* MQTT-User `LLM` im Home Assistant anlegen (siehe [`homeassistant/README.md`](homeassistant/README.md)).
+* Webhook-ID in HA `secrets.yaml` anlegen (siehe [`homeassistant/README.md`](homeassistant/README.md)); kein MQTT-Login mehr.
 * `bash sandbox/install.sh` im Container fragt fehlende Geheimnisse verdeckt ab
-  (LiteLLM-Key → `/etc/qwen-worker.env`, MQTT-Passwort → `/etc/qwen-mqtt.env`, beide 600)
-  und richtet `qwen-mqtt.service` ein. **Keine Geheimnisse ins Repo** – es ist öffentlich.
+  (LiteLLM-Key → `/etc/qwen-worker.env`, Webhook-URL → `/etc/qwen-webhook.env`, beide 600)
+  und richtet `qwen-webhook.service` ein (ein alter `qwen-mqtt.service` wird entfernt). **Keine Geheimnisse ins Repo** – es ist öffentlich.
 * YAML-Snippets aus [`homeassistant/`](homeassistant/) in die `configuration.yaml` und das Dashboard einfügen.
 
 ---
