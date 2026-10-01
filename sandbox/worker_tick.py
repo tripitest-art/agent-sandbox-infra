@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Taktgeber für den Qwen-Worker in der Sandbox (CT 112), läuft per systemd-Timer.
-Eingerichtet von sandbox/install.sh; Anleitung: sandbox/README.md.
+Eingerichtet von sandbox/install.sh; Anleitung: README.md.
 
 Pro Takt höchstens ein Auftrag, in dieser Reihenfolge:
 1. Nacharbeit: offener PR eines agent-qwen-Issues, dessen neuestes Review „Änderungen nötig“
