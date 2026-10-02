@@ -7,6 +7,7 @@
 #   MODEL=qwen3-coder-64k OLLAMA=http://… bash …       # andere Werte als die Vorgaben
 #   AGENT=opencode bash …                              # OpenCode statt Qwen Code
 #   WAKE_PC=1 TAKT=30min bash …                        # PC bei Arbeit wecken, seltener schauen
+#   REVIEW_POST=1 bash …                               # Review-Takt postet Reviews (Vorgabe: nur Entwurf)
 #
 # Der GitHub-Zugang wird hier bewusst NICHT eingerichtet: den Token gibt Stephan selbst
 # verdeckt ein (README, Schritt 3). Das Skript prüft nur, ob er da ist.
@@ -29,6 +30,12 @@ AGENT=${AGENT:-qwen-code}                       # oder opencode
 TAKT=${TAKT:-5min}                              # so oft sucht der Worker Arbeit
 WAKE_PC=${WAKE_PC:-0}                           # 1: Gaming-PC bei Arbeit per WoL wecken
 QWEN_CODE_VERSION=${QWEN_CODE_VERSION:-0.24.7}  # fest: ein Update soll bewusst passieren
+# Review-Takt (review_tick.py): Entwurf ohne Posten, solange REVIEW_POST=0
+REVIEW_POST=${REVIEW_POST:-0}                   # 1: Review als Kommentar auf GitHub posten
+REVIEW_TAKT=${REVIEW_TAKT:-10min}               # so oft sucht der Review-Takt einen PR
+REVIEW_MODEL=${REVIEW_MODEL:-coder-glm}         # LiteLLM-Alias (GLM, andere Familie als der Worker)
+REVIEW_MODEL_BIG=${REVIEW_MODEL_BIG:-longctx-lite}   # für sehr große Diffs
+REVIEWER_NAME=${REVIEWER_NAME:-GLM}             # steht als „Reviewer: …“ im Review
 export DEBIAN_FRONTEND=noninteractive
 # Alle LiteLLM-Aliase, die der Worker nutzen kann (Hauptmodell zuerst, ohne Doppelte)
 LITELLM_ALL=$(printf '%s\n' "$LITELLM_MODEL" ${LITELLM_FALLBACKS//,/ } | awk 'NF && !seen[$0]++')
@@ -76,6 +83,10 @@ fi
 # Nur für das Live-Log im HA-Dashboard; fehlt sie, läuft der Worker trotzdem.
 # Es reicht die Webhook-ID; eine volle URL http://<HA>:8123/api/webhook/<ID> geht auch.
 ask_secret /etc/qwen-webhook.env HA_WEBHOOK_URL "HA-Webhook-ID (aus Vaultwarden)" || true
+# Eigener, eingeschränkter LiteLLM-Key nur für den Review-Takt (nur REVIEW_MODEL/REVIEW_MODEL_BIG).
+# Fehlt er, bleibt der Review-Takt aus; der Worker läuft trotzdem.
+review_key=0
+ask_secret /etc/qwen-reviewer.env LITELLM_REVIEW_KEY "LiteLLM-Key »reviewer« (aus Vaultwarden)" && review_key=1 || true
 
 echo "== OpenCode"
 [ -x /root/.opencode/bin/opencode ] || curl -fsSL https://opencode.ai/install | bash
@@ -194,6 +205,45 @@ OnUnitActiveSec=$TAKT
 [Install]
 WantedBy=timers.target
 UNIT
+
+echo "== Review-Takt"
+install -m 755 "$SCRIPT_DIR/review_tick.py" /root/review_tick.py
+cat > /etc/systemd/system/qwen-review.service <<UNIT
+[Unit]
+Description=Review-Takt: ein PR pro Takt (sandbox/review_tick.py)
+[Service]
+Type=oneshot
+Environment=HOME=/root
+# LITELLM_REVIEW_KEY (eigener Key »reviewer«); fehlt die Datei, tut der Takt nichts.
+EnvironmentFile=-/etc/qwen-reviewer.env
+Environment=LITELLM=$LITELLM
+Environment=REVIEW_MODEL=$REVIEW_MODEL
+Environment=REVIEW_MODEL_BIG=$REVIEW_MODEL_BIG
+Environment=REVIEWER_NAME=$REVIEWER_NAME
+Environment=REVIEW_POST=$REVIEW_POST
+Environment=LANG=C.UTF-8
+ExecStart=/usr/bin/flock -n /run/qwen-review.lock /usr/bin/python3 /root/review_tick.py
+StandardOutput=append:/root/worker.log
+StandardError=append:/root/worker.log
+UNIT
+cat > /etc/systemd/system/qwen-review.timer <<UNIT
+[Unit]
+Description=Review-Takt alle $REVIEW_TAKT
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=$REVIEW_TAKT
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+if [ "$review_key" = 1 ]; then
+  systemctl enable qwen-review.timer >/dev/null
+  systemctl restart qwen-review.timer
+  echo "Review-Takt: an (REVIEW_POST=$REVIEW_POST, $REVIEW_MODEL, alle $REVIEW_TAKT)"
+else
+  systemctl disable --now qwen-review.timer >/dev/null 2>&1 || true
+  echo "Review-Takt: aus (LITELLM_REVIEW_KEY fehlt in /etc/qwen-reviewer.env)"
+fi
 
 echo "== Log-Stream nach Home Assistant (Webhook)"
 # Früher MQTT: Der Login konnte am Broker alles lesen/schreiben (Zendure, Frigate, Zigbee);
