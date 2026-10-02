@@ -45,10 +45,10 @@ flowchart TD
 | Verzeichnis | Beschreibung |
 |---|---|
 | [`proxmox/`](proxmox/) | Shell-Skripte zur Erstellung des unprivilegierten Debian 12 LXC-Containers auf Proxmox VE. |
-| [`sandbox/`](sandbox/) | Setup-Skripte (`install.sh`), der autonome Taktgeber (`worker_tick.py`) und systemd-Units (`qwen-worker`, `qwen-webhook`). |
+| [`sandbox/`](sandbox/) | Setup-Skripte (`install.sh`), der autonome Taktgeber (`worker_tick.py`), der Review-Takt (`review_tick.py`) und systemd-Units (`qwen-worker`, `qwen-review`, `qwen-webhook`). |
 | [`hardware/`](hardware/) | GPU-Hardware-Tuning für AMD RDNA2 (LACT, 2100 MHz, −90 mV, 255 W) mit Messwerten und Ollama-Service Overrides. |
 | [`homeassistant/`](homeassistant/) | YAML-Konfigurationen für REST- und Webhook-Sensoren sowie die Lovelace-Dashboard-Karte. |
-| [`tests/`](tests/) | Unit-Tests für den Taktgeber (`test_worker_tick.py`), läuft ohne Netzwerk mit Mocks. |
+| [`tests/`](tests/) | Unit-Tests für Worker- und Review-Takt (`test_worker_tick.py`, `test_review_tick.py`), laufen ohne Netzwerk mit Mocks. |
 
 ---
 
@@ -90,6 +90,31 @@ CTID=$(pvesh get /cluster/nextid) bash host-create.sh
   (LiteLLM-Key → `/etc/qwen-worker.env`, Webhook-URL → `/etc/qwen-webhook.env`, beide 600)
   und richtet `qwen-webhook.service` ein (ein alter `qwen-mqtt.service` wird entfernt). **Keine Geheimnisse ins Repo** – es ist öffentlich.
 * YAML-Snippets aus [`homeassistant/`](homeassistant/) in die `configuration.yaml` und das Dashboard einfügen.
+
+### 5. Review-Takt (optional, Vorgabe: nur Entwurf)
+`review_tick.py` prüft die PRs des Workers, damit das Review nicht mehr von Hand in LibreChat
+angestoßen werden muss. Pro Takt (alle 10 min, `REVIEW_TAKT`) nimmt er höchstens einen offenen PR von
+`feature/issue-<N>` (Label `agent-qwen`, kein Fork-PR), dessen Checks fertig sind und für dessen
+aktuellen Commit es noch kein Review des Besitzers gibt.
+* **Ohne Werkzeuge:** Das Skript holt Issue, Dateiliste, Diff und Checks selbst und schickt sie als
+  reinen Text an `REVIEW_MODEL` (Vorgabe `coder-glm`, GLM; bei Diffs über ~90 000 Zeichen
+  `REVIEW_MODEL_BIG` = `longctx-lite`). Issue-, PR- und Diff-Texte sind fremder Input: Ein Modell mit
+  GitHub-Zugriff ließe sich damit steuern. Nur das Skript schreibt (ein Kommentar-Review, nie Approve oder Merge).
+* **Vom Skript, nicht vom Modell:** Teststatus (nur aus den Check-Runs), die Zeile
+  `Worker: … Reviewer: …` und die Regel „andere Modellfamilie“ (Worker und Reviewer aus derselben
+  Familie: kein Review). Rote Pflicht-Checks (`tests`, `acceptance-guard`, `CodeQL`) ergeben ohne Modellaufruf
+  „Änderungen nötig“. Regeln und Vorlage liest er bei jedem Lauf aus `sc-digger/main`
+  (`AGENTS.md`, Abschnitt Reviewer und Goldene Regeln, `skills/sc-digger-review/SKILL.md`).
+* **Grenzen:** Das Modell sieht nur den Diff, nicht den übrigen Code. Unbrauchbare Antworten werden
+  einmal wiederholt, danach meldet der Takt „bitte von Hand prüfen“. Nach zwei Reviews
+  „Änderungen nötig“ je PR liegt er bei Stephan (`MAX_ROUNDS`).
+* **Entwurf statt Posten (`REVIEW_POST=0`, Vorgabe):** Der Entwurf liegt in `/root/reviews/pr<N>-<sha>.md`,
+  eine Zeile `[review] PR #N: …` steht in `/root/worker.log` (geht per Webhook ins HA-Dashboard).
+  Mit `REVIEW_POST=1 bash sandbox/install.sh` postet er stattdessen; bei „Änderungen nötig“ startet danach die
+  Nacharbeit des Worker-Takts von selbst. Zum Nachholen bereits geprüfter PRs `/root/review-state.json` löschen.
+* **Eigener Key:** `install.sh` fragt `LITELLM_REVIEW_KEY` verdeckt ab (`/etc/qwen-reviewer.env`, 600). Der Key
+  `reviewer` in LiteLLM darf nur `REVIEW_MODEL` und `REVIEW_MODEL_BIG` und hat ein eigenes kleines Budget.
+  Ohne Key bleibt der Review-Takt aus, der Worker läuft weiter.
 
 ---
 

@@ -55,6 +55,7 @@ PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT", "45"))   # Sekunden je Pro
 WORKER_NAMES = {
     "coder": "DeepSeek (LiteLLM coder)",
     "coder-pro": "DeepSeek V4 Pro (LiteLLM coder-pro)",
+    "coder-fast": "DeepSeek (LiteLLM coder-fast, ohne Thinking)",
     "coder-or": "DeepSeek (LiteLLM coder-or, OpenRouter)",
     "coder-free": "Codestral (LiteLLM coder-free)",
     "coder-glm": "GLM 5.3 Flash (LiteLLM coder-glm)",
