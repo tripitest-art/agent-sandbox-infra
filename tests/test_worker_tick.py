@@ -686,3 +686,10 @@ def test_worker_names():
     assert w.worker_name("coder") == "DeepSeek (LiteLLM coder)"
     assert w.worker_name("coder-glm") == "GLM 5.3 Flash (LiteLLM coder-glm)"
     assert w.worker_name("neu") == "neu (LiteLLM)"
+
+
+def test_default_fallbacks_prefer_same_model_family():
+    # Fällt DeepSeek direkt aus, zuerst dasselbe Modell über OpenRouter, dann Codestral.
+    if "LITELLM_FALLBACKS" not in w.os.environ:
+        assert w.LITELLM_FALLBACKS == ["coder-or", "coder-free"]
+    assert w.worker_name("coder-or") == "DeepSeek (LiteLLM coder-or, OpenRouter)"
