@@ -21,7 +21,8 @@ BACKEND=${BACKEND:-litellm}                     # litellm (DeepSeek über LXC 11
 LITELLM=${LITELLM:-http://192.168.0.211:4000}
 LITELLM_MODEL=${LITELLM_MODEL:-coder}           # Alias im LiteLLM-Proxy
 # Ausweichmodelle, wenn LITELLM_MODEL die Probe vor dem Lauf nicht besteht (worker_tick.py)
-LITELLM_FALLBACKS=${LITELLM_FALLBACKS:-coder-free}
+# coder-or = dasselbe DeepSeek über OpenRouter (weicht dort auf andere Anbieter aus), dann Codestral
+LITELLM_FALLBACKS=${LITELLM_FALLBACKS:-coder-or,coder-free}
 OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
 AGENT=${AGENT:-qwen-code}                       # oder opencode
@@ -35,7 +36,7 @@ LITELLM_ALL=$(printf '%s\n' "$LITELLM_MODEL" ${LITELLM_FALLBACKS//,/ } | awk 'NF
 echo "== Pakete"
 apt-get update -qq
 apt-get install -y -qq git curl ca-certificates python3 python3-venv python3-pip ffmpeg \
-  libsndfile1 libchromaprint-tools >/dev/null
+  libsndfile1 libchromaprint-tools tmux >/dev/null   # tmux: install.sh übersteht geschlossene Konsole
 # gh aus dem Paketarchiv von GitHub, nicht von Debian: Debians 2.23 fragt bei `gh pr edit` und
 # `gh pr view` noch „Projects (classic)“ ab und bricht mit einem GraphQL-Fehler ab. Qwen hielt
 # das für Erfolg; der PR-Text von #103 kam zweimal nicht an.

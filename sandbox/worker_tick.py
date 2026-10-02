@@ -49,12 +49,13 @@ BACKEND = os.environ.get("BACKEND", "ollama")   # oder "litellm"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "coder")
 # Ausweichmodelle (Aliase im LiteLLM-Proxy, der Key »worker« muss sie dürfen), durch Komma getrennt.
-LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "coder-free").split(",") if m.strip()]
+LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "coder-or,coder-free").split(",") if m.strip()]
 PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT", "45"))   # Sekunden je Probe
 # Steht als „Worker: …“ im PR; die Review-Regel (andere Modellfamilie) hängt daran.
 WORKER_NAMES = {
     "coder": "DeepSeek (LiteLLM coder)",
     "coder-pro": "DeepSeek V4 Pro (LiteLLM coder-pro)",
+    "coder-or": "DeepSeek (LiteLLM coder-or, OpenRouter)",
     "coder-free": "Codestral (LiteLLM coder-free)",
     "coder-glm": "GLM 5.3 Flash (LiteLLM coder-glm)",
 }
