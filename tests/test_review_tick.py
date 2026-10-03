@@ -65,6 +65,32 @@ def test_parse_review_flags_inconsistent_or_unparsable():
     assert r.parse_review("Hier mein Review: alles gut")[0] is None
 
 
+def test_suspicious_output_accepts_normal_german_review():
+    assert r.suspicious_output(OK_REVIEW + "\n- Größe, Straße, über „Schnittstellen“ ✅ −8 %", {"completion_tokens": 900, "finish_reason": "stop"}) is None
+
+
+def test_suspicious_output_rejects_token_limit_and_garbage():
+    assert r.suspicious_output(OK_REVIEW, {"completion_tokens": r.MAX_TOKENS, "finish_reason": "stop"})
+    assert r.suspicious_output(OK_REVIEW, {"completion_tokens": 100, "finish_reason": "length"})
+    garbage = OK_REVIEW + "\n" + "正规 modular同等 tracking 报告链路 машины " * 5
+    assert r.suspicious_output(garbage, {"completion_tokens": 300, "finish_reason": "stop"})
+
+
+def test_garbage_after_valid_start_is_not_saved_as_review(monkeypatch, tmp_path):
+    """Regression 02.10.2026: Zeichensalat hinter „**Freigegeben**“ darf kein Entwurf werden."""
+    garbage = OK_REVIEW + "\n" + "正规 modular同等 tracking 报告链路 машины " * 20
+    monkeypatch.setattr(r, "gh_json", lambda *a, **k: [_pr()] if a[:2] == ("pr", "list") else
+                        ({"labels": [{"name": "agent-qwen"}]} if a[:2] == ("issue", "view") and "labels" in a else
+                         ({"files": []} if a[:2] == ("pr", "view") else {"number": 5, "title": "T", "body": "B"})))
+    monkeypatch.setattr(r, "gh_text", lambda *a, **k: "diff --git a/x b/x\n")
+    monkeypatch.setattr(r, "repo_file", lambda path: "## Goldene Regeln\nx\n### Reviewer\ny\n")
+    monkeypatch.setattr(r, "call_llm", lambda model, messages: (garbage, {"completion_tokens": r.MAX_TOKENS, "finish_reason": "length"}))
+    r.run_once()
+    state = json.loads(Path(r.STATE).read_text())
+    assert state["fehler"][f"pr7@{SHA}"] == 1
+    assert not list(Path(r.DRAFT_DIR).glob("*.md")) if Path(r.DRAFT_DIR).exists() else True
+
+
 def test_worker_family_and_same_family():
     assert r.model_family("DeepSeek (LiteLLM coder-fast)") == "deepseek"
     assert r.model_family("GLM 5.3 Flash (LiteLLM coder-glm)") == "glm"
