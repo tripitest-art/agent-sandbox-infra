@@ -45,6 +45,7 @@ DRAFT_DIR = os.environ.get("REVIEW_DRAFTS", "/root/reviews")
 MAX_ROUNDS = 2              # Reviews „Änderungen nötig“ je PR, danach liegt er bei Stephan
 BIG_DIFF_CHARS = 90_000     # darüber: REVIEW_MODEL_BIG
 MAX_DIFF_CHARS = 400_000    # darüber: nicht prüfen, an Stephan melden
+MAX_TOKENS = 6000           # Obergrenze der Modellantwort; erreicht sie das, gilt sie als unbrauchbar
 LLM_TIMEOUT = float(os.environ.get("REVIEW_LLM_TIMEOUT", "420"))
 REQUIRED_CHECKS = ("tests", "acceptance-guard", "CodeQL")
 
@@ -222,11 +223,26 @@ def build_messages(issue: dict, pr: dict, files: list[dict], diff: str, checks: 
 def call_llm(model: str, messages: list[dict]) -> tuple[str, dict]:
     req = urllib.request.Request(
         f"{LITELLM}/v1/chat/completions",
-        data=json.dumps({"model": model, "messages": messages, "max_tokens": 6000}).encode(),
+        data=json.dumps({"model": model, "messages": messages, "max_tokens": MAX_TOKENS}).encode(),
         headers={"Authorization": f"Bearer {REVIEW_KEY}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
         data = json.load(resp)
-    return (data["choices"][0]["message"].get("content") or "").strip(), data.get("usage") or {}
+    choice = data["choices"][0]
+    usage = dict(data.get("usage") or {}, finish_reason=choice.get("finish_reason"))
+    return (choice["message"].get("content") or "").strip(), usage
+
+
+def suspicious_output(text: str, usage: dict) -> str | None:
+    """Grund, warum eine Modellantwort nicht brauchbar ist, obwohl sie wie ein Review beginnt.
+    Am 02.10.2026 lieferte ein Billiganbieter hinter einem korrekten Anfang Zeichensalat bis ans
+    Token-Limit; die Antwort bestand die Formprüfung und wurde als „Freigegeben“ gespeichert."""
+    if usage.get("finish_reason") == "length" or (usage.get("completion_tokens") or 0) >= MAX_TOKENS:
+        return "Antwort ans Token-Limit gestoßen (abgebrochen oder abgeglitten)"
+    letters = [c for c in text if c.isalpha()]
+    foreign = [c for c in letters if ord(c) > 0x24F]       # über Latin Extended-B hinaus
+    if letters and len(foreign) / len(letters) > 0.01:
+        return f"{len(foreign)} von {len(letters)} Buchstaben nicht lateinisch"
+    return None
 
 
 def save_draft(pr: dict, text: str, meta: str) -> str:
@@ -312,6 +328,9 @@ def run_once() -> int:
             log(f"PR #{n}: Modell {model} antwortet nicht ({type(exc).__name__}), nächster Takt.")
             return 0
         verdict, _, _, problem = parse_review(raw)
+        bad = suspicious_output(raw, usage)
+        if bad:
+            verdict, problem = None, bad
         if verdict is None:
             tries = state.setdefault("fehler", {}).get(key, 0) + 1
             state["fehler"][key] = tries
