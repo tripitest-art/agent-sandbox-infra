@@ -72,6 +72,11 @@ def test_payload_json_and_limit():
     assert len(big["lines"]) == q.MAX_CHARS
 
 
+def test_payload_strips_ansi():
+    data = json.loads(q.payload(["\x1b[32mErfolg\x1b[0m", "\x1b[1;90mDetails\x1b[0m"]))
+    assert data == {"lines": "Erfolg\nDetails"}
+
+
 class _Resp:
     def __init__(self, status): self.status = status
     def __enter__(self): return self

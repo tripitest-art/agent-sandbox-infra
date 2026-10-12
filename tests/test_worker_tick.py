@@ -693,3 +693,142 @@ def test_default_fallbacks_prefer_same_model_family():
     if "LITELLM_FALLBACKS" not in w.os.environ:
         assert w.LITELLM_FALLBACKS == ["coder-or", "coder-free"]
     assert w.worker_name("coder-or") == "DeepSeek (LiteLLM coder-or, OpenRouter)"
+
+
+def test_parse_affected_files():
+    body = """### Ziel
+Etwas tun.
+
+### Betroffene Dateien
+- `sc_digger/rekordbox.py`: Anpassung
+- `config.yaml`: neue Schalter
+- tests/test_rekordbox.py: Testen
+- `tests/acceptance/test_issue_217.py`: Akzeptanztest
+- `irgendeine_variable = True` (keine Datei)
+
+### Schnittstellen
+python-code
+"""
+    files = w.parse_affected_files(body)
+    assert files == {"sc_digger/rekordbox.py", "config.yaml", "tests/test_rekordbox.py"}
+    assert "tests/acceptance/test_issue_217.py" not in files
+
+
+def test_touches_main_py():
+    assert w.touches_main_py({"labels": [{"name": "berührt-main.py"}]}) is True
+    assert w.touches_main_py({"body": "### Berührt sc_digger/main.py\n\nja\n"}) is True
+    assert w.touches_main_py({"body": "### Betroffene Dateien\n- `sc_digger/main.py`\n"}) is True
+    assert w.touches_main_py({"labels": [], "body": "### Berührt sc_digger/main.py\n\nnein\n"}) is False
+
+
+def test_issue_job_skips_main_py_conflict(monkeypatch):
+    active_issue = {
+        "number": 100,
+        "title": "Main Refactor",
+        "labels": [{"name": "in-arbeit"}, {"name": "berührt-main.py"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `sc_digger/main.py`",
+    }
+    candidate_main = {
+        "number": 101,
+        "title": "Another Main Task",
+        "labels": [{"name": "bereit"}, {"name": "berührt-main.py"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `sc_digger/main.py`",
+    }
+    candidate_other = {
+        "number": 102,
+        "title": "Collection Task",
+        "labels": [{"name": "bereit"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `sc_digger/collection.py`",
+    }
+
+    def fake_gh(*args):
+        if args[:2] == ("issue", "list"):
+            if "in-arbeit" in args:
+                return [active_issue]
+            return [candidate_main, candidate_other]
+        if args[:2] == ("issue", "edit"):
+            return None
+        raise AssertionError(f"unexpected gh: {args}")
+
+    monkeypatch.setattr(w, "gh", fake_gh)
+    key, task, pr_no, sha = w.issue_job()
+    assert key == "issue102"
+    assert "Du setzt Issue #102 um" in task
+
+
+def test_issue_job_skips_file_overlap(monkeypatch):
+    active_issue = {
+        "number": 200,
+        "title": "Rekordbox Phase 1",
+        "labels": [{"name": "in-arbeit"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `sc_digger/rekordbox.py`\n- `config.yaml`",
+    }
+    candidate_overlap = {
+        "number": 201,
+        "title": "Rekordbox Phase 2",
+        "labels": [{"name": "bereit"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `sc_digger/rekordbox.py`",
+    }
+    candidate_clean = {
+        "number": 202,
+        "title": "Quality check",
+        "labels": [{"name": "bereit"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `sc_digger/quality.py`",
+    }
+
+    def fake_gh(*args):
+        if args[:2] == ("issue", "list"):
+            if "in-arbeit" in args:
+                return [active_issue]
+            return [candidate_overlap, candidate_clean]
+        if args[:2] == ("issue", "edit"):
+            return None
+        raise AssertionError(f"unexpected gh: {args}")
+
+    monkeypatch.setattr(w, "gh", fake_gh)
+    key, task, pr_no, sha = w.issue_job()
+    assert key == "issue202"
+    assert "Du setzt Issue #202 um" in task
+
+
+def test_prepare_workdir_creates_worktree(monkeypatch, tmp_path):
+    base_dir = tmp_path / "base_repo"
+    workdir = tmp_path / "worktrees" / "w2"
+    base_dir.mkdir(parents=True)
+    commands = []
+
+    def fake_run(cmd, cwd=None, **kw):
+        commands.append((cmd, cwd))
+        if "worktree" in cmd and "add" in cmd:
+            workdir.mkdir(parents=True)
+
+    monkeypatch.setattr(w, "BASE_WORKDIR", str(base_dir))
+    monkeypatch.setattr(w, "WORKDIR", str(workdir))
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+
+    w.prepare_workdir()
+    assert any("worktree" in c[0] and "add" in c[0] for c in commands)
+
+
+def test_slot_logging(capsys, monkeypatch):
+    monkeypatch.setattr(w, "SLOT_TAG", "w2")
+    w.log("Testmeldung")
+    out = capsys.readouterr().out
+    assert "[w2] Testmeldung" in out
+
+
+def test_ollama_single_slot_guard(monkeypatch, tmp_path, capsys):
+    state_file = tmp_path / "state-w2.json"
+    state_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(w, "STATE", str(state_file))
+    monkeypatch.setattr(w, "BACKEND", "ollama")
+    monkeypatch.setattr(w, "WORKER_SLOT", "2")
+    assert w.main() == 0
+    out = capsys.readouterr().out
+    assert "Slot 2 inaktiv: Lokales Ollama-Backend erlaubt nur 1 Worker" in out

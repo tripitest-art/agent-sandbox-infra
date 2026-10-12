@@ -89,6 +89,7 @@ CTID=$(pvesh get /cluster/nextid) bash host-create.sh
 * `bash sandbox/install.sh` im Container fragt fehlende Geheimnisse verdeckt ab
   (LiteLLM-Key → `/etc/qwen-worker.env`, Webhook-URL → `/etc/qwen-webhook.env`, beide 600)
   und richtet `qwen-webhook.service` ein (ein alter `qwen-mqtt.service` wird entfernt). **Keine Geheimnisse ins Repo** – es ist öffentlich.
+* **Parallele Worker (`MAX_WORKERS`):** Mit `MAX_WORKERS=2 bash sandbox/install.sh` werden 2 parallele Worker-Slots (`qwen-worker@1.timer`, `qwen-worker@2.timer`) gestaffelt aktiviert. Jeder Slot arbeitet in einem isolierten Git-Worktree (`/root/sc-digger-worktrees/w<N>`). Der Taktgeber verhindert automatisch Kollisionen: Issues mit `berührt-main.py` oder Überschneidungen in `### Betroffene Dateien` mit bereits aktiven Aufgaben werden übersprungen (Regel 8). Parallele Worker sind nur bei `BACKEND=litellm` aktiv; bei `BACKEND=ollama` wird strikt 1 Worker erzwungen.
 * YAML-Snippets aus [`homeassistant/`](homeassistant/) in die `configuration.yaml` und das Dashboard einfügen.
 
 ### 5. Review-Takt (optional, Vorgabe: nur Entwurf)

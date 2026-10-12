@@ -1,0 +1,17 @@
+[Unit]
+Description=Qwen-Worker Slot %i (sandbox/worker_tick.py)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/sc-digger
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=QWEN_CODE_SUPPRESS_YOLO_WARNING=1
+Environment=WORKER_SLOT=%i
+EnvironmentFile=-/etc/qwen-worker.env
+ExecStart=/usr/bin/flock -n /run/qwen-worker-w%i.lock /usr/bin/python3 /root/worker_tick.py
+StandardOutput=append:/root/worker.log
+StandardError=append:/root/worker.log
