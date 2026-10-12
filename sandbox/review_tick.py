@@ -40,6 +40,7 @@ REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "coder-glm")
 REVIEW_MODEL_BIG = os.environ.get("REVIEW_MODEL_BIG", "longctx-lite")   # für große Diffs
 REVIEWER_NAME = os.environ.get("REVIEWER_NAME", "GLM")                 # Zeile „Reviewer: …“
 POST = os.environ.get("REVIEW_POST", "0") == "1"
+AUTO_MERGE = os.environ.get("REVIEW_AUTO_MERGE", "1") == "1"
 STATE = os.environ.get("REVIEW_STATE", "/root/review-state.json")
 DRAFT_DIR = os.environ.get("REVIEW_DRAFTS", "/root/reviews")
 MAX_ROUNDS = 2              # Reviews „Änderungen nötig“ je PR, danach liegt er bei Stephan
@@ -263,10 +264,107 @@ def post_review(number: int, text: str) -> None:
         os.unlink(path)
 
 
-def run_once() -> int:
-    if not REVIEW_KEY:
-        log("LITELLM_REVIEW_KEY fehlt (/etc/qwen-reviewer.env), nichts zu tun.")
-        return 0
+def is_auto_merge(issue_body: str | None) -> bool:
+    """Prüft, ob das Issue automatischen Merge vorsieht.
+    Standard ist False (im Zweifel manuell). True nur bei 'automatisch' ohne 'manuell'."""
+    if not issue_body:
+        return False
+    sec = extract_section(issue_body, "### Merge-Modus") or extract_section(issue_body, "## Merge-Modus")
+    if sec:
+        if re.search(r"\bmanuell\b", sec, re.I):
+            return False
+        return bool(re.search(r"\bautomatisch\b", sec, re.I))
+    # Fallback, falls kein eigener Abschnitt: Suche nach Zeile "Merge-Modus: ..."
+    m = re.search(r"Merge-Modus\s*:?\s*([^\n]+)", issue_body, re.I)
+    if m:
+        val = m.group(1).lower()
+        if "manuell" in val:
+            return False
+        if "automatisch" in val:
+            return True
+    return False
+
+
+def merge_pr(number: int) -> bool:
+    """Führt `gh pr merge <number> --squash` aus."""
+    try:
+        gh_text("pr", "merge", str(number), "--squash")
+        log(f"PR #{number}: erfolgreich gemergt (--squash).")
+        return True
+    except subprocess.CalledProcessError as exc:
+        log(f"PR #{number}: Merge fehlgeschlagen ({(exc.stderr or '').strip()[:160]}).")
+        return False
+
+
+def parse_dependencies(body: str | None) -> list[int]:
+    """Findet alle Referenzen (#123 oder URL) in Zeilen der Form 'Wartet auf: #X, #Y'."""
+    if not body:
+        return []
+    deps: list[int] = []
+    for line in body.splitlines():
+        m = re.search(r"Wartet\s+auf\s*:\s*(.+)", line, re.I)
+        if m:
+            for num_str in re.findall(r"(?:#|/(?:issues|pull)/)(\d+)", m.group(1)):
+                deps.append(int(num_str))
+    seen = set()
+    out: list[int] = []
+    for d in deps:
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def is_dependency_resolved(dep_no: int, cache: dict[int, str] | None = None) -> bool:
+    """Prüft, ob Issue oder PR #dep_no geschlossen oder gemergt ist."""
+    if cache is not None and dep_no in cache:
+        return cache[dep_no] in ("CLOSED", "MERGED")
+    try:
+        data = gh_json("issue", "view", str(dep_no), "--json", "state")
+        state = (data.get("state") or "").upper() if data else ""
+        if cache is not None:
+            cache[dep_no] = state
+        return state in ("CLOSED", "MERGED")
+    except Exception:
+        if cache is not None:
+            cache[dep_no] = "NOT_FOUND"
+        return False
+
+
+def unblock_dependent_issues() -> list[int]:
+    """Sucht offene Issues mit Label 'blockiert'.
+    Sind alle in 'Wartet auf: #X, #Y' genannten Abhängigkeiten geschlossen/gemergt,
+    wird das Issue auf 'bereit' gesetzt (und 'blockiert' entfernt)."""
+    try:
+        blocked = gh_json("issue", "list", "--state", "open", "--label", "blockiert", "--json", "number,title,body")
+    except Exception as exc:
+        log(f"Konnte blockierte Issues nicht abfragen: {exc}")
+        return []
+    if not blocked or not isinstance(blocked, list):
+        return []
+
+    unblocked: list[int] = []
+    dep_cache: dict[int, str] = {}
+    for issue in blocked:
+        num = issue["number"]
+        deps = parse_dependencies(issue.get("body"))
+        if not deps:
+            continue
+        all_resolved = all(is_dependency_resolved(d, dep_cache) for d in deps)
+        if all_resolved:
+            if not POST:
+                log(f"Issue #{num}: Alle Abhängigkeiten {deps} erledigt (REVIEW_POST=0, Entblocken übersprungen).")
+                continue
+            try:
+                gh_text("issue", "edit", str(num), "--add-label", "bereit", "--remove-label", "blockiert")
+                log(f"Issue #{num}: Alle Abhängigkeiten {deps} erledigt -> Label 'bereit' gesetzt, 'blockiert' entfernt.")
+                unblocked.append(num)
+            except subprocess.CalledProcessError as exc:
+                log(f"Issue #{num}: Entblocken fehlgeschlagen ({(exc.stderr or '').strip()[:160]}).")
+    return unblocked
+
+
+def _run_pr_review() -> int:
     state = load_state()
     prs = gh_json("pr", "list", "--state", "open", "--json",
                   "number,title,body,headRefName,headRefOid,isCrossRepository,reviews,commits,statusCheckRollup")
@@ -301,6 +399,7 @@ def run_once() -> int:
         return 0
 
     meta = f"PR #{n} {pr['headRefOid'][:7]} Reviewer {REVIEWER_NAME}"
+    issue: dict | None = None
     if red:
         text = red_check_review(red, worker, checks)
         meta += " (ohne Modell: rote Checks)"
@@ -349,6 +448,13 @@ def run_once() -> int:
     elif POST:
         post_review(n, text)
         log(f"PR #{n}: {verdict.strip('*')}, {muss} Muss / {kann} Kann, als Kommentar-Review gepostet ({path}).")
+        if verdict == VERDICTS[0]:
+            if not AUTO_MERGE:
+                log(f"PR #{n}: Freigegeben, aber REVIEW_AUTO_MERGE=0; kein Merge.")
+            elif issue and is_auto_merge(issue.get("body")):
+                merge_pr(n)
+            else:
+                log(f"PR #{n}: Freigegeben, aber Merge-Modus manuell; liegt bei Stephan.")
     else:
         log(f"PR #{n}: Entwurf {verdict.strip('*')}, {muss} Muss / {kann} Kann ({path}); REVIEW_POST=0, nicht gepostet.")
     if not problem:
@@ -357,6 +463,16 @@ def run_once() -> int:
             state.setdefault("runden", {})[str(n)] = rounds + 1
         save_state(state)
     return 0
+
+
+def run_once() -> int:
+    if not REVIEW_KEY:
+        log("LITELLM_REVIEW_KEY fehlt (/etc/qwen-reviewer.env), nichts zu tun.")
+        return 0
+    try:
+        return _run_pr_review()
+    finally:
+        unblock_dependent_issues()
 
 
 def main() -> int:

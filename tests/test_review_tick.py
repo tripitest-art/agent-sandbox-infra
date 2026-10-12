@@ -228,3 +228,193 @@ def test_missing_key_does_nothing(monkeypatch, capsys):
     calls = _fake_github(monkeypatch, [_pr()])
     r.run_once()
     assert "llm" not in calls and "LITELLM_REVIEW_KEY fehlt" in capsys.readouterr().out
+
+
+def test_is_auto_merge():
+    # Standard-Formular nach worker-task.yml
+    assert r.is_auto_merge("### Merge-Modus\n\nautomatisch nach Review\n\n### Kontext\nkein") is True
+    assert r.is_auto_merge("### Merge-Modus\n\nmanuell durch Stephan (Betrieb)\n\n### Kontext\nkein") is False
+    # Kurze Form
+    assert r.is_auto_merge("### Merge-Modus\nautomatisch") is True
+    assert r.is_auto_merge("## Merge-Modus\nautomatisch") is True
+    assert r.is_auto_merge("### Merge-Modus\nmanuell") is False
+    # Inline
+    assert r.is_auto_merge("**Merge-Modus:** automatisch") is True
+    assert r.is_auto_merge("Merge-Modus: manuell") is False
+    # Fehlt oder unklar -> False
+    assert r.is_auto_merge("### Ziel\nEtwas bauen") is False
+    assert r.is_auto_merge("") is False
+    assert r.is_auto_merge(None) is False
+
+
+def test_parse_dependencies():
+    assert r.parse_dependencies("### Kontext\nWartet auf: #189\nPlaner: Antigravity") == [189]
+    assert r.parse_dependencies("Wartet auf: #189, #203") == [189, 203]
+    assert r.parse_dependencies("- Wartet auf: #189 und #203") == [189, 203]
+    assert r.parse_dependencies("**Wartet auf:** #189, #203") == [189, 203]
+    assert r.parse_dependencies("Wartet auf: https://github.com/tripitest-art/sc-digger/pull/219") == [219]
+    assert r.parse_dependencies("Wartet auf: #10\nWartet auf: #10, #20") == [10, 20]
+    assert r.parse_dependencies("Wartet auf: keine") == []
+    assert r.parse_dependencies("Keine Abhängigkeiten") == []
+    assert r.parse_dependencies(None) == []
+
+
+def test_is_dependency_resolved(monkeypatch):
+    states = {100: "CLOSED", 101: "MERGED", 102: "OPEN"}
+    monkeypatch.setattr(r, "gh_json", lambda *a, **k: {"state": states.get(int(a[2]), "OPEN")})
+    cache = {}
+    assert r.is_dependency_resolved(100, cache) is True
+    assert r.is_dependency_resolved(101, cache) is True
+    assert r.is_dependency_resolved(102, cache) is False
+    assert cache == {100: "CLOSED", 101: "MERGED", 102: "OPEN"}
+    # Cache wird verwendet (ohne gh_json aufzurufen)
+    monkeypatch.setattr(r, "gh_json", lambda *a, **k: (_ for _ in ()).throw(AssertionError("darf nicht aufgerufen werden")))
+    assert r.is_dependency_resolved(100, cache) is True
+
+
+def test_unblock_dependent_issues_dry_run_vs_post(monkeypatch, capsys):
+    blocked_issues = [
+        {"number": 202, "title": "Aufgabe 202", "body": "### Kontext\nWartet auf: #189"},
+        {"number": 203, "title": "Aufgabe 203", "body": "### Kontext\nWartet auf: #190"},
+        {"number": 204, "title": "Aufgabe 204", "body": "Keine Abhängigkeit genannt"},
+    ]
+    states = {189: "MERGED", 190: "OPEN"}
+    edits = []
+
+    def mock_gh_json(*args, **kw):
+        if args[:2] == ("issue", "list"):
+            return blocked_issues
+        if args[:2] == ("issue", "view"):
+            return {"state": states.get(int(args[2]), "OPEN")}
+        raise AssertionError(args)
+
+    def mock_gh_text(*args, **kw):
+        if args[:2] == ("issue", "edit"):
+            edits.append(list(args))
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(r, "gh_json", mock_gh_json)
+    monkeypatch.setattr(r, "gh_text", mock_gh_text)
+
+    # 1. Dry Run (POST=False): Findet #202 als auflösbar, editiert aber nicht
+    monkeypatch.setattr(r, "POST", False)
+    res = r.unblock_dependent_issues()
+    assert res == []
+    assert edits == []
+    assert "REVIEW_POST=0, Entblocken übersprungen" in capsys.readouterr().out
+
+    # 2. Live (POST=True): Setzt #202 auf bereit
+    monkeypatch.setattr(r, "POST", True)
+    res = r.unblock_dependent_issues()
+    assert res == [202]
+    assert len(edits) == 1
+    assert edits[0] == ["issue", "edit", "202", "--add-label", "bereit", "--remove-label", "blockiert"]
+
+
+def test_auto_merge_when_approved_and_auto_mode(monkeypatch):
+    monkeypatch.setattr(r, "POST", True)
+    monkeypatch.setattr(r, "AUTO_MERGE", True)
+    calls = _fake_github(monkeypatch, [_pr()])
+
+    def mock_gh_json(*args):
+        if args[:2] == ("pr", "list"):
+            return [_pr()]
+        if args[:2] == ("issue", "list"):
+            return []
+        if args[:2] == ("issue", "view") and "labels" in args:
+            return {"labels": [{"name": "agent-qwen"}]}
+        if args[:2] == ("issue", "view"):
+            return {"number": 5, "title": "T", "body": "### Merge-Modus\nautomatisch nach Review"}
+        if args[:2] == ("pr", "view"):
+            return {"files": [{"path": "a.py", "additions": 1, "deletions": 0}]}
+        raise AssertionError(args)
+
+    merged = []
+    def mock_gh_text(*args, **kw):
+        if args[:2] == ("pr", "merge"):
+            merged.append(args[2])
+            return ""
+        if args[:2] == ("pr", "diff"):
+            return "diff --git a/a.py b/a.py\n+x\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(r, "gh_json", mock_gh_json)
+    monkeypatch.setattr(r, "gh_text", mock_gh_text)
+
+    r.run_once()
+    assert calls.get("posted") == [7]
+    assert merged == ["7"]
+
+
+def test_no_auto_merge_when_manual_mode(monkeypatch, capsys):
+    monkeypatch.setattr(r, "POST", True)
+    monkeypatch.setattr(r, "AUTO_MERGE", True)
+    calls = _fake_github(monkeypatch, [_pr()])
+
+    def mock_gh_json(*args):
+        if args[:2] == ("pr", "list"):
+            return [_pr()]
+        if args[:2] == ("issue", "list"):
+            return []
+        if args[:2] == ("issue", "view") and "labels" in args:
+            return {"labels": [{"name": "agent-qwen"}]}
+        if args[:2] == ("issue", "view"):
+            return {"number": 5, "title": "T", "body": "### Merge-Modus\nmanuell durch Stephan (Betrieb)"}
+        if args[:2] == ("pr", "view"):
+            return {"files": [{"path": "a.py", "additions": 1, "deletions": 0}]}
+        raise AssertionError(args)
+
+    merged = []
+    def mock_gh_text(*args, **kw):
+        if args[:2] == ("pr", "merge"):
+            merged.append(args[2])
+            return ""
+        if args[:2] == ("pr", "diff"):
+            return "diff --git a/a.py b/a.py\n+x\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(r, "gh_json", mock_gh_json)
+    monkeypatch.setattr(r, "gh_text", mock_gh_text)
+
+    r.run_once()
+    assert calls.get("posted") == [7]
+    assert merged == []
+    assert "Merge-Modus manuell; liegt bei Stephan" in capsys.readouterr().out
+
+
+def test_no_auto_merge_when_env_disabled(monkeypatch, capsys):
+    monkeypatch.setattr(r, "POST", True)
+    monkeypatch.setattr(r, "AUTO_MERGE", False)
+    calls = _fake_github(monkeypatch, [_pr()])
+
+    def mock_gh_json(*args):
+        if args[:2] == ("pr", "list"):
+            return [_pr()]
+        if args[:2] == ("issue", "list"):
+            return []
+        if args[:2] == ("issue", "view") and "labels" in args:
+            return {"labels": [{"name": "agent-qwen"}]}
+        if args[:2] == ("issue", "view"):
+            return {"number": 5, "title": "T", "body": "### Merge-Modus\nautomatisch"}
+        if args[:2] == ("pr", "view"):
+            return {"files": [{"path": "a.py", "additions": 1, "deletions": 0}]}
+        raise AssertionError(args)
+
+    merged = []
+    def mock_gh_text(*args, **kw):
+        if args[:2] == ("pr", "merge"):
+            merged.append(args[2])
+            return ""
+        if args[:2] == ("pr", "diff"):
+            return "diff --git a/a.py b/a.py\n+x\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(r, "gh_json", mock_gh_json)
+    monkeypatch.setattr(r, "gh_text", mock_gh_text)
+
+    r.run_once()
+    assert calls.get("posted") == [7]
+    assert merged == []
+    assert "REVIEW_AUTO_MERGE=0; kein Merge" in capsys.readouterr().out
+
