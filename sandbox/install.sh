@@ -7,7 +7,7 @@
 #   MODEL=qwen3-coder-64k OLLAMA=http://… bash …       # andere Werte als die Vorgaben
 #   AGENT=opencode bash …                              # OpenCode statt Qwen Code
 #   WAKE_PC=1 TAKT=30min bash …                        # PC bei Arbeit wecken, seltener schauen
-#   REVIEW_POST=1 bash …                               # Review-Takt postet Reviews (Vorgabe: nur Entwurf)
+#   REVIEW_POST=1 bash …                               # Review-Takt postet Reviews & auto-merged (Vorgabe: nur Entwurf)
 #
 # Der GitHub-Zugang wird hier bewusst NICHT eingerichtet: den Token gibt Stephan selbst
 # verdeckt ein (README, Schritt 3). Das Skript prüft nur, ob er da ist.
@@ -34,6 +34,7 @@ WAKE_PC=${WAKE_PC:-0}                           # 1: Gaming-PC bei Arbeit per Wo
 QWEN_CODE_VERSION=${QWEN_CODE_VERSION:-0.24.7}  # fest: ein Update soll bewusst passieren
 # Review-Takt (review_tick.py): Entwurf ohne Posten, solange REVIEW_POST=0
 REVIEW_POST=${REVIEW_POST:-0}                   # 1: Review als Kommentar auf GitHub posten
+REVIEW_AUTO_MERGE=${REVIEW_AUTO_MERGE:-1}       # 1: Freigegebene PRs mit Modus automatisch squashen
 REVIEW_TAKT=${REVIEW_TAKT:-10min}               # so oft sucht der Review-Takt einen PR
 REVIEW_MODEL=${REVIEW_MODEL:-coder-glm}         # LiteLLM-Alias (GLM, andere Familie als der Worker)
 REVIEW_MODEL_BIG=${REVIEW_MODEL_BIG:-longctx-lite}   # für sehr große Diffs
@@ -280,6 +281,7 @@ Environment=REVIEW_MODEL=$REVIEW_MODEL
 Environment=REVIEW_MODEL_BIG=$REVIEW_MODEL_BIG
 Environment=REVIEWER_NAME=$REVIEWER_NAME
 Environment=REVIEW_POST=$REVIEW_POST
+Environment=REVIEW_AUTO_MERGE=$REVIEW_AUTO_MERGE
 Environment=LANG=C.UTF-8
 ExecStart=/usr/bin/flock -n /run/qwen-review.lock /usr/bin/python3 /root/review_tick.py
 StandardOutput=append:/root/worker.log
@@ -298,7 +300,7 @@ systemctl daemon-reload
 if [ "$review_key" = 1 ]; then
   systemctl enable qwen-review.timer >/dev/null
   systemctl restart qwen-review.timer
-  echo "Review-Takt: an (REVIEW_POST=$REVIEW_POST, $REVIEW_MODEL, alle $REVIEW_TAKT)"
+  echo "Review-Takt: an (REVIEW_POST=$REVIEW_POST, AUTO_MERGE=$REVIEW_AUTO_MERGE, $REVIEW_MODEL, alle $REVIEW_TAKT)"
 else
   systemctl disable --now qwen-review.timer >/dev/null 2>&1 || true
   echo "Review-Takt: aus (LITELLM_REVIEW_KEY fehlt in /etc/qwen-reviewer.env)"

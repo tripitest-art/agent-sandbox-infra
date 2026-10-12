@@ -112,7 +112,12 @@ aktuellen Commit es noch kein Review des Besitzers gibt.
 * **Entwurf statt Posten (`REVIEW_POST=0`, Vorgabe):** Der Entwurf liegt in `/root/reviews/pr<N>-<sha>.md`,
   eine Zeile `[review] PR #N: …` steht in `/root/worker.log` (geht per Webhook ins HA-Dashboard).
   Mit `REVIEW_POST=1 bash sandbox/install.sh` postet er stattdessen; bei „Änderungen nötig“ startet danach die
-  Nacharbeit des Worker-Takts von selbst. Zum Nachholen bereits geprüfter PRs `/root/review-state.json` löschen.
+  Nacharbeit des Worker-Takts von selbst. Bei **Freigegeben** und Merge-Modus „automatisch“ führt das Skript
+  `gh pr merge --squash` aus (`REVIEW_AUTO_MERGE=1`, Vorgabe).
+* **Automatisches Entblocken (`Wartet auf: #N`):** Nach jedem Merge sowie in jedem Review-Takt prüft das
+  Skript offene Issues mit Label `blockiert`. Sind alle in der Zeile `Wartet auf: #X, #Y` genannten
+  Abhängigkeiten (PRs oder Issues) geschlossen oder gemergt, setzt es das Issue automatisch auf `bereit`
+  und entfernt `blockiert` (`gh issue edit <N> --add-label bereit --remove-label blockiert`). Zum Nachholen bereits geprüfter PRs `/root/review-state.json` löschen.
 * **Eigener Key:** `install.sh` fragt `LITELLM_REVIEW_KEY` verdeckt ab (`/etc/qwen-reviewer.env`, 600). Der Key
   `reviewer` in LiteLLM darf nur `REVIEW_MODEL` und `REVIEW_MODEL_BIG` und hat ein eigenes kleines Budget.
   Ohne Key bleibt der Review-Takt aus, der Worker läuft weiter.
