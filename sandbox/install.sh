@@ -28,6 +28,8 @@ OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
 AGENT=${AGENT:-qwen-code}                       # oder opencode
 TAKT=${TAKT:-5min}                              # so oft sucht der Worker Arbeit
+MAX_WORKERS=${MAX_WORKERS:-1}                   # Parallele Worker-Slots (nur bei BACKEND=litellm)
+[ "$BACKEND" = litellm ] || MAX_WORKERS=1       # Ollama auf RX 6800 XT erlaubt nur 1 Worker
 WAKE_PC=${WAKE_PC:-0}                           # 1: Gaming-PC bei Arbeit per WoL wecken
 QWEN_CODE_VERSION=${QWEN_CODE_VERSION:-0.24.7}  # fest: ein Update soll bewusst passieren
 # Review-Takt (review_tick.py): Entwurf ohne Posten, solange REVIEW_POST=0
@@ -173,14 +175,17 @@ JSON
 
 echo "== Taktgeber"
 install -m 755 "$SCRIPT_DIR/worker_tick.py" /root/worker_tick.py
-cat > /etc/systemd/system/qwen-worker.service <<UNIT
+
+# Basis- und Worktree-Verzeichnisse vorbereiten
+[ "$MAX_WORKERS" -gt 1 ] && mkdir -p /root/sc-digger-worktrees
+
+# Instanziierte Template-Unit für Slot-Worker (qwen-worker@1, qwen-worker@2, ...)
+cat > /etc/systemd/system/qwen-worker@.service <<UNIT
 [Unit]
-Description=Qwen-Worker: ein Auftrag pro Takt (sandbox/worker_tick.py)
+Description=Qwen-Worker Slot %i (sandbox/worker_tick.py)
 [Service]
 Type=oneshot
-# Ohne HOME finden gh, git und OpenCode ihre Konfiguration nicht (gh endet mit Exit 4).
 Environment=HOME=/root
-# LITELLM_API_KEY (BACKEND=litellm); fehlt die Datei, startet der Takt trotzdem (ollama).
 EnvironmentFile=-/etc/qwen-worker.env
 Environment=BACKEND=$BACKEND
 Environment=LITELLM=$LITELLM
@@ -192,10 +197,36 @@ Environment=AGENT=$AGENT
 Environment=WAKE_PC=$WAKE_PC
 Environment=LANG=C.UTF-8
 Environment=QWEN_CODE_SUPPRESS_YOLO_WARNING=1
-ExecStart=/usr/bin/flock -n /run/qwen-worker.lock /usr/bin/python3 /root/worker_tick.py
+Environment=WORKER_SLOT=%i
+ExecStart=/usr/bin/flock -n /run/qwen-worker-w%i.lock /usr/bin/python3 /root/worker_tick.py
 StandardOutput=append:/root/worker.log
 StandardError=append:/root/worker.log
 UNIT
+
+# Standard-Service für manuelle Starts (Slot 1)
+cat > /etc/systemd/system/qwen-worker.service <<UNIT
+[Unit]
+Description=Qwen-Worker: ein Auftrag pro Takt (sandbox/worker_tick.py)
+[Service]
+Type=oneshot
+Environment=HOME=/root
+EnvironmentFile=-/etc/qwen-worker.env
+Environment=BACKEND=$BACKEND
+Environment=LITELLM=$LITELLM
+Environment=LITELLM_MODEL=$LITELLM_MODEL
+Environment=LITELLM_FALLBACKS=$LITELLM_FALLBACKS
+Environment=OLLAMA=$OLLAMA
+Environment=MODEL=$MODEL
+Environment=AGENT=$AGENT
+Environment=WAKE_PC=$WAKE_PC
+Environment=LANG=C.UTF-8
+Environment=QWEN_CODE_SUPPRESS_YOLO_WARNING=1
+Environment=WORKER_SLOT=1
+ExecStart=/usr/bin/flock -n /run/qwen-worker-w1.lock /usr/bin/python3 /root/worker_tick.py
+StandardOutput=append:/root/worker.log
+StandardError=append:/root/worker.log
+UNIT
+
 cat > /etc/systemd/system/qwen-worker.timer <<UNIT
 [Unit]
 Description=Qwen-Worker alle $TAKT
@@ -205,6 +236,34 @@ OnUnitActiveSec=$TAKT
 [Install]
 WantedBy=timers.target
 UNIT
+
+systemctl daemon-reload
+if [ "$MAX_WORKERS" -gt 1 ]; then
+  # Bei Multi-Worker Instanz-Timer aktivieren (Slots gestaffelt starten)
+  systemctl disable --now qwen-worker.timer >/dev/null 2>&1 || true
+  for i in $(seq 1 "$MAX_WORKERS"); do
+    boot_delay=$(( i * 2 ))
+    cat > "/etc/systemd/system/qwen-worker@$i.timer" <<TUNIT
+[Unit]
+Description=Qwen-Worker Slot $i alle $TAKT
+[Timer]
+OnBootSec=${boot_delay}min
+OnUnitActiveSec=$TAKT
+[Install]
+WantedBy=timers.target
+TUNIT
+    systemctl enable "qwen-worker@$i.timer" >/dev/null
+    systemctl restart "qwen-worker@$i.timer"
+  done
+  echo "Taktgeber: Multi-Worker mit $MAX_WORKERS Slots aktiv (qwen-worker@1..$MAX_WORKERS.timer)"
+else
+  for i in $(seq 2 5); do
+    systemctl disable --now "qwen-worker@$i.timer" >/dev/null 2>&1 || true
+  done
+  systemctl enable qwen-worker.timer >/dev/null
+  systemctl restart qwen-worker.timer
+  echo "Taktgeber: Single-Worker an (alle $TAKT)"
+fi
 
 echo "== Review-Takt"
 install -m 755 "$SCRIPT_DIR/review_tick.py" /root/review_tick.py

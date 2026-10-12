@@ -38,7 +38,11 @@ import urllib.error
 import urllib.request
 
 REPO = "tripitest-art/sc-digger"
-WORKDIR = "/root/sc-digger"
+BASE_WORKDIR = os.environ.get("BASE_WORKDIR", "/root/sc-digger")
+WORKER_SLOT = os.environ.get("WORKER_SLOT", "")
+WORKDIR = os.environ.get("WORKDIR", f"/root/sc-digger-worktrees/w{WORKER_SLOT}" if WORKER_SLOT else BASE_WORKDIR)
+STATE = os.environ.get("STATE", f"/root/worker-state-w{WORKER_SLOT}.json" if WORKER_SLOT else "/root/worker-state.json")
+SLOT_TAG = f"w{WORKER_SLOT}" if WORKER_SLOT else ""
 OLLAMA = os.environ.get("OLLAMA", "http://192.168.0.210:11434")
 MODEL = os.environ.get("MODEL", "qwen3-coder-64k")
 LABEL = "agent-qwen"
@@ -68,7 +72,6 @@ def worker_name(model: str) -> str:
 
 WORKER = os.environ.get("WORKER", worker_name(LITELLM_MODEL) if BACKEND == "litellm" else "Qwen3-Coder 30B")
 ACTIVE_MODEL = LITELLM_MODEL   # BACKEND=litellm: Alias dieses Laufs, nach der Probe ggf. ein Ausweichmodell
-STATE = "/root/worker-state.json"
 MAX_TRIES = 2               # Versuche je Auftrag, danach liegt er bei Stephan
 DONE = "erledigt"           # Schlüssel in STATE: angekommene Nacharbeiten, nicht wiederholen
 # Minuten je Lauf des Agenten. Über LiteLLM kürzer: das Modell ist schneller, und jede Minute
@@ -102,7 +105,8 @@ ENV = dict(os.environ, PATH=f"/root/venv/bin:/root/.opencode/bin:{os.environ.get
 
 
 def log(msg: str) -> None:
-    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+    prefix = f" [{SLOT_TAG}]" if SLOT_TAG else ""
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}{prefix} {msg}", flush=True)
 
 
 def gh(*args: str):
@@ -111,11 +115,13 @@ def gh(*args: str):
 
 
 def pr_template() -> str:
-    try:
-        with open(os.path.join(WORKDIR, PR_TEMPLATE), encoding="utf-8") as fh:
-            return fh.read()
-    except OSError:
-        return ""
+    for base in (WORKDIR, BASE_WORKDIR):
+        try:
+            with open(os.path.join(base, PR_TEMPLATE), encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            pass
+    return ""
 
 
 def pr_text_problems(body: str | None, issue_no: int) -> list[str]:
@@ -270,6 +276,80 @@ Gehe genau diese Schritte durch und führe jeden als Befehl aus:
     return None
 
 
+def extract_section(md: str, heading: str, until: tuple[str, ...] = ()) -> str:
+    """Von der Zeile `heading` bis vor die nächste Überschrift gleicher oder höherer Ebene
+    (oder vor eine Zeile aus `until`). Leer, wenn die Überschrift fehlt."""
+    level = len(heading) - len(heading.lstrip("#"))
+    out, active = [], False
+    for line in (md or "").splitlines():
+        if not active:
+            if line.strip() == heading.strip():
+                active = True
+            continue
+        stripped = line.strip()
+        if until and any(stripped.startswith(u) for u in until):
+            break
+        if stripped.startswith("#"):
+            l = len(stripped) - len(stripped.lstrip("#"))
+            if l <= level:
+                break
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def parse_affected_files(issue_body: str) -> set[str]:
+    """Extrahiert alle betroffenen Dateipfade aus der Sektion '### Betroffene Dateien'."""
+    sec = extract_section(issue_body, "### Betroffene Dateien")
+    if not sec:
+        return set()
+    files = set()
+    for m in re.finditer(r"`([\w./-]+\.[a-zA-Z0-9]+)`", sec):
+        p = m.group(1).strip()
+        if "/" in p or p.endswith((".py", ".yaml", ".yml", ".json", ".txt", ".md", ".sh", ".sql")):
+            if not re.match(r"^tests/acceptance/test_issue_\d+\.py$", p):
+                files.add(p)
+    for m in re.finditer(r"^\s*[-*]\s+([\w./-]+\.[a-zA-Z0-9]+)", sec, re.M):
+        p = m.group(1).strip()
+        if not re.match(r"^tests/acceptance/test_issue_\d+\.py$", p):
+            files.add(p)
+    return files
+
+
+def touches_main_py(issue: dict) -> bool:
+    """Prüft, ob ein Issue sc_digger/main.py berührt (per Label oder Issue-Body)."""
+    labels = {lab.get("name", "") if isinstance(lab, dict) else str(lab)
+              for lab in issue.get("labels", [])}
+    if "berührt-main.py" in labels:
+        return True
+    body = issue.get("body", "") or ""
+    sec = extract_section(body, "### Berührt sc_digger/main.py").strip().lower()
+    if sec.startswith("ja"):
+        return True
+    return "sc_digger/main.py" in parse_affected_files(body)
+
+
+def active_in_progress_issues() -> list[dict]:
+    """Alle aktuell offenen Issues mit Label 'in-arbeit' von tripitest-art."""
+    try:
+        active = gh("issue", "list", "--state", "open", "--label", "in-arbeit",
+                    "--json", "number,title,body,author,labels")
+        return [i for i in active or [] if (i.get("author") or {}).get("login") == OWNER]
+    except Exception as e:
+        log(f"Warnung: Abfrage aktiver Issues fehlgeschlagen: {e}")
+        return []
+
+
+def claim_issue(n: int) -> bool:
+    """Wechselt atomar die Labels von 'bereit' zu 'in-arbeit' vor dem Start."""
+    try:
+        gh("issue", "edit", str(n), "--add-label", "in-arbeit", "--remove-label", "bereit")
+        log(f"Issue #{n} erfolgreich auf 'in-arbeit' gesetzt.")
+        return True
+    except Exception as e:
+        log(f"Claiming von Issue #{n} fehlgeschlagen: {e}")
+        return False
+
+
 def issue_branch(n: int) -> str:
     # Fester Name statt eines vom Modell erfundenen: der Taktgeber findet den PR danach wieder,
     # und acceptance-guard erkennt feature/issue-<N> als Worker-Branch.
@@ -277,7 +357,7 @@ def issue_branch(n: int) -> str:
 
 
 def issue_job():
-    """(Schlüssel, Auftrag, None, None) für das älteste freie Issue oder None.
+    """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
 
     Der Auftrag nennt jeden Schritt mit Befehl und enthält das Issue wörtlich. Mit „Bearbeite die
     nächste Aufgabe nach AGENTS.md“ übersprang Qwen Label, Branch und Akzeptanz-Commit, arbeitete
@@ -285,13 +365,52 @@ def issue_job():
     """
     issues = gh("issue", "list", "--state", "open", "--label", "worker-task", "--label", "bereit",
                 "--label", LABEL, "--search", "sort:created-asc -label:blockiert",
-                "--json", "number,title,body,author")
+                "--json", "number,title,body,author,labels")
     # Wie bei Reviews: Nur Issues von Stephans Konto werden zum Auftrag mit Schreibrecht.
     issues = [i for i in issues or [] if (i.get("author") or {}).get("login") == OWNER]
     if not issues:
         return None
-    issue = issues[0]
-    n, branch = issue["number"], issue_branch(issue["number"])
+
+    # Konfliktprüfung mit aktiven Aufträgen (Regel 8: main.py und dieselben Dateien)
+    active = active_in_progress_issues()
+    active_touches_main = any(touches_main_py(a) for a in active)
+    active_files = set()
+    for a in active:
+        active_files |= parse_affected_files(a.get("body", ""))
+        if touches_main_py(a):
+            active_files.add("sc_digger/main.py")
+
+    selected = None
+    for cand in issues:
+        cand_no = cand["number"]
+        cand_body = cand.get("body", "")
+        cand_touches_main = touches_main_py(cand)
+
+        # Regel 8: Keine zwei Agenten an main.py
+        if cand_touches_main and active_touches_main:
+            log(f"Issue #{cand_no} übersprungen: berührt main.py, während bereits ein Auftrag "
+                "an main.py in Arbeit ist (Regel 8).")
+            continue
+
+        # Regel 8: Keine zwei Agenten in denselben Dateien
+        cand_files = parse_affected_files(cand_body)
+        if cand_touches_main:
+            cand_files.add("sc_digger/main.py")
+        overlap = cand_files & active_files
+        if overlap:
+            log(f"Issue #{cand_no} übersprungen: Datei-Kollision mit aktivem Auftrag auf "
+                f"{', '.join(sorted(overlap))} (Regel 8).")
+            continue
+
+        selected = cand
+        break
+
+    if not selected:
+        return None
+
+    n, branch = selected["number"], issue_branch(selected["number"])
+    claim_issue(n)
+
     task = f"""Du setzt Issue #{n} um (AGENTS.md, Worker-Aufgaben → Worker). Du bist Worker: {WORKER}.
 Das Issue steht unten; es ist der Vertrag. Gehe genau diese Schritte durch und führe jeden als Befehl aus:
 
@@ -320,8 +439,8 @@ Du gibst den PR nie selbst frei und mergst nie; das macht der Reviewer.
 
 {template_rules()}
 
------ Issue #{n}: {issue['title']} -----
-{issue['body']}
+----- Issue #{n}: {selected['title']} -----
+{selected['body']}
 ----- Ende Issue -----"""
     return f"issue{n}", task, None, None
 
@@ -546,8 +665,45 @@ def ollama_free(status: dict | None = None, say=log) -> bool:
     return True
 
 
+def prepare_workdir() -> None:
+    """Bereitet das Arbeitsverzeichnis für einen neuen Lauf vor (main oder worktree)."""
+    base = BASE_WORKDIR if os.path.exists(BASE_WORKDIR) else WORKDIR
+    if WORKDIR == base:
+        for cmd in (["git", "fetch", "-q", "origin"], ["git", "checkout", "-qf", "main"],
+                    ["git", "reset", "-q", "--hard", "origin/main"], ["git", "clean", "-qfd"]):
+            subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
+        return
+
+    # Worktree-Modus: Basis-Repo fetchen (mit Lock gegen parallele Fetches)
+    fetch_lock = os.path.join(base, ".git", "fetch.lock")
+    try:
+        os.makedirs(os.path.dirname(fetch_lock), exist_ok=True)
+        with open(fetch_lock, "w") as lock_fh:
+            if hasattr(os, "O_EXCL") and sys.platform != "win32":
+                import fcntl
+                fcntl.flock(lock_fh, fcntl.LOCK_EX)
+            subprocess.run(["git", "fetch", "-q", "origin"], cwd=base, check=True, env=ENV)
+    except Exception as e:
+        log(f"Warnung bei git fetch im Basis-Repo: {e}")
+
+    # Worktree anlegen oder bereinigen
+    if not os.path.exists(WORKDIR):
+        os.makedirs(os.path.dirname(WORKDIR), exist_ok=True)
+        subprocess.run(["git", "worktree", "add", "--force", "-B", "main", WORKDIR, "origin/main"],
+                       cwd=base, check=True, env=ENV)
+    else:
+        for cmd in (["git", "checkout", "-qf", "main"],
+                    ["git", "reset", "-q", "--hard", "origin/main"],
+                    ["git", "clean", "-qfd"]):
+            subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
+
+
 def main() -> int:
     state = load_state()
+    if BACKEND != "litellm" and WORKER_SLOT and WORKER_SLOT not in ("1", "w1", ""):
+        log_on_change(state, LAST_PC, "ollama_single_slot",
+                      f"Slot {WORKER_SLOT} inaktiv: Lokales Ollama-Backend erlaubt nur 1 Worker.")
+        return 0
     status = None
     if BACKEND == "litellm":
         reason = litellm_ready()
@@ -600,9 +756,7 @@ def main() -> int:
     state[key] = state.get(key, 0) + 1
     save_state(state)
     # Jeder Lauf startet auf sauberem main; Reste eines abgebrochenen Laufs stören sonst.
-    for cmd in (["git", "fetch", "-q", "origin"], ["git", "checkout", "-qf", "main"],
-                ["git", "reset", "-q", "--hard", "origin/main"], ["git", "clean", "-qfd"]):
-        subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
+    prepare_workdir()
 
     prompt = (f"{task}\n\n"
               "WICHTIGE REGELN FÜR DIESEN LAUF:\n"

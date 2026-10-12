@@ -65,8 +65,16 @@ class Follower:
         return [ln for ln in lines if ln.strip()]
 
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def strip_ansi(text: str) -> str:
+    """Entfernt ANSI-Farbcodes und Escape-Sequenzen für saubere Anzeige in Home Assistant."""
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
 def payload(lines: list[str]) -> bytes:
-    text = "\n".join(lines)[-MAX_CHARS:]
+    text = strip_ansi("\n".join(lines))[-MAX_CHARS:]
     return json.dumps({"lines": text}, ensure_ascii=False).encode()
 
 
