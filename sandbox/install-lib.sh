@@ -41,7 +41,24 @@ except projects.ProjectConfigError as e:
 ' "$SCRIPT_DIR"
 }
 
-ensure_projects() {   # klont fehlende Projekte und legt ihre Worktree-Ordner an
+# Hält den Basis-Klon auf main. Ein Klon, der auf einem alten Feature-Branch hängt, ließ schon
+# Tests rot werden (#202-Branch auf CT 112). Nichts geht verloren: der alte Branch bleibt
+# bestehen, nur HEAD wechselt. Mit lokalen Änderungen wird nichts angefasst, nur gewarnt.
+sync_clone_to_main() {   # $1 = Name, $2 = Klon-Ordner
+  local name=$1 dir=$2
+  if ! git -C "$dir" fetch -q origin main; then
+    echo "Projekt $name: fetch fehlgeschlagen, Klon bleibt wie er ist" >&2
+    return 0
+  fi
+  if [ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]; then
+    echo "Projekt $name: lokale Änderungen in $dir, Klon wird nicht auf main gesetzt" >&2
+    return 0
+  fi
+  git -C "$dir" checkout -q -B main origin/main || { echo "Projekt $name: Wechsel auf main fehlgeschlagen" >&2; return 0; }
+  echo "Projekt $name: Klon steht auf origin/main"
+}
+
+ensure_projects() {   # klont fehlende Projekte, hält sie auf main und legt ihre Worktree-Ordner an
   local lines name repo workdir
   lines=$(project_lines) || return 1
   while IFS=$'\t' read -r name repo workdir; do
@@ -55,6 +72,7 @@ ensure_projects() {   # klont fehlende Projekte und legt ihre Worktree-Ordner an
     fi
     if [ -d "$workdir/.git" ]; then
       echo "Projekt $name: Klon vorhanden ($workdir)"
+      sync_clone_to_main "$name" "$workdir"
     else
       git clone -q "https://github.com/$repo.git" "$workdir" || { echo "Projekt $name: Klonen von $repo fehlgeschlagen" >&2; return 1; }
       echo "Projekt $name: $repo nach $workdir geklont"
