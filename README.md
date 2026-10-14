@@ -49,7 +49,7 @@ flowchart TD
 | [`sandbox/`](sandbox/) | Setup-Skripte (`install.sh`), der autonome Taktgeber (`worker_tick.py`), der Review-Takt (`review_tick.py`) und systemd-Units (`qwen-worker`, `qwen-review`, `qwen-webhook`). |
 | [`hardware/`](hardware/) | GPU-Hardware-Tuning für AMD RDNA2 (LACT, 2100 MHz, −90 mV, 255 W) mit Messwerten und Ollama-Service Overrides. |
 | [`homeassistant/`](homeassistant/) | YAML-Konfigurationen für REST- und Webhook-Sensoren, die Lovelace-Dashboard-Karte und die Push-Meldung „PR braucht Stephan“. |
-| [`tests/`](tests/) | Unit-Tests für Worker- und Review-Takt (`test_worker_tick.py`, `test_review_tick.py`), laufen ohne Netzwerk mit Mocks. |
+| [`tests/`](tests/) | Unit-Tests für Worker- und Review-Takt (`test_worker_tick.py`, `test_review_tick.py`, `test_projects.py`), laufen ohne Netzwerk mit Mocks. |
 
 ---
 
@@ -92,6 +92,30 @@ CTID=$(pvesh get /cluster/nextid) bash host-create.sh
   und richtet `qwen-webhook.service` ein (ein alter `qwen-mqtt.service` wird entfernt). **Keine Geheimnisse ins Repo** – es ist öffentlich.
 * **Parallele Worker (`MAX_WORKERS`):** Mit `MAX_WORKERS=2 bash sandbox/install.sh` werden 2 parallele Worker-Slots (`qwen-worker@1.timer`, `qwen-worker@2.timer`) gestaffelt aktiviert. Jeder Slot arbeitet in einem isolierten Git-Worktree (`/root/sc-digger-worktrees/w<N>`). Der Taktgeber verhindert automatisch Kollisionen: Issues mit `berührt-main.py` oder Überschneidungen in `### Betroffene Dateien` mit bereits aktiven Aufgaben werden übersprungen (Regel 8). Parallele Worker sind nur bei `BACKEND=litellm` aktiv; bei `BACKEND=ollama` wird strikt 1 Worker erzwungen.
 * YAML-Snippets aus [`homeassistant/`](homeassistant/) in die `configuration.yaml` und das Dashboard einfügen.
+
+### Mehrere Projekte (Projektliste)
+Worker- und Review-Takt arbeiten nicht mehr fest auf sc-digger, sondern auf einer Projektliste in
+`/etc/agent-projects.json` (Vorlage: [`sandbox/projects.example.json`](sandbox/projects.example.json),
+Lademodul: `sandbox/projects.py`). Fehlt die Datei, läuft alles wie bisher mit sc-digger allein.
+
+| Schlüssel | Bedeutung |
+|---|---|
+| `name`, `repo`, `workdir` | Pflicht: Kurzname (a-z, 0-9, `-`, `_`), `owner/name` auf GitHub, Klon auf dem Server |
+| `test_cmd` | Testbefehl in den Aufträgen (Vorgabe `python -m pytest -q`) |
+| `hotspot`, `hotspot_label` | Datei, an der nie zwei Agenten zugleich arbeiten (Regel 8), und das Issue-Label dafür; ohne `hotspot` gibt es keine solche Sperre |
+| `review_skill` | Pfad des Review-Skills im Repo; ohne ihn prüft der Reviewer nur nach `AGENTS.md` |
+| `auto_merge` | `false`: der Review-Takt mergt in diesem Projekt nie, auch nicht bei „Merge-Modus automatisch“ |
+
+- **Gemeinsamer Pool:** Jeder Worker-Slot nimmt die erste Arbeit der Liste. Die Reihenfolge ist
+  zugleich die Priorität; ein Projekt weiter hinten kommt dran, wenn vorn nichts liegt.
+- **Worktrees und Zustand:** Jedes Projekt hat eigene Worktrees (`<workdir>-worktrees/w<N>`). Zustandsschlüssel,
+  Review-Zustand (`review-state-<name>.json`) und Entwürfe (`reviews-<name>/`) tragen ab dem zweiten
+  Projekt den Namen, damit PR-Nummern nicht kollidieren. Das erste Projekt behält die alten Pfade.
+- **Voraussetzung je Projekt:** der Vertrag aus sc-digger (`AGENTS.md`, Labels `worker-task`, `bereit`, `in-arbeit`,
+  `agent-*`, Akzeptanztests unter `tests/acceptance/`, Checks `tests` und `acceptance-guard`).
+- **Fehlerverhalten:** Eine kaputte Projektliste lässt die Takte mit Fehlermeldung abbrechen, damit kein Projekt
+  still wegfällt. Ein fehlender Klon wird einmal im Log gemeldet und das Projekt übersprungen.
+- Der Review-Takt prüft pro Takt höchstens einen PR je Projekt.
 
 ### 5. Review-Takt
 `review_tick.py` prüft die PRs der Worker, damit das Review nicht mehr von Hand in LibreChat

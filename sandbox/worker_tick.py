@@ -37,10 +37,21 @@ import time
 import urllib.error
 import urllib.request
 
-REPO = "tripitest-art/sc-digger"
-BASE_WORKDIR = os.environ.get("BASE_WORKDIR", "/root/sc-digger")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py liegt daneben
+import projects  # noqa: E402
+
+PROJECTS = projects.load_projects()   # ohne /etc/agent-projects.json: sc-digger allein
+# Aktives Projekt dieses Laufs. Ohne Projektliste bleiben die Vorgaben und die Umgebung (BASE_WORKDIR,
+# WORKDIR) wie vor der Projektliste; mit Liste setzt use_project() sie je Projekt neu.
+REPO = PROJECTS[0].repo
+PROJECT = PROJECTS[0].name
+PREFIX = ""                 # Vorsatz der Schlüssel in STATE; leer beim ersten Projekt (alte Zustandsdateien gelten weiter)
+TEST_CMD = PROJECTS[0].test_cmd
+HOTSPOT = PROJECTS[0].hotspot
+HOTSPOT_LABEL = PROJECTS[0].hotspot_label
+BASE_WORKDIR = os.environ.get("BASE_WORKDIR", PROJECTS[0].workdir)
 WORKER_SLOT = os.environ.get("WORKER_SLOT", "")
-WORKDIR = os.environ.get("WORKDIR", f"/root/sc-digger-worktrees/w{WORKER_SLOT}" if WORKER_SLOT else BASE_WORKDIR)
+WORKDIR = os.environ.get("WORKDIR", f"{projects.worktrees_dir(PROJECTS[0])}/w{WORKER_SLOT}" if WORKER_SLOT else BASE_WORKDIR)
 STATE = os.environ.get("STATE", f"/root/worker-state-w{WORKER_SLOT}.json" if WORKER_SLOT else "/root/worker-state.json")
 SLOT_TAG = f"w{WORKER_SLOT}" if WORKER_SLOT else ""
 OLLAMA = os.environ.get("OLLAMA", "http://192.168.0.210:11434")
@@ -107,6 +118,15 @@ ENV = dict(os.environ, PATH=f"/root/venv/bin:/root/.opencode/bin:{os.environ.get
 def log(msg: str) -> None:
     prefix = f" [{SLOT_TAG}]" if SLOT_TAG else ""
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}{prefix} {msg}", flush=True)
+
+
+def use_project(p: "projects.Project", first: bool) -> None:
+    """Schaltet die Globalen auf das Projekt `p` um (Repo, Arbeitsordner, Testbefehl, Hotspot)."""
+    global REPO, PROJECT, PREFIX, TEST_CMD, HOTSPOT, HOTSPOT_LABEL, BASE_WORKDIR, WORKDIR
+    REPO, PROJECT, TEST_CMD, HOTSPOT, HOTSPOT_LABEL = p.repo, p.name, p.test_cmd, p.hotspot, p.hotspot_label
+    PREFIX = "" if first else f"{p.name}/"
+    BASE_WORKDIR = p.workdir
+    WORKDIR = f"{projects.worktrees_dir(p)}/w{WORKER_SLOT}" if WORKER_SLOT else p.workdir
 
 
 def gh(*args: str):
@@ -223,7 +243,7 @@ Gehe genau diese Schritte durch und führe jeden als Befehl aus:
 3. Ist der PR-Text gefordert: schreib ihn in .git/pr-body.md nach der Vorlage unten,
    mit „Closes #{issue_no}“ und „Worker: {WORKER}“, und führe aus:
    `gh pr edit {n} --title "$(gh issue view {issue_no} --json title -q .title)" --body-file .git/pr-body.md`
-4. `python -m pytest -q` muss komplett grün sein.
+4. `{TEST_CMD}` muss komplett grün sein.
 5. Alle Code-Änderungen in einem Commit, dann `git push`. Verlangt das Review nur den PR-Text,
    gibt es keinen Commit.
 6. Prüfe mit `git log -1 --oneline` und `gh pr view {n} --json title,body`, dass Commit und Text
@@ -316,16 +336,18 @@ def parse_affected_files(issue_body: str) -> set[str]:
 
 
 def touches_main_py(issue: dict) -> bool:
-    """Prüft, ob ein Issue sc_digger/main.py berührt (per Label oder Issue-Body)."""
+    """Prüft, ob ein Issue den Hotspot des Projekts (sc-digger: sc_digger/main.py) berührt, per Label oder Issue-Body."""
+    if not HOTSPOT:
+        return False
     labels = {lab.get("name", "") if isinstance(lab, dict) else str(lab)
               for lab in issue.get("labels", [])}
-    if "berührt-main.py" in labels:
+    if HOTSPOT_LABEL in labels:
         return True
     body = issue.get("body", "") or ""
-    sec = extract_section(body, "### Berührt sc_digger/main.py").strip().lower()
+    sec = extract_section(body, f"### Berührt {HOTSPOT}").strip().lower()
     if sec.startswith("ja"):
         return True
-    return "sc_digger/main.py" in parse_affected_files(body)
+    return HOTSPOT in parse_affected_files(body)
 
 
 def active_in_progress_issues() -> list[dict]:
@@ -378,7 +400,7 @@ def issue_job():
     for a in active:
         active_files |= parse_affected_files(a.get("body", ""))
         if touches_main_py(a):
-            active_files.add("sc_digger/main.py")
+            active_files.add(HOTSPOT)
 
     selected = None
     for cand in issues:
@@ -388,14 +410,14 @@ def issue_job():
 
         # Regel 8: Keine zwei Agenten an main.py
         if cand_touches_main and active_touches_main:
-            log(f"Issue #{cand_no} übersprungen: berührt main.py, während bereits ein Auftrag "
-                "an main.py in Arbeit ist (Regel 8).")
+            log(f"Issue #{cand_no} übersprungen: berührt {HOTSPOT}, während bereits ein Auftrag "
+                f"an {HOTSPOT} in Arbeit ist (Regel 8).")
             continue
 
         # Regel 8: Keine zwei Agenten in denselben Dateien
         cand_files = parse_affected_files(cand_body)
         if cand_touches_main:
-            cand_files.add("sc_digger/main.py")
+            cand_files.add(HOTSPOT)
         overlap = cand_files & active_files
         if overlap:
             log(f"Issue #{cand_no} übersprungen: Datei-Kollision mit aktivem Auftrag auf "
@@ -423,7 +445,7 @@ Das Issue steht unten; es ist der Vertrag. Gehe genau diese Schritte durch und f
 4. Setze das Issue um, nur in den Dateien unter „### Betroffene Dateien“. Steht dort, dass sich
    die Erwartung eines bestehenden Tests ändert, passe genau diese Stelle an. Ergänze die Tests
    aus „### Fertig, wenn“.
-5. `python -m pytest -q`. Ist ein Test rot: Fehlermeldung lesen, Code (nicht den Akzeptanztest)
+5. `{TEST_CMD}`. Ist ein Test rot: Fehlermeldung lesen, Code (nicht den Akzeptanztest)
    korrigieren, Schritt 5 wiederholen. Ein roter Test ist kein Grund aufzuhören, sondern der
    nächste Arbeitsschritt. Erst weiter, wenn alles grün ist.
 6. `git add -A && git commit -m "<was und warum>" && git push -u origin {branch}`
@@ -610,8 +632,36 @@ def use_model(model: str) -> None:
         ACTIVE_MODEL, WORKER = model, worker_name(model)
 
 
+def project_done(state: dict) -> frozenset:
+    """Erledigte Nacharbeiten des aktiven Projekts, ohne Projektvorsatz. Beim ersten Projekt zählen
+    nur Schlüssel ohne „/“ (so waren sie schon immer), bei den weiteren nur die mit eigenem Vorsatz."""
+    keys = state.get(DONE, [])
+    if PREFIX:
+        return frozenset(k[len(PREFIX):] for k in keys if k.startswith(PREFIX))
+    return frozenset(k for k in keys if "/" not in k)
+
+
 def find_job(state: dict):
-    return rework_job(frozenset(state.get(DONE, []))) or text_fix_job() or issue_job()
+    return rework_job(project_done(state)) or text_fix_job() or issue_job()
+
+
+def pick_job(state: dict):
+    """Erste Arbeit im ersten Projekt, das welche hat (Reihenfolge der Projektliste); None, wenn nirgends.
+
+    Mit nur einem Projekt unverändert find_job(). Ein Projekt, dessen Klon fehlt, wird einmal gemeldet
+    und übersprungen. Nach einem Treffer bleibt dieses Projekt aktiv, die Globalen gehören ihm."""
+    if len(PROJECTS) == 1:
+        return find_job(state)
+    for i, p in enumerate(PROJECTS):
+        if not os.path.isdir(p.workdir):
+            log_on_change(state, f"_fehlt:{p.name}", "fehlt",
+                          f"Projekt {p.name}: Klon {p.workdir} fehlt, übersprungen (install.sh ausführen).")
+            continue
+        use_project(p, first=(i == 0))
+        job = find_job(state)
+        if job:
+            return job
+    return None
 
 
 def log_on_change(state: dict, slot: str, what: str, msg: str) -> bool:
@@ -721,39 +771,41 @@ def main() -> int:
             return 0
         if log_on_change(state, LAST_PC, "bereit", "Gaming-PC an, Chat aktiv: suche Arbeit."):
             state.pop(LAST_WORK, None)   # Ergebnis der ersten Suche wieder zeigen
-    job = find_job(state)
+    job = pick_job(state)
     if not job:
         log_on_change(state, LAST_WORK, "keine", "Keine Arbeit.")
         return 0
     key, task, pr_no, before = job
-    if state.get(key, 0) >= MAX_TRIES:
-        log_on_change(state, LAST_WORK, f"{key} liegt", f"{key}: schon {MAX_TRIES} Versuche, wartet auf Stephan.")
+    skey = PREFIX + key          # im Zustand und im Log mit Projektvorsatz (beim ersten Projekt leer)
+    if state.get(skey, 0) >= MAX_TRIES:
+        log_on_change(state, LAST_WORK, f"{skey} liegt", f"{skey}: schon {MAX_TRIES} Versuche, wartet auf Stephan.")
         return 0
     if BACKEND != "litellm" and not ollama_free(
-            status, say=lambda m: log_on_change(state, LAST_WORK, f"{key} belegt", m)):
+            status, say=lambda m: log_on_change(state, LAST_WORK, f"{skey} belegt", m)):
         return 0
     if BACKEND == "litellm":
         # Erst hier prüfen: ohne Arbeit kostet der Takt keine Anfrage. Vor dem Zähler, damit ein
         # gestörter Anbieter keine Versuche verbraucht.
         model, failed = choose_model()
         if model is None:
-            log_on_change(state, LAST_WORK, f"{key} kein Modell",
-                          f"{key}: kein Modell antwortet ({'; '.join(failed)}), warte. Versuch zählt nicht.")
+            log_on_change(state, LAST_WORK, f"{skey} kein Modell",
+                          f"{skey}: kein Modell antwortet ({'; '.join(failed)}), warte. Versuch zählt nicht.")
             return 0
         if failed:
             log(f"{'; '.join(failed)} – weiche auf {model} aus.")
         if model != ACTIVE_MODEL:
             use_model(model)
             # Die Aufträge enthalten „Worker: …“; mit dem neuen Namen neu bauen.
-            job = find_job(state)
+            job = find_job(state)   # Projekt steht schon fest; nicht noch einmal durch die Liste
             if not job:
                 return 0
             key, task, pr_no, before = job
-            if state.get(key, 0) >= MAX_TRIES:
+            skey = PREFIX + key
+            if state.get(skey, 0) >= MAX_TRIES:
                 return 0
-    state[LAST_WORK] = key
+    state[LAST_WORK] = skey
 
-    state[key] = state.get(key, 0) + 1
+    state[skey] = state.get(skey, 0) + 1
     save_state(state)
     # Jeder Lauf startet auf sauberem main; Reste eines abgebrochenen Laufs stören sonst.
     prepare_workdir()
@@ -762,18 +814,18 @@ def main() -> int:
               "WICHTIGE REGELN FÜR DIESEN LAUF:\n"
               "1. BRANCHE-CHECK: Verifiziere mit `git branch`, ob du auf dem Ziel-Branch bist, bevor du etwas änderst.\n"
               "2. PRÄZISE ÄNDERUNGEN: Überschreibe niemals ganze Dateien! Nutze kleine Python-Skripte (z.B. mit `open()`, `.replace()`) oder `sed`, um nur die betroffenen Zeilen auszutauschen.\n"
-              "3. TEST-PFLICHT: Führe vor jedem Push zwingend `python -m pytest -q` aus. Ein roter Test heißt: Code weiter korrigieren.\n"
+              f"3. TEST-PFLICHT: Führe vor jedem Push zwingend `{TEST_CMD}` aus. Ein roter Test heißt: Code weiter korrigieren.\n"
               "4. ESKALATION: Arbeite ohne Rückfragen. Kommst du nicht weiter, schreibe das Problem als Kommentar ins Issue bzw. den PR und beende deine Arbeit.\n\n"
               "Nutze gh für alle GitHub-Schritte.")
     name = "OpenCode" if AGENT == "opencode" else "Qwen Code"
     if BACKEND == "litellm":
         name += f" mit {ACTIVE_MODEL}"
-    log(f"{key} (Versuch {state[key]}): starte {name}.")
+    log(f"{skey} (Versuch {state[skey]}): starte {name}.")
     rc = run_agent(prompt)
     if rc == 124:
-        log(f"{key}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
+        log(f"{skey}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
     else:
-        log(f"{key}: {name} beendet (Exit {rc}).")
+        log(f"{skey}: {name} beendet (Exit {rc}).")
     # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
     if key.startswith("issue"):
         check_issue_result(key)
@@ -782,16 +834,16 @@ def main() -> int:
         after = pr_snapshot(view)
         m = re.match(r"feature/issue-(\d+)", view.get("headRefName", ""))
         if m:
-            warn_text(key, pr_no, view.get("body"), int(m.group(1)))
+            warn_text(skey, pr_no, view.get("body"), int(m.group(1)))
         if after != before:
             if after[0] != before[0]:
-                log(f"{key}: neuer Commit {after[0][:7]} auf PR #{pr_no}.")
+                log(f"{skey}: neuer Commit {after[0][:7]} auf PR #{pr_no}.")
             else:
-                log(f"{key}: PR-Text von #{pr_no} geändert, kein neuer Commit.")
-            state.setdefault(DONE, []).append(key)
+                log(f"{skey}: PR-Text von #{pr_no} geändert, kein neuer Commit.")
+            state.setdefault(DONE, []).append(skey)
             save_state(state)
         else:
-            log(f"WARNUNG {key}: weder Commit noch PR-Text auf PR #{pr_no} geändert, "
+            log(f"WARNUNG {skey}: weder Commit noch PR-Text auf PR #{pr_no} geändert, "
                 "Nacharbeit nicht erledigt.")
     return 0
 

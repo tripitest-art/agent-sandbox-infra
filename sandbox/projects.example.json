@@ -1,0 +1,20 @@
+{
+  "projects": [
+    {
+      "name": "sc-digger",
+      "repo": "tripitest-art/sc-digger",
+      "workdir": "/root/sc-digger",
+      "test_cmd": "python -m pytest -q",
+      "hotspot": "sc_digger/main.py",
+      "hotspot_label": "berührt-main.py",
+      "review_skill": "skills/sc-digger-review/SKILL.md",
+      "auto_merge": true
+    },
+    {
+      "name": "agent-sandbox-infra",
+      "repo": "tripitest-art/agent-sandbox-infra",
+      "workdir": "/root/agent-sandbox-infra",
+      "auto_merge": false
+    }
+  ]
+}
