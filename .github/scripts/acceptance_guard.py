@@ -6,7 +6,10 @@ machen, indem er sie abschwächt. Dieser Check ist der unabhängige Schiedsricht
 1. Bereits gemergte Akzeptanztests (tests/acceptance/) sind unveränderlich.
 2. Verlinkt der PR ein Issue („Closes #N“) mit Akzeptanztest-Block, muss
    tests/acceptance/test_issue_N.py genau diesem Block entsprechen.
-3. Keine neuen skip/xfail-Markierungen in Tests.
+3. Keine neuen skip/xfail-Markierungen in Tests. Liefert GitHub den Diff einer Testdatei
+   nicht (binär, zu groß, mehr als 3000 Dateien im PR), ist die Prüfung unmöglich und
+   damit ein Verstoß gegen 3 – nicht eine Notiz. Sonst bliebe der Check grün, obwohl er
+   nichts gesehen hat.
 4. CI- und Test-Infrastruktur (.github/, conftest.py, pytest-Konfiguration) bleibt unberührt.
 5. Der Text eines verlinkten Issues mit Akzeptanztest-Block wird nach der Übernahme
    (erstes Label `in-arbeit`) nicht mehr geändert. Sonst ändert, wer den Text ändert,
@@ -208,7 +211,11 @@ def evaluate(
         # 3. Kein neues Überspringen von Tests.
         if name.startswith("tests/") or PurePosixPath(name).name.startswith("test_"):
             if f.get("patch") is None and status not in ("removed",):
-                res.notes.append(f"Kein Diff von GitHub für `{name}` (zu groß?), skip-Prüfung nicht möglich.")
+                # GitHub lässt `patch` weg (binär, Diff zu groß, PR über 3000 Dateien). Dann ist
+                # die skip-Prüfung unmöglich: Wer den Diff versteckt, umgeht sie sonst lautlos.
+                protected(f"Kein Diff von GitHub für `{name}` (zu groß oder binär?), "
+                          "skip-Prüfung nicht möglich. Datei verkleinern; im Ausnahmefall "
+                          f"entscheidet Stephan mit `{OVERRIDE_LABEL}`.")
             for hit in added_skip_markers(f.get("patch")):
                 protected(f"Neues skip/xfail in `{name}`: `{hit}`")
 

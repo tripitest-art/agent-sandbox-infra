@@ -160,6 +160,29 @@ def test_new_skip_in_tests_needs_override():
     assert g.evaluate([f], {g.OVERRIDE_LABEL}, {}, _reader({})).ok
 
 
+def test_missing_diff_on_test_file_is_a_violation():
+    # GitHub lässt `patch` weg (binär, Diff zu groß, PR über 3000 Dateien). Dann ist die
+    # skip-Prüfung unmöglich; der Check darf nicht grün bleiben, sonst versteckt der Diff den skip.
+    res = g.evaluate([_file("tests/test_core.py", patch=None)], set(), {}, _reader({}))
+    assert not res.ok
+    assert "Kein Diff" in res.violations[0] and "tests/test_core.py" in res.violations[0]
+
+
+def test_missing_diff_can_be_allowed_by_override():
+    res = g.evaluate([_file("tests/test_core.py", patch=None)], {g.OVERRIDE_LABEL}, {}, _reader({}))
+    assert res.ok
+    assert any("Erlaubt" in n for n in res.notes)
+
+
+def test_missing_diff_outside_tests_and_for_removed_files_is_no_violation():
+    # Nur Testdateien werden auf skip geprüft, und eine entfernte Datei hat nichts mehr zu prüfen.
+    files = [
+        _file("sc_digger/pipeline.py", patch=None),
+        _file("tests/test_old.py", status="removed", patch=None),
+    ]
+    assert g.evaluate(files, set(), {}, _reader({})).ok
+
+
 def test_ordinary_code_and_test_changes_pass():
     files = [
         _file("sc_digger/pipeline.py", patch="+x = 1"),
