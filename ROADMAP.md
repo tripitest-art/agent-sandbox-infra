@@ -136,3 +136,4 @@ Die meiste manuelle Vorbereitungszeit fließt in das Ausformulieren präziser Sc
 | **Stufe 3** | Continuous Deployment (`./update.sh` zum Server) | ⭐⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 4** | Prime-Time- & Budget-Scheduling | ⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🔵 **Geplant** |
+| **Baustein** | Mehrere Projekte (Projektliste, Infra-Repo als zweites Projekt) | ⭐⭐⭐⭐ | ✅ **Gemergt (#18, #19, #20)**; Inbetriebnahme auf dem Server: siehe [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) |
