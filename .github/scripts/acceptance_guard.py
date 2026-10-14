@@ -147,7 +147,19 @@ def added_skip_markers(patch: str | None) -> list[str]:
 
 
 def is_protected_infra(path: str) -> bool:
-    return path.startswith(PROTECTED_PREFIXES) or PurePosixPath(path).name in PROTECTED_NAMES
+    """True für `.github/**` und die bisherigen `PROTECTED_NAMES` — zusätzlich für jede
+    `__init__.py` im Testbaum: `PurePosixPath(path).name == "__init__.py"` und `"tests/"` kommt
+    im Pfad vor. Damit sind `tests/__init__.py`, `tests/acceptance/__init__.py` und
+    `tests/unit/__init__.py` geschützt, `sc_digger/__init__.py` nicht. Neu **und** geändert:
+    auch eine bereits vorhandene `__init__.py` im Testbaum ist ein Verstoß.
+
+    Warum auch `__init__.py`: deren Code läuft beim Einsammeln der Tests, bevor ein
+    eingefrorener Akzeptanztest importiert wird — sie kann das Modul unter Test ersetzen.
+    """
+    if path.startswith(PROTECTED_PREFIXES):
+        return True
+    name = PurePosixPath(path).name
+    return name in PROTECTED_NAMES or (name == "__init__.py" and "tests/" in path)
 
 
 def _instant(ts: str) -> datetime:
