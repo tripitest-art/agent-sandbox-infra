@@ -84,12 +84,12 @@ warten; ein roter `github-advanced-security` ist kein Mangel.
 
 - Issue über das Formular „Aufgabe für einen Agenten“: exakte Signaturen, was ausdrücklich
   nicht dazugehört, Merge-Modus.
-- Ablauf: wie in sc-digger (`ENTWICKLUNG.md` dort, „Planer-Ablauf“). Ohne Shell `entwurf` statt `bereit`.
+- Ablauf: `docs/planer-ablauf.md`. Ohne Shell `entwurf` statt `bereit`.
 - Akzeptanztests als pytest-Code ins Issue. Sie laufen ohne Netzwerk, ohne `gh` und ohne Server
   (die Takt-Skripte lädt man wie in `tests/test_worker_tick.py` per Pfad; `gh`, Uhr und Netz sind dort
   gefaked) und sind vor der Umsetzung rot.
 - Labels: `worker-task`, `bereit`, `phase-N`, ein `agent-<familie>` (Tabelle „Agenten-Labels“ in
-  sc-digger, `ENTWICKLUNG.md`).
+  `docs/planer-ablauf.md`).
 - Muss das Issue auf andere warten (gleiche Dateien, Regel 8, oder es baut darauf auf): Label
   `blockiert` statt `bereit` und im Kontext eine Zeile `Wartet auf: #X, #Y` (PRs oder Issues).
   Daran gibt der Review-Takt das Issue nach dem Merge frei.
@@ -156,7 +156,7 @@ deren `Wartet auf:` erledigt ist (Label `blockiert` → `bereit`).
 
 ### Agenten ohne Shell (MCP)
 
-Gleiche Regeln, mit den GitHub-Werkzeugen des Agenten (Einrichtung: `MCP.md` in sc-digger). Ein
+Gleiche Regeln, mit den GitHub-Werkzeugen des Agenten (Einrichtung: `docs/mcp.md`). Ein
 Label-Update ersetzt die ganze Liste: alle lesen, nur `bereit` ↔ `in-arbeit` tauschen. Der CI-Check
 `tests` ersetzt den lokalen Lauf. Fehlt ein Werkzeug (z. B. Merge): im PR nennen, Stephan erledigt es.
 

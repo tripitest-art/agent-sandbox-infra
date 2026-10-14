@@ -31,3 +31,16 @@ def test_under_antigravity_limit():
 
 def test_no_agent_merges_here():
     assert "Hier mergt und deployt kein Agent" in TEXT
+
+
+def test_vertragsdokumente_liegen_im_repo():
+    """AGENTS.md verweist nicht ins Leere: die Dokumente liegen hier, nicht in sc-digger.
+
+    Vorher stand dort „Ablauf: wie in sc-digger (`ENTWICKLUNG.md` dort …)" — für einen Agenten in
+    diesem Repo ein toter Verweis, weil Regel 9 ihm das Lesen dort verbietet.
+    """
+    for fremd in ("ENTWICKLUNG.md", "MCP.md in sc-digger"):
+        assert fremd not in TEXT
+    for pfad in ("docs/planer-ablauf.md", "docs/mcp.md"):
+        assert pfad in TEXT, f"AGENTS.md verweist nicht auf {pfad}"
+        assert (ROOT / pfad).is_file(), f"{pfad} fehlt"
