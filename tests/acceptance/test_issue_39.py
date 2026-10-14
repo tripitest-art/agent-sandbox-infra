@@ -55,9 +55,12 @@ class Board:
         raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
 
 
-def test_find_job_skips_parked_rework(monkeypatch):
+def test_find_job_skips_parked_rework(monkeypatch, tmp_path):
     # Geparkte Nacharbeit darf die Auswahl nicht blockieren: das Issue kommt dran.
+    # `job_parked` meldet über log_on_change, und das speichert den Zustand — STATE muss also
+    # schreibbar sein (wie im Zwillings-Test), nicht /root/worker-state.json.
     board = Board({102: {"worker-task", "bereit", "agent-qwen"}})
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
     monkeypatch.setattr(w, "gh", board)
     job = w.find_job({REWORK_KEY: w.MAX_TRIES})
     assert job and job[0] == "issue102"
