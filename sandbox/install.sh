@@ -197,9 +197,11 @@ done | sed '$ s/},$/}/')
 JSON
 
 echo "== Taktgeber"
-# Projektliste (Lademodul) liegt neben den Takt-Skripten; sie importieren es beim Start.
-install -m 644 "$SCRIPT_DIR/projects.py" /root/projects.py
-install -m 755 "$SCRIPT_DIR/worker_tick.py" /root/worker_tick.py
+# Alle Python-Module des Repos in einem Schritt nach /root: worker_tick.py und review_tick.py
+# importieren projects.py per sys.path, und eine neue Datei unter sandbox/ (z. B. ha_status.py)
+# muss ohne weitere Änderung mitkommen – sonst stirbt der Takt beim Start mit einem Traceback.
+install -m 644 "$SCRIPT_DIR"/*.py /root/
+chmod 755 /root/worker_tick.py /root/review_tick.py /root/qwen_webhook.py   # werden direkt gestartet
 
 # Worktree-Ordner je Projekt legt ensure_projects an (bei MAX_WORKERS > 1).
 
@@ -290,7 +292,7 @@ else
 fi
 
 echo "== Review-Takt"
-install -m 755 "$SCRIPT_DIR/review_tick.py" /root/review_tick.py
+# review_tick.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py).
 cat > /etc/systemd/system/qwen-review.service <<UNIT
 [Unit]
 Description=Review-Takt: ein PR pro Takt (sandbox/review_tick.py)
@@ -339,7 +341,7 @@ if [ -e /etc/systemd/system/qwen-mqtt.service ] || [ -e /etc/qwen-mqtt.env ]; th
   [ -e /etc/qwen-mqtt.env ] && shred -u /etc/qwen-mqtt.env
   echo "qwen-mqtt: entfernt (inkl. /etc/qwen-mqtt.env)"
 fi
-install -m 755 "$SCRIPT_DIR/qwen_webhook.py" /root/qwen_webhook.py
+# qwen_webhook.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py).
 install -m 644 "$SCRIPT_DIR/systemd/qwen-webhook.service" /etc/systemd/system/qwen-webhook.service
 systemctl daemon-reload
 if [ -f /etc/qwen-webhook.env ] && grep -q '^HA_WEBHOOK_URL=.' /etc/qwen-webhook.env; then

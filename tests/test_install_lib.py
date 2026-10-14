@@ -69,6 +69,26 @@ def test_conf_save_rejects_unsafe_value_and_keeps_old_file(tmp_path):
     assert (tmp_path / "agent-sandbox.conf").read_text() == "MAX_WORKERS=2\n"
 
 
+def test_conf_save_keeps_keys_it_does_not_receive(tmp_path):
+    """Ein Schlüssel, den install.sh nicht kennt, darf beim nächsten Lauf nicht verschwinden."""
+    (tmp_path / "agent-sandbox.conf").write_text("HA_STATUS=an\nMAX_WORKERS=2\n")
+    r = sh('MAX_WORKERS=3; REVIEW_POST=1; conf_save MAX_WORKERS REVIEW_POST\n'
+           'echo "$(conf_get MAX_WORKERS)/$(conf_get REVIEW_POST)/$(conf_get HA_STATUS)"', tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "3/1/an"
+    # Unbekannte Zeile in ursprünglicher Reihenfolge zuerst, danach die übergebenen Schlüssel je einmal.
+    assert (tmp_path / "agent-sandbox.conf").read_text() == "HA_STATUS=an\nMAX_WORKERS=3\nREVIEW_POST=1\n"
+
+
+def test_conf_save_sets_mode_600_on_an_existing_644_file(tmp_path):
+    conf = tmp_path / "agent-sandbox.conf"
+    conf.write_text("MAX_WORKERS=2\n")
+    conf.chmod(0o644)
+    r = sh('MAX_WORKERS=3; conf_save MAX_WORKERS\nstat -c %a "$AGENT_SANDBOX_CONF"', tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "600"
+
+
 # ---- Projekte ----
 
 def test_ensure_projects_clones_missing_and_skips_existing(tmp_path):
