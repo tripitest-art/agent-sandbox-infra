@@ -17,6 +17,8 @@ def sh(script, tmp_path, **env):
     git = bin_dir / "git"
     git.write_text('#!/bin/sh\necho "git $*" >> "$GIT_LOG"\n'
                    '[ "$1" = clone ] && [ "$FAKE_CLONE_FAIL" = 1 ] && exit 128\n'
+                   '[ "$3" = fetch ] && [ "$FAKE_FETCH_FAIL" = 1 ] && exit 128\n'
+                   '[ "$3" = status ] && [ "$FAKE_DIRTY" = 1 ] && echo " M datei"\n'
                    '[ "$1" = clone ] && mkdir -p "$4/.git"\nexit 0\n')
     git.chmod(git.stat().st_mode | stat.S_IEXEC)
     full = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "GIT_LOG": str(tmp_path / "git.log"),
@@ -74,7 +76,8 @@ def test_ensure_projects_clones_missing_and_skips_existing(tmp_path):
     pf = projects_file(tmp_path, ("a", "tripitest-art/a", "vorhanden"), ("b", "tripitest-art/b", "neu/b"))
     r = sh("ensure_projects", tmp_path, AGENT_PROJECTS=pf)
     assert r.returncode == 0, r.stderr
-    assert git_log(tmp_path) == [f"git clone -q https://github.com/tripitest-art/b.git {tmp_path}/neu/b"]
+    clones = [l for l in git_log(tmp_path) if l.startswith("git clone")]
+    assert clones == [f"git clone -q https://github.com/tripitest-art/b.git {tmp_path}/neu/b"]
     assert "Projekt a: Klon vorhanden" in r.stdout and "Projekt b: tripitest-art/b" in r.stdout
 
 
@@ -125,3 +128,44 @@ def test_install_wires_lib_and_survives_red_tests():
     # die Testzeile darf set -e nicht auslösen
     line = next(l for l in text.splitlines() if "pytest -q 2>&1 | tail -1" in l)
     assert "||" in line
+
+
+# ---- Basis-Klon auf main halten ----
+
+def existing_clone(tmp_path):
+    pf = projects_file(tmp_path, ("a", "o/a", "a-dir"))
+    (tmp_path / "a-dir" / ".git").mkdir(parents=True)
+    return pf
+
+
+def test_existing_clone_is_set_to_origin_main(tmp_path):
+    pf = existing_clone(tmp_path)
+    r = sh("ensure_projects", tmp_path, AGENT_PROJECTS=pf)
+    assert r.returncode == 0, r.stderr
+    log = git_log(tmp_path)
+    d = str(tmp_path / "a-dir")
+    assert f"git -C {d} fetch -q origin main" in log
+    assert f"git -C {d} checkout -q -B main origin/main" in log
+    assert not any(l.startswith(("git clone", "git reset")) for l in log)
+
+
+def test_dirty_clone_is_left_alone_with_warning(tmp_path):
+    pf = existing_clone(tmp_path)
+    r = sh("ensure_projects", tmp_path, AGENT_PROJECTS=pf, FAKE_DIRTY="1")
+    assert r.returncode == 0
+    assert not any("checkout" in l for l in git_log(tmp_path))
+    assert "lokale Änderungen" in r.stderr
+
+
+def test_fetch_failure_does_not_abort_install(tmp_path):
+    pf = existing_clone(tmp_path)
+    r = sh("ensure_projects", tmp_path, AGENT_PROJECTS=pf, FAKE_FETCH_FAIL="1")
+    assert r.returncode == 0
+    assert not any("checkout" in l for l in git_log(tmp_path))
+    assert "fetch fehlgeschlagen" in r.stderr
+
+
+def test_fresh_clone_is_not_synced_again(tmp_path):
+    pf = projects_file(tmp_path, ("a", "o/a", "a-dir"))
+    sh("ensure_projects", tmp_path, AGENT_PROJECTS=pf)
+    assert not any("checkout" in l for l in git_log(tmp_path))

@@ -83,6 +83,10 @@ erscheint also etwa 10 Minuten nach grünen Checks, die Nacharbeit läuft binnen
 **`workdir` darf nie der Klon sein, in dem `git pull` läuft** (`/root/agent-sandbox-infra`): Der Worker
 setzt seinen Klon mit `reset --hard` und `clean` zurück. `install.sh` verweigert das.
 
+`install.sh` setzt den Basis-Klon jedes Projekts außerdem auf `origin/main` (der alte Branch bleibt
+bestehen). Mit lokalen Änderungen oder bei einem Fetch-Fehler bleibt der Klon unberührt, es gibt nur
+eine Warnung. Ein Klon auf einem alten Feature-Branch hatte schon rote Tests verursacht.
+
 ## Ein neues Projekt aufnehmen
 
 Voraussetzung ist der Vertrag aus sc-digger:
