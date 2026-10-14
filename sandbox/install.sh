@@ -180,6 +180,8 @@ done | sed '$ s/},$/}/')
 JSON
 
 echo "== Taktgeber"
+# Projektliste (Lademodul) liegt neben den Takt-Skripten; sie importieren es beim Start.
+install -m 644 "$SCRIPT_DIR/projects.py" /root/projects.py
 install -m 755 "$SCRIPT_DIR/worker_tick.py" /root/worker_tick.py
 
 # Basis- und Worktree-Verzeichnisse vorbereiten
