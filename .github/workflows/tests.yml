@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python-Pakete
+        run: pip install pytest
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Shell-Skripte (Syntax)
+        run: for f in sandbox/*.sh; do bash -n "$f"; done
+
+      - name: Keine Zugangsdaten im Repo
+        run: |
+          if git grep -n -E 'ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|sk-[A-Za-z0-9]{30,}|(LITELLM_API_KEY|LITELLM_REVIEW_KEY|HA_WEBHOOK_URL)=[A-Za-z0-9_-]{20,}|/api/webhook/[A-Za-z0-9_-]{16,}' -- . ':!AGENTS.md'; then
+            echo "::error::Möglicher Schlüssel im Repo gefunden (siehe oben)."
+            exit 1
+          fi
