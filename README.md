@@ -1,6 +1,6 @@
 # 🤖 Agent-Sandbox-Infra
 
-> **Autonome, isolierte Multi-Agenten-Entwicklungsumgebung mit Proxmox LXC, On-Demand Wake-on-LAN LLM-Server, hocheffizientem AMD RDNA2 GPU-Tuning und Home Assistant Live-Telemetrie.**
+> **Autonome Multi-Agenten-Infrastruktur mit Proxmox LXC, isolierten parallelen Worker-Slots, automatischem Review- und Merge-Takt, LiteLLM-Budgetüberwachung, On-Demand WoL LLM-Host und Home Assistant Live-Telemetrie.**
 
 ---
 
@@ -8,35 +8,66 @@
 
 ```mermaid
 flowchart TD
+    subgraph GitHub["GitHub Cloud (Multi-Projekt)"]
+        REPO["Repositories (sc-digger, agent-sandbox-infra, ...)<br>• Issues (worker-task, bereit)<br>• PRs & CI (acceptance-guard, pytest, CodeQL)<br>• Multi-Agent Governance & Squash-Merge"]
+    end
+
     subgraph Proxmox["Proxmox VE Server"]
-        LXC["Debian 12 LXC (agent-sandbox)<br>• Taktgeber (worker_tick.py)<br>• OpenCode / Qwen-Code CLI<br>• systemd Timer (alle 5 min)"]
-        WEBHOOK["qwen-webhook Service<br>(sendet neue Zeilen aus worker.log)"]
-        LXC -->|folgt worker.log| WEBHOOK
+        subgraph CT112["Debian 12 LXC (CT 112: agent-sandbox)"]
+            W1["Worker Slot 1 (w1)<br>worker_tick.py"]
+            W2["Worker Slot 2 (w2)<br>worker_tick.py"]
+            REV["Review-Takt (alle 10 min)<br>review_tick.py (GLM via LiteLLM)"]
+            WH["qwen-webhook Service<br>(Live-Log & Slot-Telemetrie)"]
+            HS["ha-status Timer (alle 2 min)<br>(Projekt-Matrix & LiteLLM-Budgets)"]
+        end
+
+        subgraph LXC113["Debian 12 LXC (CT 113: LiteLLM Proxy)"]
+            LLM_PROXY["LiteLLM Proxy (:4000)<br>• coder (DeepSeek V3/V4)<br>• coder-glm (GLM 5.3 Flash)<br>• Fallbacks (coder-or, coder-free)<br>• Virtual Keys & Budget-Tracking"]
+        end
     end
 
-    subgraph LLM_Host["Gaming-PC (LLM Server)"]
-        WOL_PROXY["WoL-Proxy (:11434)<br>• Auto-Sleep nach 5 min Idle<br>• /api/ps weckt Host per WoL"]
-        OLLAMA["Ollama (:11434)<br>• qwen3-coder-64k (30B MoE, Q4_K_M)<br>• 64k Kontextfenster<br>• Flash Attention + Q8_0 KV-Cache"]
-        GPU["AMD Radeon RX 6800 XT (16 GB)<br>• 255 W Power-Limit (Karten-Minimum)<br>• 2100 MHz Core Cap, -90 mV Offset<br>• ~37 Tokens/s bei 64k, ~160 W unter Last"]
+    subgraph LLM_Host["Lokaler Gaming-PC (Optionaler LLM Host)"]
+        WOL_PROXY["WoL-Proxy (:11434)<br>• Auto-Sleep nach 5 min Idle<br>• On-Demand Wake-on-LAN"]
+        OLLAMA["Ollama (:11434)<br>• qwen3-coder-64k (30B MoE, Q4_K_M)<br>• AMD RX 6800 XT (LACT, 2100 MHz, -90 mV)"]
         WOL_PROXY --> OLLAMA
-        OLLAMA --> GPU
     end
 
-    subgraph GitHub["GitHub Cloud"]
-        REPO["Repository (z. B. sc-digger)<br>• Issues (worker-task, bereit)<br>• PRs & CI (acceptance-guard)<br>• Multi-Agent Reviews"]
+    subgraph SmartHome["Home Assistant (:8123)"]
+        HA["Home Assistant OS<br>• Dashboard 'KI Cloud' (system-llm-cloud)<br>• Mushroom Live-Slot-Karten (w1, w2)<br>• Multi-Projekt Matrix & 'Braucht Stephan'-Alerts<br>• Prime-Time Kachel, Budget-Trends & Live-Log"]
     end
 
-    subgraph SmartHome["Home Assistant"]
-        HA["Home Assistant OS (:8123)<br>• Webhook-Trigger-Sensor (Live-Log)<br>• REST-Sensor (:11434/proxy/status)<br>• Live-Log Dashboard Card"]
+    subgraph MusicServer["Musik-Server (LXC 107)"]
+        DEPLOY["Auto-Deploy Pull-Timer<br>• sc_digger/autodeploy.py (alle 5-15 min)<br>• ./update.sh (Docker Build & Rauchtest)<br>• Autonomer Rollback bei Fehlschlag"]
     end
 
-    LXC -->|1. Holt Issues / PRs| REPO
-    LXC -->|2. HTTP Request an Ollama| WOL_PROXY
-    WOL_PROXY -.->|Magic Packet bei Bedarf| LLM_Host
-    LXC -->|3. Erstellt PRs & Commits| REPO
-    WEBHOOK -->|HTTP POST Webhook :8123| HA
-    HA -->|REST Polling| WOL_PROXY
+    W1 & W2 -->|1. Holt Aufgaben & setzt um| REPO
+    W1 & W2 -->|2. Code-Generierung via LiteLLM| LLM_PROXY
+    W1 & W2 -.->|Alternativ: Lokales Backend| WOL_PROXY
+    W1 & W2 -->|3. Erstellt PRs mit Akzeptanztests| REPO
+
+    REV -->|4. Prüft PRs, urteilt unabhängig| REPO
+    REV -->|5. Auto-Merge & Entblocken| REPO
+    REV -->|Auswertung via| LLM_PROXY
+
+    WH & HS -->|6. JSON Webhook Telemetrie| HA
+    HA -.->|Push bei 'braucht-stephan' / Heartbeat-Ausfall| SmartHome
+
+    REPO -->|7. Auto-Deploy via Read-Only Pull| DEPLOY
 ```
+
+---
+
+## 🚀 Die 5 Ausbaustufen (Roadmap-Status)
+
+Details und Verträge: [`ROADMAP.md`](ROADMAP.md).
+
+| Stufe | Bezeichnung | Status | Kernmerkmale |
+|:---:|---|:---:|---|
+| **1** | **Autonomer Auto-Merge & Entblockierung** | ✅ **Live** | `review_tick.py` mergt PRs nach unabhängigem Freigabe-Urteil und grünem CI autonom per Squash-Merge (`gh pr merge --squash`); entblockt Folge-Issues (`Wartet auf: #X, #Y`). |
+| **2** | **Strukturierte Slot-Telemetrie & HA-Dashboard** | 🟡 **In Arbeit** ([#14](https://github.com/tripitest-art/agent-sandbox-infra/issues/14)) | Atomare Statusdateien (`slot-1.json`, `slot-2.json`) in `/run/worker-slots/`, PID-Überwachung (Dead-PID Detection), reaktiver Webhook-Stream und Mushroom-Karten mit Live-Task, Modell, Laufzeit-Timer und GitHub-Direktlinks. |
+| **3** | **Continuous Deployment (Zero-Touch via `./update.sh`)** | 🔵 **Bereit** ([#15](https://github.com/tripitest-art/agent-sandbox-infra/issues/15)) | Vollständig entkoppelter Pull-Timer auf dem Musik-Server (`sc_digger/autodeploy.py` aus sc-digger #241). Kein SSH aus der Sandbox; automatischer Rollback auf `last_good` bei Build- oder Healthcheck-Fehler. |
+| **4** | **Prime-Time & Kosten-intelligentes Scheduling** | ⏳ **Geplant** ([#16](https://github.com/tripitest-art/agent-sandbox-infra/issues/16)) | Dynamisches Umschalten von LiteLLM-Modellen anhand von DeepSeek Prime-Time Tarifen (Peak 1,20 $/1M vs. Off-Peak 0,60 $/1M), automatische Drosselung bei Budgetannäherung. |
+| **5** | **Planer-Beschleunigung (AI Issue Pre-Flight)** | ⏳ **Geplant** ([#17](https://github.com/tripitest-art/agent-sandbox-infra/issues/17)) | Automatisierte Akzeptanztest-Validierung (Rot-Prüfung vor Issue-Freigabe), automatische Hotspot- und Abhängigkeitserkennung für den Planer. |
 
 ---
 
@@ -45,129 +76,66 @@ flowchart TD
 | Verzeichnis | Beschreibung |
 |---|---|
 | [`ROADMAP.md`](ROADMAP.md) | Roadmap und 5-Stufen-Optimierungsplan für den autonomen Multi-Agenten-Workflow. |
-| [`proxmox/`](proxmox/) | Shell-Skripte zur Erstellung des unprivilegierten Debian 12 LXC-Containers auf Proxmox VE. |
-| [`sandbox/`](sandbox/) | Setup-Skripte (`install.sh`), der autonome Taktgeber (`worker_tick.py`), der Review-Takt (`review_tick.py`) und systemd-Units (`qwen-worker`, `qwen-review`, `qwen-webhook`). |
-| [`hardware/`](hardware/) | GPU-Hardware-Tuning für AMD RDNA2 (LACT, 2100 MHz, −90 mV, 255 W) mit Messwerten und Ollama-Service Overrides. |
-| [`homeassistant/`](homeassistant/) | YAML-Konfigurationen für REST- und Webhook-Sensoren, die Lovelace-Dashboard-Karte und die Push-Meldung „PR braucht Stephan“. |
-| [`tests/`](tests/) | Unit-Tests für Worker- und Review-Takt (`test_worker_tick.py`, `test_review_tick.py`, `test_projects.py`), laufen ohne Netzwerk mit Mocks. |
+| [`AGENTS.md`](AGENTS.md) | Verbindliche Einweisung und Governance-Regeln für alle KI-Agenten (Planer, Worker, Reviewer). |
+| [`docs/`](docs/) | Vertiefende Dokumentation ([`mehrere-projekte.md`](docs/mehrere-projekte.md), GitHub Ruleset [`main-schutz.ruleset.json`](docs/main-schutz.ruleset.json)). |
+| [`sandbox/`](sandbox/) | Steuerungslogik: Setup (`install.sh`, `install-lib.sh`), Worker-Takt (`worker_tick.py`), Review-Takt (`review_tick.py`), Multi-Projektverwaltung (`projects.py`), Webhook-Daemon (`qwen_webhook.py`), Status-Reporter (`ha_status.py`) und systemd-Units (`sandbox/systemd/`). |
+| [`proxmox/`](proxmox/) | Host-Skripte zur Erstellung des unprivilegierten Debian 12 LXC-Containers auf Proxmox VE (`host-create.sh`). |
+| [`hardware/`](hardware/) | AMD RDNA2 GPU-Tuning für den lokalen LLM-Host (LACT, 2100 MHz, −90 mV, 255 W) mit Benchmarks und Ollama-Overrides. |
+| [`homeassistant/`](homeassistant/) | YAML-Konfigurationen: REST- und Webhook-Sensoren (`configuration_sensors.yaml`), Lovelace Dashboard-Karten (`dashboard_card.yaml`) und Benachrichtigungs-Automationen. |
+| [`tests/`](tests/) | Testsuite für Worker-, Review- und Webhook-Logik, Multi-Projekte und `acceptance_guard.py` (ohne Netzwerk mit Mocks). |
+
+---
+
+## ⚙️ Funktionsweise im Detail
+
+### 1. Parallele Worker-Slots & Regel-8-Schutz
+- **Worktree-Isolation:** Mit `MAX_WORKERS=2` arbeitet jeder Slot in einem komplett isolierten Verzeichnis (z. B. `/root/sc-digger-worktrees/w1` und `/root/sc-digger-worktrees/w2`).
+- **Dateikollisionsschutz (Regel 8):** Der Taktgeber liest vor Auftragsannahme alle aktiven Aufgaben. Hat ein Issue Überschneidungen in `### Betroffene Dateien` mit einer bereits laufenden Aufgabe oder berührt die Sperrdatei (`hotspot`, z. B. `sc_digger/main.py`), wird es übersprungen, bis der andere Slot fertig ist.
+- **Modell-Fallback:** Vor jedem Lauf prüft der Worker mit einem Mini-Probe-Call das primäre Modell (`coder`, DeepSeek). Antwortet es nicht innerhalb des Timeouts, weicht er automatisch auf konfiguierte Alternativen aus (`coder-or` via OpenRouter, `coder-free` via Codestral).
+
+### 2. Autonomer Review-Takt & Auto-Merge
+- `review_tick.py` läuft alle 10 Minuten als unabhängiger systemd-Timer.
+- **Unabhängiges Modell:** Reviews werden mit `coder-glm` (GLM 5.3 Flash) oder bei großen Diffs mit `longctx-lite` (Gemini 3.5 Flash-Lite) durchgeführt – strikt getrennt von der Worker-Modellfamilie.
+- **Automatischer Merge:** Bei Urteil `**Freigegeben**`, bestandenen Pflicht-Checks (`tests`, `acceptance-guard`, `CodeQL`) und `### Merge-Modus: automatisch` führt das Skript den Squash-Merge eigenständig durch.
+- **Automatisches Entblocken:** Nach jedem Merge prüft das Skript alle blockierten Issues. Sind alle Bedingungen in `Wartet auf: #X, #Y` erfüllt, wird das Issue automatisch auf `bereit` umgestellt.
+
+### 3. Multi-Projekt-Unterstützung (`/etc/agent-projects.json`)
+Die Sandbox betreut mehrere Repositories parallel. In `/etc/agent-projects.json` (Vorlage: [`sandbox/projects.example.json`](sandbox/projects.example.json)) werden Projekte mit Kurzname, GitHub-Repo, lokalem Klon-Pfad und Hotspot-Regeln hinterlegt. Jeder Worker-Slot nimmt die nächste fällige Arbeit aus dem gemeinsamen Pool nach Priorität.
 
 ---
 
 ## 🚀 Schnelleinrichtung in 4 Schritten
 
-### 1. Hardware & Ollama vorbereiten (LLM-Host)
-* Kernel-Overdrive per `/etc/modprobe.d/amdgpu-overdrive.conf` (`ppfeaturemask=0xfff7ffff`) freischalten – kein Bootloader-Eingriff nötig.
-* Mit LACT: Power-Limit 255 W (Minimum der Karte), Core 2100 MHz, Offset −90 mV, VRAM 1040 MHz (Details und Messwerte in [`hardware/amd-rdna2-tuning.md`](hardware/amd-rdna2-tuning.md)).
-* Ollama mit `OLLAMA_FLASH_ATTENTION=1` **und** `OLLAMA_KV_CACHE_TYPE=q8_0` konfigurieren – q8_0 lädt ohne Flash Attention nicht.
-
-### 2. Sandbox auf Proxmox anlegen
+### 1. Sandbox auf Proxmox anlegen
 Auf dem Proxmox VE Host:
 ```bash
-# Repo ist privat: host-create.sh vom eigenen Rechner kopieren, z. B. scp proxmox/host-create.sh pve:/root/
-CTID=$(pvesh get /cluster/nextid) bash host-create.sh
+CTID=$(pvesh get /cluster/nextid) bash proxmox/host-create.sh
 ```
 
-### 3. SSH-Schlüssel & GitHub-Token hinterlegen
-* SSH-Zugang für Steuerungs-Agenten in den Container eintragen (siehe [`proxmox/README.md`](proxmox/README.md)).
-* Im Container per `gh auth login --with-token` einen feingranularen Token hinterlegen (nur für das Arbeitsrepo).
-* Dieses Repo ist **privat**. `install.sh` legt einen Deploy-Key nur zum Lesen an
-  (`/root/.ssh/agent_infra_deploy`) und gibt den öffentlichen Schlüssel aus. Ihn unter
-  Settings → Deploy keys **ohne** Schreibrecht eintragen und `install.sh` erneut ausführen; dann
-  läuft `git pull` über SSH. Erstes Klonen, solange noch kein Key existiert: Repo per `scp`
-  in den Container kopieren oder mit einem kurzlebigen Token klonen.
-* Den Taktgeber-Timer scharfschalten: `systemctl enable --now qwen-worker.timer`.
+### 2. GitHub-Zugang hinterlegen
+Im Container CT 112:
+- Per `gh auth login --with-token` einen feingranularen GitHub Personal Access Token (PAT) hinterlegen (mit Rechten für Issues, Pull Requests und Workflows im Arbeits-Repository).
+- `install.sh` erzeugt bei Bedarf einen lesenden Deploy-Key (`/root/.ssh/agent_infra_deploy`).
 
-### 4. Modell-Backend & Home Assistant anbinden
-* Standard ist `BACKEND=litellm`: Der Worker nutzt den Alias `coder` (DeepSeek) über den
-  LiteLLM-Proxy (LXC 113, `http://192.168.0.211:4000`) mit eigenem Virtual Key und Tagesbudget.
-  `BACKEND=ollama bash sandbox/install.sh` schaltet zurück auf Qwen3-Coder am Gaming-PC.
-* Vor jedem Lauf prüft der Worker mit einer Mini-Anfrage (45 s), ob `coder` antwortet. Sonst
-  nimmt er das erste Ausweichmodell aus `LITELLM_FALLBACKS` (Vorgabe `coder-or` = dasselbe DeepSeek über
-  OpenRouter, danach `coder-free` = Codestral,
-  kostenlos), und die Worker-Zeile im PR nennt dieses Modell. Antwortet keins, wartet er, ohne
-  einen Versuch zu verbrauchen. Beispiel: `LITELLM_FALLBACKS=coder-free,coder-glm bash sandbox/install.sh`.
-* Webhook-ID in HA `secrets.yaml` anlegen (siehe [`homeassistant/README.md`](homeassistant/README.md)); kein MQTT-Login mehr.
-* `bash sandbox/install.sh` im Container fragt fehlende Geheimnisse verdeckt ab
-  (LiteLLM-Key → `/etc/qwen-worker.env`, Webhook-URL → `/etc/qwen-webhook.env`, beide 600)
-  und richtet `qwen-webhook.service` ein (ein alter `qwen-mqtt.service` wird entfernt). **Keine Geheimnisse ins Repo** – es ist öffentlich.
-* **Parallele Worker (`MAX_WORKERS`):** Mit `MAX_WORKERS=2 bash sandbox/install.sh` werden 2 parallele Worker-Slots (`qwen-worker@1.timer`, `qwen-worker@2.timer`) gestaffelt aktiviert. Jeder Slot arbeitet in einem isolierten Git-Worktree (`/root/sc-digger-worktrees/w<N>`). Der Taktgeber verhindert automatisch Kollisionen: Issues mit `berührt-main.py` oder Überschneidungen in `### Betroffene Dateien` mit bereits aktiven Aufgaben werden übersprungen (Regel 8). Parallele Worker sind nur bei `BACKEND=litellm` aktiv; bei `BACKEND=ollama` wird strikt 1 Worker erzwungen.
-* YAML-Snippets aus [`homeassistant/`](homeassistant/) in die `configuration.yaml` und das Dashboard einfügen.
+### 3. Installation & Konfiguration ausführen
+```bash
+cd /root/agent-sandbox-infra
+bash sandbox/install.sh
+```
+Das Skript fragt fehlende Geheimnisse verdeckt ab (LiteLLM-Key → `/etc/qwen-worker.env`, Reviewer-Key → `/etc/qwen-reviewer.env`, Webhook-URL → `/etc/qwen-webhook.env`, alle Rechte `0600`) und richtet die systemd-Dienste ein:
+- Einstellungen wie `MAX_WORKERS=2`, `REVIEW_POST=1` und `REVIEW_AUTO_MERGE=1` werden dauerhaft in `/etc/agent-sandbox.conf` gespeichert.
 
-### Einstellungen bleiben erhalten
-`install.sh` merkt sich `MAX_WORKERS`, `REVIEW_POST` und `REVIEW_AUTO_MERGE` in `/etc/agent-sandbox.conf`.
-Ein späterer Lauf (z. B. nach `git pull`) übernimmt sie, wenn du nichts angibst; eine ausdrückliche Angabe
-(`MAX_WORKERS=1 bash sandbox/install.sh`) gilt und wird neu gemerkt. Beim ersten Lauf mit der Datei zählen
-die schon laufenden Slot-Timer. Die Hilfsfunktionen stehen in `sandbox/install-lib.sh`.
-
-### Mehrere Projekte (Projektliste)
-Ausführlich: [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) (Aufbau, Einrichten, neues Projekt aufnehmen, Sonderregeln für dieses Repo).
-
-Worker- und Review-Takt arbeiten nicht mehr fest auf sc-digger, sondern auf einer Projektliste in
-`/etc/agent-projects.json` (Vorlage: [`sandbox/projects.example.json`](sandbox/projects.example.json),
-Lademodul: `sandbox/projects.py`). Fehlt die Datei, läuft alles wie bisher mit sc-digger allein.
-
-| Schlüssel | Bedeutung |
-|---|---|
-| `name`, `repo`, `workdir` | Pflicht: Kurzname (a-z, 0-9, `-`, `_`), `owner/name` auf GitHub, Klon auf dem Server |
-| `test_cmd` | Testbefehl in den Aufträgen (Vorgabe `python -m pytest -q`) |
-| `hotspot`, `hotspot_label` | Datei, an der nie zwei Agenten zugleich arbeiten (Regel 8), und das Issue-Label dafür; ohne `hotspot` gibt es keine solche Sperre |
-| `review_skill` | Pfad des Review-Skills im Repo; ohne ihn prüft der Reviewer nur nach `AGENTS.md` |
-| `auto_merge` | `false`: der Review-Takt mergt in diesem Projekt nie, auch nicht bei „Merge-Modus automatisch“ |
-
-- **Gemeinsamer Pool:** Jeder Worker-Slot nimmt die erste Arbeit der Liste. Die Reihenfolge ist
-  zugleich die Priorität; ein Projekt weiter hinten kommt dran, wenn vorn nichts liegt.
-- **Worktrees und Zustand:** Jedes Projekt hat eigene Worktrees (`<workdir>-worktrees/w<N>`). Zustandsschlüssel,
-  Review-Zustand (`review-state-<name>.json`) und Entwürfe (`reviews-<name>/`) tragen ab dem zweiten
-  Projekt den Namen, damit PR-Nummern nicht kollidieren. Das erste Projekt behält die alten Pfade.
-- **Klone:** `install.sh` klont jedes Projekt der Liste nach `workdir` und bricht bei einer kaputten Liste oder einem
-  fehlgeschlagenen Klon ab. `workdir` darf nie der Klon sein, in dem du `git pull` ausführst: Der Worker setzt seinen
-  Klon mit `reset --hard` und `clean` zurück. Für diese Infrastruktur also z. B. `/root/work/agent-sandbox-infra`.
-- **Voraussetzung je Projekt:** der Vertrag aus sc-digger (`AGENTS.md`, Labels `worker-task`, `bereit`, `in-arbeit`,
-  `agent-*`, Akzeptanztests unter `tests/acceptance/`, Checks `tests` und `acceptance-guard`).
-- **Fehlerverhalten:** Eine kaputte Projektliste lässt die Takte mit Fehlermeldung abbrechen, damit kein Projekt
-  still wegfällt. Ein fehlender Klon wird einmal im Log gemeldet und das Projekt übersprungen.
-- Der Review-Takt prüft pro Takt höchstens einen PR je Projekt.
-
-### 5. Review-Takt
-`review_tick.py` prüft die PRs der Worker, damit das Review nicht mehr von Hand in LibreChat
-angestoßen werden muss. Pro Takt (alle 10 min, `REVIEW_TAKT`) nimmt er höchstens einen offenen PR von
-`feature/issue-<N>` (Issue mit einem Label aus `REVIEW_LABELS`, Vorgabe `agent-qwen,agent-antigravity,agent-claude`;
-kein Fork-PR), dessen Checks fertig sind und für dessen aktuellen Commit es noch kein Review des Besitzers gibt.
-* **Ohne Werkzeuge:** Das Skript holt Issue, Dateiliste, Diff und Checks selbst und schickt sie als
-  reinen Text an `REVIEW_MODEL` (Vorgabe `coder-glm`, GLM; bei Diffs über ~90 000 Zeichen
-  `REVIEW_MODEL_BIG` = `longctx-lite`). Issue-, PR- und Diff-Texte sind fremder Input: Ein Modell mit
-  GitHub-Zugriff ließe sich damit steuern. Nur das Skript schreibt (Kommentar-Review, Merge, Labels).
-* **Vom Skript, nicht vom Modell:** Teststatus (nur aus den Check-Runs), die Zeile
-  `Worker: … Reviewer: …` und die Regel „andere Modellfamilie“ (Worker und Reviewer aus derselben
-  Familie: kein Review, Meldung an Stephan). Rote Pflicht-Checks (`tests`, `acceptance-guard`, `CodeQL`) ergeben ohne Modellaufruf
-  „Änderungen nötig“. Regeln und Vorlage liest er bei jedem Lauf aus `main` des jeweiligen Projekts
-  (`AGENTS.md`, Abschnitt Reviewer und Goldene Regeln, bei sc-digger zusätzlich `skills/sc-digger-review/SKILL.md`).
-* **Grenzen:** Das Modell sieht nur den Diff, nicht den übrigen Code. Unbrauchbare Antworten werden
-  einmal wiederholt, danach geht der PR an Stephan. Nach zwei Reviews „Änderungen nötig“ je PR ebenso (`MAX_ROUNDS`).
-* **Durchgängig (`REVIEW_POST=1`):** Review als Kommentar posten; bei „Änderungen nötig“ startet die
-  Nacharbeit des Worker-Takts von selbst. Bei **Freigegeben** und Merge-Modus „automatisch“ mergt das
-  Skript per Squash (`REVIEW_AUTO_MERGE=1`, Vorgabe). Scheitert der Merge (z. B. noch nicht mergebar),
-  wiederholt es ihn in den nächsten Takten (`MERGE_RETRIES`, 6), solange kein neuer Commit kommt.
-  Nach jedem Takt werden Issues mit `blockiert` freigegeben, deren `Wartet auf: #X, #Y` erledigt ist.
-* **Nur Entwurf (`REVIEW_POST=0`):** Der Entwurf liegt in `/root/reviews/pr<N>-<sha>.md`, eine Zeile
-  `[review] PR #N: …` steht in `/root/worker.log`. Nichts wird gepostet, gemergt oder entblockt.
-  Schaltet man später auf `REVIEW_POST=1`, postet der Takt vorhandene Entwürfe zum aktuellen Commit
-  **ohne neuen Modellaufruf** (und mergt bei Freigabe).
-* **Umschalten:** `REVIEW_POST=1 bash sandbox/install.sh`. Ein späterer Lauf ohne Angabe behält die
-  Einstellung (ebenso `MAX_WORKERS`).
-* **Braucht Stephan:** Kommt der Takt an einem PR nicht weiter (Merge-Modus manuell, Runden erschöpft,
-  Merge scheitert dauerhaft, unbrauchbare Antworten, Diff zu groß, gleiche Modellfamilie), schreibt er
-  `⚠ Stephan: <Grund>` ins Log und setzt mit `REVIEW_POST=1` das Label `braucht-stephan` samt Kommentar
-  (einmal je Commit). Push aufs Handy: [`homeassistant/automation_stephan.yaml`](homeassistant/automation_stephan.yaml).
-* **Eigener Key:** `install.sh` fragt `LITELLM_REVIEW_KEY` verdeckt ab (`/etc/qwen-reviewer.env`, 600). Der Key
-  `reviewer` in LiteLLM darf nur `REVIEW_MODEL` und `REVIEW_MODEL_BIG` und hat ein eigenes kleines Budget.
-  Ohne Key bleibt der Review-Takt aus, der Worker läuft weiter.
+### 4. Home Assistant anbinden
+1. Webhook-IDs in Home Assistant `secrets.yaml` hinterlegen.
+2. YAML-Snippets aus [`homeassistant/configuration_sensors.yaml`](homeassistant/configuration_sensors.yaml) in Home Assistant einfügen (`template.reload`).
+3. Dashboard-Karten aus [`homeassistant/dashboard_card.yaml`](homeassistant/dashboard_card.yaml) in das Lovelace-Dashboard (z. B. View `system-llm-cloud`) einbinden.
 
 ---
 
 ## 🛡️ Multi-Agent Governance & Sicherheitsregeln
 
-1. **GitHub `main` ist die einzige Wahrheit:** Agenten arbeiten strikt auf Feature-Branches; Merges erfolgen nur über Pull Requests mit bestandenen CI-Checks.
-2. **Keine gleichen Familien beim Review:** Wenn ein Modell aus der Qwen-Familie den Code umsetzt, prüft ein Modell aus der Gemini- oder Claude-Familie den Pull Request (und umgekehrt).
-3. **Vertragstreue durch den `acceptance-guard`:** Der Akzeptanztest aus dem GitHub-Issue wird zeichengenau als erster Commit gesichert. Der `acceptance-guard` verhindert, dass der Worker-Agent Tests nachträglich abschwächt oder anpasst.
-4. **Schreibschutz & Sandbox-Isolation:** Der Container ist unprivilegiert und hat keinerlei Lese- oder Schreibrechte auf sensible Netzlaufwerke oder das Hypervisor-System.
+1. **GitHub `main` ist die einzige Wahrheit:** Agenten arbeiten strikt auf Feature-Branches; Merges erfolgen nur über Pull Requests mit bestandenen Pflicht-Checks (`tests`, `acceptance-guard`, `CodeQL`).
+2. **Keine gleichen Familien beim Review:** Wenn ein Modell aus der DeepSeek/Qwen-Familie den Code umsetzt, prüft ein Modell aus der GLM-, Gemini- oder Claude-Familie den Pull Request (und umgekehrt).
+3. **Vertragstreue durch den `acceptance-guard`:** Der Akzeptanztest aus dem GitHub-Issue wird zeichengenau als erster Commit gesichert. Der `acceptance-guard` verhindert serverseitig in der CI, dass ein Worker Tests abschwächt, überspringt oder verändert.
+4. **Schreibschutz & Sandbox-Isolation:** Der Container ist unprivilegiert und besitzt keinerlei Schreibrechte auf Netzlaufwerke, Hypervisor oder den Musik-Server. Deployments erfolgen ausschließlich entkoppelt per Pull.
+5. **Keine Secrets im Repository:** Webhook-IDs, API-Keys und Token liegen ausschließlich in `/etc/*.env` (chmod 600) auf dem Server und erscheinen niemals in Logs, Chat oder Code.
