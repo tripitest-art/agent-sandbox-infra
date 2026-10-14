@@ -17,14 +17,27 @@ conf_get() {   # conf_get KEY → gemerkter Wert oder nichts; nie ein Fehlerstat
   return 0
 }
 
+# Schreibt nur die genannten Schlüssel neu und behält alle übrigen Zeilen: Ein von Hand ergänzter
+# Schlüssel (den install.sh nicht kennt) überlebt so den nächsten Lauf. Modus 600 wie bei den
+# Geheimnisdateien daneben (ask_secret) – die Datei könnte einmal einen Wert mit Geheimnis enthalten.
 conf_save() {   # conf_save KEY… → schreibt den aktuellen Wert der genannten Variablen
-  local tmp="$CONF.tmp" k v
+  local tmp="$CONF.tmp" k v pattern=""
   for k in "$@"; do
     v=${!k-}
     [[ $v =~ ^[A-Za-z0-9._,@-]*$ ]] || { echo "Einstellung $k hat unzulässige Zeichen, nicht gemerkt" >&2; return 1; }
+    pattern+="${pattern:+|}^$k="
   done
-  ( umask 022; for k in "$@"; do printf '%s=%s\n' "$k" "${!k-}"; done > "$tmp" )
+  (
+    umask 077
+    # Vorhandene Zeilen lesen und nur die übergebenen Schlüssel herausfiltern; dann die neuen
+    # Werte anhängen. `|| true`: Eine Datei, in der keine alte Zeile passt, ist kein Fehler.
+    if [ -f "$CONF" ]; then
+      grep -Ev "$pattern" "$CONF" || true
+    fi
+    for k in "$@"; do printf '%s=%s\n' "$k" "${!k-}"; done
+  ) > "$tmp"
   mv "$tmp" "$CONF"
+  chmod 600 "$CONF"
 }
 
 # --- Projekte -------------------------------------------------------------------------------------
