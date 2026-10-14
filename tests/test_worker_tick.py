@@ -832,3 +832,38 @@ def test_ollama_single_slot_guard(monkeypatch, tmp_path, capsys):
     assert w.main() == 0
     out = capsys.readouterr().out
     assert "Slot 2 inaktiv: Lokales Ollama-Backend erlaubt nur 1 Worker" in out
+
+
+# ---- gh() mit Ausgabe, die kein JSON ist (14.10.: gh issue edit gibt die URL aus) ----
+
+class _Done:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def test_gh_returns_text_when_output_is_not_json(monkeypatch):
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: _Done("https://github.com/o/r/issues/52\n"))
+    assert w.gh("issue", "edit", "52") == "https://github.com/o/r/issues/52"
+
+
+def test_gh_still_parses_json_and_empty_output(monkeypatch):
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: _Done('[{"number": 1}]'))
+    assert w.gh("issue", "list") == [{"number": 1}]
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: _Done("  \n"))
+    assert w.gh("issue", "edit", "1") is None
+
+
+def test_claim_issue_succeeds_when_gh_prints_the_url(monkeypatch):
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: _Done("https://github.com/o/r/issues/52\n"))
+    assert w.claim_issue(52) is True
+
+
+def test_claim_issue_logs_the_stderr_reason_when_gh_fails(monkeypatch):
+    def boom(cmd, **kw):
+        raise w.subprocess.CalledProcessError(1, cmd, stderr="HTTP 403: Resource not accessible by personal access token\nmehr")
+    lines = []
+    monkeypatch.setattr(w.subprocess, "run", boom)
+    monkeypatch.setattr(w, "log", lines.append)
+    assert w.claim_issue(22) is False
+    assert any("Claiming von Issue #22 fehlgeschlagen" in l and "HTTP 403: Resource not accessible" in l for l in lines)
+    assert not any("mehr" in l for l in lines)   # nur die erste Zeile
