@@ -47,7 +47,7 @@ flowchart TD
 | [`proxmox/`](proxmox/) | Shell-Skripte zur Erstellung des unprivilegierten Debian 12 LXC-Containers auf Proxmox VE. |
 | [`sandbox/`](sandbox/) | Setup-Skripte (`install.sh`), der autonome Taktgeber (`worker_tick.py`), der Review-Takt (`review_tick.py`) und systemd-Units (`qwen-worker`, `qwen-review`, `qwen-webhook`). |
 | [`hardware/`](hardware/) | GPU-Hardware-Tuning für AMD RDNA2 (LACT, 2100 MHz, −90 mV, 255 W) mit Messwerten und Ollama-Service Overrides. |
-| [`homeassistant/`](homeassistant/) | YAML-Konfigurationen für REST- und Webhook-Sensoren sowie die Lovelace-Dashboard-Karte. |
+| [`homeassistant/`](homeassistant/) | YAML-Konfigurationen für REST- und Webhook-Sensoren, die Lovelace-Dashboard-Karte und die Push-Meldung „PR braucht Stephan“. |
 | [`tests/`](tests/) | Unit-Tests für Worker- und Review-Takt (`test_worker_tick.py`, `test_review_tick.py`), laufen ohne Netzwerk mit Mocks. |
 
 ---
@@ -92,32 +92,37 @@ CTID=$(pvesh get /cluster/nextid) bash host-create.sh
 * **Parallele Worker (`MAX_WORKERS`):** Mit `MAX_WORKERS=2 bash sandbox/install.sh` werden 2 parallele Worker-Slots (`qwen-worker@1.timer`, `qwen-worker@2.timer`) gestaffelt aktiviert. Jeder Slot arbeitet in einem isolierten Git-Worktree (`/root/sc-digger-worktrees/w<N>`). Der Taktgeber verhindert automatisch Kollisionen: Issues mit `berührt-main.py` oder Überschneidungen in `### Betroffene Dateien` mit bereits aktiven Aufgaben werden übersprungen (Regel 8). Parallele Worker sind nur bei `BACKEND=litellm` aktiv; bei `BACKEND=ollama` wird strikt 1 Worker erzwungen.
 * YAML-Snippets aus [`homeassistant/`](homeassistant/) in die `configuration.yaml` und das Dashboard einfügen.
 
-### 5. Review-Takt (optional, Vorgabe: nur Entwurf)
-`review_tick.py` prüft die PRs des Workers, damit das Review nicht mehr von Hand in LibreChat
+### 5. Review-Takt
+`review_tick.py` prüft die PRs der Worker, damit das Review nicht mehr von Hand in LibreChat
 angestoßen werden muss. Pro Takt (alle 10 min, `REVIEW_TAKT`) nimmt er höchstens einen offenen PR von
-`feature/issue-<N>` (Label `agent-qwen`, kein Fork-PR), dessen Checks fertig sind und für dessen
-aktuellen Commit es noch kein Review des Besitzers gibt.
+`feature/issue-<N>` (Issue mit einem Label aus `REVIEW_LABELS`, Vorgabe `agent-qwen,agent-antigravity,agent-claude`;
+kein Fork-PR), dessen Checks fertig sind und für dessen aktuellen Commit es noch kein Review des Besitzers gibt.
 * **Ohne Werkzeuge:** Das Skript holt Issue, Dateiliste, Diff und Checks selbst und schickt sie als
   reinen Text an `REVIEW_MODEL` (Vorgabe `coder-glm`, GLM; bei Diffs über ~90 000 Zeichen
   `REVIEW_MODEL_BIG` = `longctx-lite`). Issue-, PR- und Diff-Texte sind fremder Input: Ein Modell mit
-  GitHub-Zugriff ließe sich damit steuern. Nur das Skript schreibt (ein Kommentar-Review, nie Approve oder Merge).
+  GitHub-Zugriff ließe sich damit steuern. Nur das Skript schreibt (Kommentar-Review, Merge, Labels).
 * **Vom Skript, nicht vom Modell:** Teststatus (nur aus den Check-Runs), die Zeile
   `Worker: … Reviewer: …` und die Regel „andere Modellfamilie“ (Worker und Reviewer aus derselben
-  Familie: kein Review). Rote Pflicht-Checks (`tests`, `acceptance-guard`, `CodeQL`) ergeben ohne Modellaufruf
+  Familie: kein Review, Meldung an Stephan). Rote Pflicht-Checks (`tests`, `acceptance-guard`, `CodeQL`) ergeben ohne Modellaufruf
   „Änderungen nötig“. Regeln und Vorlage liest er bei jedem Lauf aus `sc-digger/main`
   (`AGENTS.md`, Abschnitt Reviewer und Goldene Regeln, `skills/sc-digger-review/SKILL.md`).
 * **Grenzen:** Das Modell sieht nur den Diff, nicht den übrigen Code. Unbrauchbare Antworten werden
-  einmal wiederholt, danach meldet der Takt „bitte von Hand prüfen“. Nach zwei Reviews
-  „Änderungen nötig“ je PR liegt er bei Stephan (`MAX_ROUNDS`).
-* **Entwurf statt Posten (`REVIEW_POST=0`, Vorgabe):** Der Entwurf liegt in `/root/reviews/pr<N>-<sha>.md`,
-  eine Zeile `[review] PR #N: …` steht in `/root/worker.log` (geht per Webhook ins HA-Dashboard).
-  Mit `REVIEW_POST=1 bash sandbox/install.sh` postet er stattdessen; bei „Änderungen nötig“ startet danach die
-  Nacharbeit des Worker-Takts von selbst. Bei **Freigegeben** und Merge-Modus „automatisch“ führt das Skript
-  `gh pr merge --squash` aus (`REVIEW_AUTO_MERGE=1`, Vorgabe).
-* **Automatisches Entblocken (`Wartet auf: #N`):** Nach jedem Merge sowie in jedem Review-Takt prüft das
-  Skript offene Issues mit Label `blockiert`. Sind alle in der Zeile `Wartet auf: #X, #Y` genannten
-  Abhängigkeiten (PRs oder Issues) geschlossen oder gemergt, setzt es das Issue automatisch auf `bereit`
-  und entfernt `blockiert` (`gh issue edit <N> --add-label bereit --remove-label blockiert`). Zum Nachholen bereits geprüfter PRs `/root/review-state.json` löschen.
+  einmal wiederholt, danach geht der PR an Stephan. Nach zwei Reviews „Änderungen nötig“ je PR ebenso (`MAX_ROUNDS`).
+* **Durchgängig (`REVIEW_POST=1`):** Review als Kommentar posten; bei „Änderungen nötig“ startet die
+  Nacharbeit des Worker-Takts von selbst. Bei **Freigegeben** und Merge-Modus „automatisch“ mergt das
+  Skript per Squash (`REVIEW_AUTO_MERGE=1`, Vorgabe). Scheitert der Merge (z. B. noch nicht mergebar),
+  wiederholt es ihn in den nächsten Takten (`MERGE_RETRIES`, 6), solange kein neuer Commit kommt.
+  Nach jedem Takt werden Issues mit `blockiert` freigegeben, deren `Wartet auf: #X, #Y` erledigt ist.
+* **Nur Entwurf (`REVIEW_POST=0`):** Der Entwurf liegt in `/root/reviews/pr<N>-<sha>.md`, eine Zeile
+  `[review] PR #N: …` steht in `/root/worker.log`. Nichts wird gepostet, gemergt oder entblockt.
+  Schaltet man später auf `REVIEW_POST=1`, postet der Takt vorhandene Entwürfe zum aktuellen Commit
+  **ohne neuen Modellaufruf** (und mergt bei Freigabe).
+* **Umschalten:** `REVIEW_POST=1 bash sandbox/install.sh`. Ein späterer Lauf ohne Angabe behält die
+  Einstellung (ebenso `MAX_WORKERS`).
+* **Braucht Stephan:** Kommt der Takt an einem PR nicht weiter (Merge-Modus manuell, Runden erschöpft,
+  Merge scheitert dauerhaft, unbrauchbare Antworten, Diff zu groß, gleiche Modellfamilie), schreibt er
+  `⚠ Stephan: <Grund>` ins Log und setzt mit `REVIEW_POST=1` das Label `braucht-stephan` samt Kommentar
+  (einmal je Commit). Push aufs Handy: [`homeassistant/automation_stephan.yaml`](homeassistant/automation_stephan.yaml).
 * **Eigener Key:** `install.sh` fragt `LITELLM_REVIEW_KEY` verdeckt ab (`/etc/qwen-reviewer.env`, 600). Der Key
   `reviewer` in LiteLLM darf nur `REVIEW_MODEL` und `REVIEW_MODEL_BIG` und hat ein eigenes kleines Budget.
   Ohne Key bleibt der Review-Takt aus, der Worker läuft weiter.

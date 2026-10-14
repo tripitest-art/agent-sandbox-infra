@@ -124,7 +124,7 @@ def test_assemble_sets_model_line_and_check_line_itself():
 
 
 def test_pick_pr_skips_forks_wrong_label_and_reviewed():
-    labels = {5: ["agent-qwen"], 6: ["agent-qwen"], 7: ["agent-antigravity"], 8: ["agent-qwen"], 9: ["agent-qwen"]}
+    labels = {5: ["agent-qwen"], 6: ["agent-qwen"], 7: ["idee"], 8: ["agent-qwen"], 9: ["agent-qwen"]}
     fork = _pr(6, headRefName="feature/issue-6", isCrossRepository=True)
     wrong = _pr(7, headRefName="feature/issue-7")
     reviewed = _pr(8, headRefName="feature/issue-8", reviews=[
@@ -418,3 +418,161 @@ def test_no_auto_merge_when_env_disabled(monkeypatch, capsys):
     assert merged == []
     assert "REVIEW_AUTO_MERGE=0; kein Merge" in capsys.readouterr().out
 
+
+
+# --- Durchgängiger Takt: Entwürfe nachholen, Merge wiederholen, an Stephan melden ---
+
+def test_pick_pr_takes_every_worker_family_label():
+    for label in ("agent-qwen", "agent-antigravity", "agent-claude"):
+        assert r.pick_pr([_pr()], {}, lambda n: [label])["number"] == 7
+    assert r.pick_pr([_pr()], {}, lambda n: ["worker-task"]) is None
+
+
+def _github_with_merge(monkeypatch, merge_mode="automatisch", merge_ok=True, pr_view=None, prs=None):
+    """GitHub-Fake mit Merge, Label, Kommentar; gibt die Aufrufliste zurück."""
+    calls = _fake_github(monkeypatch, prs if prs is not None else [_pr()])
+    calls.update(merged=[], edits=[], comments=[], labels=[])
+    base_json = r.gh_json
+
+    def gh_json(*args):
+        if args[:2] == ("issue", "list"):
+            return []
+        if args[:2] == ("issue", "view") and "labels" not in args and "state" not in args:
+            return {"number": 5, "title": "T", "body": f"### Merge-Modus\n{merge_mode}"}
+        if args[:2] == ("pr", "view") and "mergeStateStatus" in args[-1]:
+            return pr_view
+        return base_json(*args)
+
+    def gh_text(*args, **kw):
+        if args[:2] == ("pr", "merge"):
+            calls["merged"].append(args[2])
+            if not merge_ok:
+                raise r.subprocess.CalledProcessError(1, "gh", stderr="not mergeable")
+            return ""
+        if args[:2] == ("pr", "edit"):
+            calls["edits"].append(args[2:])
+            return ""
+        if args[:2] == ("pr", "comment"):
+            calls["comments"].append(args[2])
+            return ""
+        if args[:2] == ("label", "create"):
+            calls["labels"].append(args[2])
+            return ""
+        if args[:2] == ("pr", "diff"):
+            return "diff --git a/a.py b/a.py\n+x\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(r, "gh_json", gh_json)
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    return calls
+
+
+def test_draft_from_dry_run_is_posted_later_without_new_model_call(monkeypatch, tmp_path, capsys):
+    calls = _github_with_merge(monkeypatch)
+    r.run_once()                                   # REVIEW_POST=0: nur Entwurf
+    assert calls["llm"] == 1 and "posted" not in calls and calls["merged"] == []
+    monkeypatch.setattr(r, "POST", True)            # jetzt scharf geschaltet
+    r.run_once()
+    assert calls["llm"] == 1                        # kein zweiter Modellaufruf
+    assert calls["posted"] == [7] and calls["merged"] == ["7"]
+    assert "ohne neuen Modellaufruf" in capsys.readouterr().out
+    r.run_once()                                    # danach nichts mehr
+    assert calls["posted"] == [7] and calls["llm"] == 1
+
+
+def test_draft_with_problem_is_not_reused(monkeypatch, tmp_path):
+    monkeypatch.setattr(r, "POST", True)
+    d = tmp_path / "reviews"; d.mkdir()
+    (d / f"pr7-{SHA[:7]}.md").write_text("<!-- PR #7 PROBLEM: x -->\n" + OK_REVIEW, encoding="utf-8")
+    assert r.pending_draft(_pr()) is None
+    (d / f"pr7-{SHA[:7]}.md").write_text("<!-- PR #7 -->\nkein Urteil", encoding="utf-8")
+    assert r.pending_draft(_pr()) is None
+    (d / f"pr7-{SHA[:7]}.md").write_text("<!-- PR #7 -->\n" + OK_REVIEW, encoding="utf-8")
+    assert r.pending_draft(_pr()) == OK_REVIEW
+    assert r.pending_draft(_pr(headRefOid="b" * 40)) is None    # anderer Commit
+
+
+def test_draft_of_second_round_is_still_posted(monkeypatch, tmp_path):
+    """Die Runde wurde beim Entwurf schon gezählt; MAX_ROUNDS darf das Posten nicht verhindern."""
+    calls = _github_with_merge(monkeypatch)
+    calls_llm = calls
+    monkeypatch.setattr(r, "call_llm", lambda m, msg: (calls_llm.__setitem__("llm", calls_llm.get("llm", 0) + 1) or BAD_REVIEW,
+                                                      {"prompt_tokens": 1, "completion_tokens": 1}))
+    (tmp_path / "state.json").write_text(json.dumps({"runden": {"7": r.MAX_ROUNDS - 1}}))
+    r.run_once()
+    assert json.loads((tmp_path / "state.json").read_text())["runden"] == {"7": r.MAX_ROUNDS}
+    monkeypatch.setattr(r, "POST", True)
+    r.run_once()
+    assert calls["posted"] == [7] and calls["llm"] == 1 and calls["merged"] == []
+
+
+def test_failed_merge_is_retried_next_tick(monkeypatch, tmp_path):
+    monkeypatch.setattr(r, "POST", True)
+    calls = _github_with_merge(monkeypatch, merge_ok=False,
+                               pr_view={"state": "OPEN", "headRefOid": SHA, "mergeStateStatus": "BLOCKED"})
+    r.run_once()
+    assert calls["merged"] == ["7"]
+    st = json.loads((tmp_path / "state.json").read_text())
+    assert st["merge_offen"] == {"7": {"sha": SHA, "versuche": 0}}
+    # nächster Takt: jetzt mergebar
+    calls2 = _github_with_merge(monkeypatch, merge_ok=True,
+                                pr_view={"state": "OPEN", "headRefOid": SHA, "mergeStateStatus": "CLEAN"})
+    r.run_once()
+    assert calls2["merged"] == ["7"] and calls2.get("llm") is None
+    assert json.loads((tmp_path / "state.json").read_text())["merge_offen"] == {}
+
+
+def test_merge_retry_gives_up_and_flags_stephan(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(r, "POST", True)
+    (tmp_path / "state.json").write_text(json.dumps(
+        {"merge_offen": {"7": {"sha": SHA, "versuche": r.MERGE_RETRIES - 1}}, "erledigt": [f"pr7@{SHA}"]}))
+    calls = _github_with_merge(monkeypatch, pr_view={"state": "OPEN", "headRefOid": SHA, "mergeStateStatus": "BLOCKED"})
+    r.run_once()
+    assert calls["merged"] == [] and calls["edits"] == [("7", "--add-label", "braucht-stephan")]
+    assert calls["comments"] == ["7"] and "⚠ Stephan" in capsys.readouterr().out
+    assert json.loads((tmp_path / "state.json").read_text())["merge_offen"] == {}
+
+
+def test_merge_retry_drops_pr_with_new_commit(monkeypatch, tmp_path):
+    monkeypatch.setattr(r, "POST", True)
+    (tmp_path / "state.json").write_text(json.dumps({"merge_offen": {"7": {"sha": "b" * 40, "versuche": 0}}}))
+    calls = _github_with_merge(monkeypatch, prs=[],
+                               pr_view={"state": "OPEN", "headRefOid": SHA, "mergeStateStatus": "CLEAN"})
+    r.run_once()
+    assert calls["merged"] == []
+    assert json.loads((tmp_path / "state.json").read_text())["merge_offen"] == {}
+
+
+def test_manual_mode_flags_stephan_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(r, "POST", True)
+    calls = _github_with_merge(monkeypatch, merge_mode="manuell durch Stephan (Betrieb)")
+    r.run_once(); r.run_once()
+    assert calls["merged"] == [] and calls["comments"] == ["7"]
+    assert calls["edits"] == [("7", "--add-label", "braucht-stephan")]
+
+
+def test_flag_creates_missing_label(monkeypatch, tmp_path):
+    monkeypatch.setattr(r, "POST", True)
+    tried = []
+
+    def gh_text(*args, **kw):
+        tried.append(args[:2])
+        if args[:2] == ("pr", "edit") and ("label", "create") not in tried:
+            raise r.subprocess.CalledProcessError(1, "gh", stderr="label not found")
+        return ""
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    r.to_stephan(7, "k", "Grund", {})
+    assert tried == [("pr", "edit"), ("label", "create"), ("pr", "edit"), ("pr", "comment")]
+
+
+def test_flag_in_dry_run_only_logs(monkeypatch, capsys):
+    monkeypatch.setattr(r, "gh_text", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)))
+    r.to_stephan(7, "k", "Grund", {})
+    assert "⚠ Stephan: Grund" in capsys.readouterr().out
+
+
+def test_dry_run_unblock_is_logged_once(monkeypatch, capsys):
+    monkeypatch.setattr(r, "gh_json", lambda *a, **k: [{"number": 231, "body": "Wartet auf: #228"}]
+                        if a[:2] == ("issue", "list") else {"state": "CLOSED"})
+    r.unblock_dependent_issues(); r.unblock_dependent_issues()
+    assert capsys.readouterr().out.count("Issue #231") == 1

@@ -17,6 +17,14 @@ Vorgabe (REVIEW_POST=0): nur Entwurf. Er landet in /root/reviews/pr<N>-<sha>.md,
 Log (/root/worker.log, geht per Webhook ins HA-Dashboard). Mit REVIEW_POST=1 postet das Skript
 zusätzlich `gh pr review --comment`. Danach startet bei „Änderungen nötig“ die Nacharbeit
 des Worker-Takts von selbst (worker_tick.py wertet Reviews des Besitzers aus).
+Liegt für den aktuellen Commit schon ein postbarer Entwurf (aus einem Lauf mit REVIEW_POST=0),
+postet REVIEW_POST=1 ihn ohne neuen Modellaufruf.
+
+Mit REVIEW_POST=1 zusätzlich: Freigegebene PRs mit Merge-Modus „automatisch“ werden gemergt; scheitert
+der Merge (z. B. noch nicht mergebar), versucht der nächste Takt es erneut (MERGE_RETRIES).
+Was der Takt nicht selbst lösen kann (Merge-Modus manuell, zu viele Runden, unbrauchbare Antworten,
+Diff zu groß, Merge scheitert dauerhaft), bekommt das Label `braucht-stephan` und einen Kommentar;
+im Log steht „⚠ Stephan:“ (HA kann darauf eine Benachrichtigung auslösen).
 
 Regeln und Vorlage liest das Skript zur Laufzeit aus sc-digger/main (AGENTS.md Abschnitt Reviewer
 und Goldene Regeln, skills/sc-digger-review/SKILL.md Schritte 5 und 6): Änderungen dort wirken sofort.
@@ -33,7 +41,9 @@ import urllib.request
 
 REPO = "tripitest-art/sc-digger"
 OWNER = "tripitest-art"
-LABEL = "agent-qwen"
+# Worker-Issues mit einem dieser Labels prüft der Takt; die Familienregel verhindert Selbstprüfung.
+LABELS = tuple(l.strip() for l in os.environ.get("REVIEW_LABELS", "agent-qwen,agent-antigravity,agent-claude").split(",") if l.strip())
+STEPHAN_LABEL = "braucht-stephan"   # PR braucht eine Entscheidung von Stephan
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 REVIEW_KEY = os.environ.get("LITELLM_REVIEW_KEY", "")
 REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "coder-glm")
@@ -44,6 +54,7 @@ AUTO_MERGE = os.environ.get("REVIEW_AUTO_MERGE", "1") == "1"
 STATE = os.environ.get("REVIEW_STATE", "/root/review-state.json")
 DRAFT_DIR = os.environ.get("REVIEW_DRAFTS", "/root/reviews")
 MAX_ROUNDS = 2              # Reviews „Änderungen nötig“ je PR, danach liegt er bei Stephan
+MERGE_RETRIES = 6          # so viele Takte lang wird ein gescheiterter Merge wiederholt
 BIG_DIFF_CHARS = 90_000     # darüber: REVIEW_MODEL_BIG
 MAX_DIFF_CHARS = 400_000    # darüber: nicht prüfen, an Stephan melden
 MAX_TOKENS = 6000           # Obergrenze der Modellantwort; erreicht sie das, gilt sie als unbrauchbar
@@ -148,18 +159,38 @@ def review_is_current(review: dict, pr: dict) -> bool:
     return review["submittedAt"] > max(c["committedDate"] for c in pr["commits"])
 
 
+def draft_path(pr: dict) -> str:
+    return os.path.join(DRAFT_DIR, f"pr{pr['number']}-{pr['headRefOid'][:7]}.md")
+
+
+def pending_draft(pr: dict) -> str | None:
+    """Postbarer Entwurf für den aktuellen Commit (aus einem Lauf mit REVIEW_POST=0), sonst None."""
+    try:
+        with open(draft_path(pr), encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    meta, _, text = raw.partition("\n")
+    if not meta.startswith("<!--") or "PROBLEM:" in meta or parse_review(text)[3]:
+        return None
+    return text
+
+
 def pick_pr(prs: list[dict], state: dict, labels_of) -> dict | None:
-    """Ältester offener Worker-PR ohne Review für den aktuellen Commit. `labels_of(issue_no)` -> Labelnamen."""
+    """Ältester offener Worker-PR ohne Review für den aktuellen Commit. `labels_of(issue_no)` -> Labelnamen.
+    Mit REVIEW_POST=1 zählen auch schon geprüfte PRs, deren Entwurf noch nicht gepostet ist."""
     for pr in sorted(prs, key=lambda p: p["number"]):
         m = re.match(r"feature/issue-(\d+)", pr["headRefName"])
         if not m or pr.get("isCrossRepository") or not pr.get("commits"):
             continue   # Fork-PRs nie: Branch-Name und Inhalt bestimmt dort ein Fremder
-        if f"pr{pr['number']}@{pr['headRefOid']}" in state.get("erledigt", []):
+        key = f"pr{pr['number']}@{pr['headRefOid']}"
+        unposted = POST and key not in state.get("gepostet", []) and pending_draft(pr)
+        if key in state.get("erledigt", []) and not unposted:
             continue
         mine = [r for r in pr.get("reviews", []) if (r.get("author") or {}).get("login") == OWNER]
         if mine and review_is_current(max(mine, key=lambda r: r["submittedAt"]), pr):
             continue
-        if LABEL not in labels_of(int(m.group(1))):
+        if not set(LABELS) & set(labels_of(int(m.group(1)))):
             continue
         pr = dict(pr, issue_no=int(m.group(1)))
         return pr
@@ -296,6 +327,68 @@ def merge_pr(number: int) -> bool:
         return False
 
 
+def to_stephan(n: int, key: str, reason: str, state: dict) -> None:
+    """PR liegt bei Stephan: einmal je Commit melden (Log, mit REVIEW_POST=1 auch Label und Kommentar)."""
+    log(f"PR #{n}: ⚠ Stephan: {reason}")
+    gemeldet = state.setdefault("gemeldet", [])
+    if not POST or key in gemeldet:
+        return
+    try:
+        try:
+            gh_text("pr", "edit", str(n), "--add-label", STEPHAN_LABEL)
+        except subprocess.CalledProcessError:
+            gh_text("label", "create", STEPHAN_LABEL, "--color", "D93F0B",
+                    "--description", "Agenten kommen nicht weiter, Stephan entscheidet")
+            gh_text("pr", "edit", str(n), "--add-label", STEPHAN_LABEL)
+        path = os.path.join(DRAFT_DIR, f".stephan-{n}.md")
+        os.makedirs(DRAFT_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"@{OWNER} Review-Takt: {reason}\n\nDer Takt macht an diesem PR nichts weiter, "
+                     f"bis es einen neuen Commit gibt. Label `{STEPHAN_LABEL}` nach der Entscheidung entfernen.\n")
+        try:
+            gh_text("pr", "comment", str(n), "--body-file", path)
+        finally:
+            os.unlink(path)
+    except Exception as exc:   # Melden darf den Takt nie abbrechen
+        log(f"PR #{n}: Label/Kommentar für Stephan fehlgeschlagen ({type(exc).__name__}).")
+    gemeldet.append(key)
+    del gemeldet[:-200]
+    save_state(state)
+
+
+def merge_or_queue(n: int, sha: str, state: dict) -> bool:
+    """Mergen; scheitert es, für die nächsten Takte vormerken (retry_merges)."""
+    if merge_pr(n):
+        state.get("merge_offen", {}).pop(str(n), None)
+        return True
+    state.setdefault("merge_offen", {}).setdefault(str(n), {"sha": sha, "versuche": 0})
+    return False
+
+
+def retry_merges(state: dict) -> None:
+    """Freigegebene PRs, deren Merge scheiterte, erneut versuchen, solange der Commit derselbe ist."""
+    offen = state.get("merge_offen") or {}
+    for n_str, info in list(offen.items()):
+        n = int(n_str)
+        try:
+            pr = gh_json("pr", "view", n_str, "--json", "state,headRefOid,mergeStateStatus") or {}
+        except subprocess.CalledProcessError:
+            continue
+        if pr.get("state") != "OPEN" or pr.get("headRefOid") != info["sha"]:
+            offen.pop(n_str)   # gemergt, geschlossen oder neuer Commit (braucht ein neues Review)
+            continue
+        if pr.get("mergeStateStatus") in ("CLEAN", "HAS_HOOKS", "UNSTABLE") and merge_pr(n):
+            offen.pop(n_str)
+            continue
+        info["versuche"] = info.get("versuche", 0) + 1
+        if info["versuche"] >= MERGE_RETRIES:
+            offen.pop(n_str)
+            to_stephan(n, f"pr{n}@{info['sha']}", f"Freigegeben, aber Merge scheitert seit {MERGE_RETRIES} Takten "
+                       f"(Status {pr.get('mergeStateStatus')}).", state)
+    state["merge_offen"] = offen
+    save_state(state)
+
+
 def parse_dependencies(body: str | None) -> list[int]:
     """Findet alle Referenzen (#123 oder URL) in Zeilen der Form 'Wartet auf: #X, #Y'."""
     if not body:
@@ -353,7 +446,12 @@ def unblock_dependent_issues() -> list[int]:
         all_resolved = all(is_dependency_resolved(d, dep_cache) for d in deps)
         if all_resolved:
             if not POST:
-                log(f"Issue #{num}: Alle Abhängigkeiten {deps} erledigt (REVIEW_POST=0, Entblocken übersprungen).")
+                state = load_state()
+                seen = state.setdefault("entblock_gemeldet", [])
+                if num not in seen:   # einmal melden, nicht in jedem Takt
+                    log(f"Issue #{num}: Alle Abhängigkeiten {deps} erledigt (REVIEW_POST=0, Entblocken übersprungen).")
+                    seen.append(num)
+                    save_state(state)
                 continue
             try:
                 gh_text("issue", "edit", str(num), "--add-label", "bereit", "--remove-label", "blockiert")
@@ -391,77 +489,100 @@ def _run_pr_review() -> int:
     if wf and wf == rf:
         log(f"PR #{n}: Worker ({worker}) und Reviewer ({REVIEWER_NAME}) gleiche Modellfamilie, kein Review.")
         state.setdefault("erledigt", []).append(key); save_state(state)
-        return 0
-    rounds = state.get("runden", {}).get(str(n), 0)
-    if rounds >= MAX_ROUNDS:
-        log(f"PR #{n}: schon {MAX_ROUNDS} Reviews „Änderungen nötig“, liegt bei Stephan.")
-        state.setdefault("erledigt", []).append(key); save_state(state)
+        to_stephan(n, key, f"Worker ({worker}) und Reviewer ({REVIEWER_NAME}) aus derselben Modellfamilie; "
+                   "bitte einen anderen Reviewer starten.", state)
         return 0
 
     meta = f"PR #{n} {pr['headRefOid'][:7]} Reviewer {REVIEWER_NAME}"
     issue: dict | None = None
-    if red:
-        text = red_check_review(red, worker, checks)
-        meta += " (ohne Modell: rote Checks)"
+    draft = pending_draft(pr) if POST else None
+    if draft:   # schon geprüft (REVIEW_POST=0), jetzt nur noch posten; die Runde ist bereits gezählt
+        text, count_round = draft, False
+        log(f"PR #{n}: Entwurf für {pr['headRefOid'][:7]} liegt vor, poste ihn ohne neuen Modellaufruf.")
     else:
-        try:
-            agents = repo_file("AGENTS.md")
-            skill = repo_file("skills/sc-digger-review/SKILL.md")
-            issue = gh_json("issue", "view", str(pr["issue_no"]), "--json", "number,title,body")
-            files = gh_json("pr", "view", str(n), "--json", "files")["files"]
-            diff = gh_text("pr", "diff", str(n))
-        except subprocess.CalledProcessError as exc:
-            log(f"PR #{n}: GitHub-Abfrage scheitert ({(exc.stderr or '').strip()[:120]}), nächster Takt.")
-            return 0
-        if len(diff) > MAX_DIFF_CHARS:
-            log(f"PR #{n}: Diff zu groß ({len(diff)} Zeichen), bitte von Hand prüfen.")
+        count_round = True
+        rounds = state.get("runden", {}).get(str(n), 0)
+        if rounds >= MAX_ROUNDS:
+            log(f"PR #{n}: schon {MAX_ROUNDS} Reviews „Änderungen nötig“, liegt bei Stephan.")
             state.setdefault("erledigt", []).append(key); save_state(state)
+            to_stephan(n, key, f"nach {MAX_ROUNDS} Runden „Änderungen nötig“ noch nicht fertig.", state)
             return 0
-        rules = "\n\n".join(filter(None, (
-            extract_section(agents, "### Reviewer"), extract_section(agents, "## Goldene Regeln"),
-            extract_section(skill, "## Schritt 5", until=("## Schritt 7",)))))
-        model = REVIEW_MODEL_BIG if len(diff) > BIG_DIFF_CHARS else REVIEW_MODEL
-        try:
-            raw, usage = call_llm(model, build_messages(issue, pr, files, diff, checks, rules))
-        except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
-            log(f"PR #{n}: Modell {model} antwortet nicht ({type(exc).__name__}), nächster Takt.")
-            return 0
-        verdict, _, _, problem = parse_review(raw)
-        bad = suspicious_output(raw, usage)
-        if bad:
-            verdict, problem = None, bad
-        if verdict is None:
-            tries = state.setdefault("fehler", {}).get(key, 0) + 1
-            state["fehler"][key] = tries
-            if tries >= 2:
-                state.setdefault("erledigt", []).append(key)
-            save_state(state)
-            log(f"PR #{n}: Antwort von {model} unbrauchbar ({problem}), Versuch {tries}"
-                f"{', gebe auf (bitte von Hand prüfen)' if tries >= 2 else ', nächster Takt'}.")
-            return 0
-        text = assemble(raw, worker, checks)
-        meta += f" Modell {model} Token {usage.get('prompt_tokens')}/{usage.get('completion_tokens')}"
+        if red:
+            text = red_check_review(red, worker, checks)
+            meta += " (ohne Modell: rote Checks)"
+        else:
+            try:
+                agents = repo_file("AGENTS.md")
+                skill = repo_file("skills/sc-digger-review/SKILL.md")
+                issue = gh_json("issue", "view", str(pr["issue_no"]), "--json", "number,title,body")
+                files = gh_json("pr", "view", str(n), "--json", "files")["files"]
+                diff = gh_text("pr", "diff", str(n))
+            except subprocess.CalledProcessError as exc:
+                log(f"PR #{n}: GitHub-Abfrage scheitert ({(exc.stderr or '').strip()[:120]}), nächster Takt.")
+                return 0
+            if len(diff) > MAX_DIFF_CHARS:
+                log(f"PR #{n}: Diff zu groß ({len(diff)} Zeichen), bitte von Hand prüfen.")
+                state.setdefault("erledigt", []).append(key); save_state(state)
+                to_stephan(n, key, f"Diff zu groß für den Review-Takt ({len(diff)} Zeichen), bitte von Hand prüfen.", state)
+                return 0
+            rules = "\n\n".join(filter(None, (
+                extract_section(agents, "### Reviewer"), extract_section(agents, "## Goldene Regeln"),
+                extract_section(skill, "## Schritt 5", until=("## Schritt 7",)))))
+            model = REVIEW_MODEL_BIG if len(diff) > BIG_DIFF_CHARS else REVIEW_MODEL
+            try:
+                raw, usage = call_llm(model, build_messages(issue, pr, files, diff, checks, rules))
+            except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+                log(f"PR #{n}: Modell {model} antwortet nicht ({type(exc).__name__}), nächster Takt.")
+                return 0
+            verdict, _, _, problem = parse_review(raw)
+            bad = suspicious_output(raw, usage)
+            if bad:
+                verdict, problem = None, bad
+            if verdict is None:
+                tries = state.setdefault("fehler", {}).get(key, 0) + 1
+                state["fehler"][key] = tries
+                if tries >= 2:
+                    state.setdefault("erledigt", []).append(key)
+                save_state(state)
+                log(f"PR #{n}: Antwort von {model} unbrauchbar ({problem}), Versuch {tries}"
+                    f"{', gebe auf (bitte von Hand prüfen)' if tries >= 2 else ', nächster Takt'}.")
+                if tries >= 2:
+                    to_stephan(n, key, f"Review-Modell {model} lieferte zweimal keine brauchbare Antwort; bitte von Hand prüfen.", state)
+                return 0
+            text = assemble(raw, worker, checks)
+            meta += f" Modell {model} Token {usage.get('prompt_tokens')}/{usage.get('completion_tokens')}"
+
     verdict, muss, kann, problem = parse_review(text)
-    path = save_draft(pr, text, meta + (f" PROBLEM: {problem}" if problem else ""))
+    path = draft_path(pr) if draft else save_draft(pr, text, meta + (f" PROBLEM: {problem}" if problem else ""))
     if problem:
         log(f"PR #{n}: Entwurf {verdict}, aber {problem}; nicht gepostet ({path}).")
-    elif POST:
+        return 0
+    if POST:
         post_review(n, text)
+        state.setdefault("gepostet", []).append(key)
+        del state["gepostet"][:-500]
         log(f"PR #{n}: {verdict.strip('*')}, {muss} Muss / {kann} Kann, als Kommentar-Review gepostet ({path}).")
-        if verdict == VERDICTS[0]:
-            if not AUTO_MERGE:
-                log(f"PR #{n}: Freigegeben, aber REVIEW_AUTO_MERGE=0; kein Merge.")
-            elif issue and is_auto_merge(issue.get("body")):
-                merge_pr(n)
-            else:
-                log(f"PR #{n}: Freigegeben, aber Merge-Modus manuell; liegt bei Stephan.")
     else:
         log(f"PR #{n}: Entwurf {verdict.strip('*')}, {muss} Muss / {kann} Kann ({path}); REVIEW_POST=0, nicht gepostet.")
-    if not problem:
-        state.setdefault("erledigt", []).append(key)
-        if verdict == VERDICTS[1]:
-            state.setdefault("runden", {})[str(n)] = rounds + 1
-        save_state(state)
+    state.setdefault("erledigt", []).append(key)
+    if verdict == VERDICTS[1] and count_round:
+        state.setdefault("runden", {})[str(n)] = state.get("runden", {}).get(str(n), 0) + 1
+    save_state(state)
+    if POST and verdict == VERDICTS[0]:
+        if not AUTO_MERGE:
+            log(f"PR #{n}: Freigegeben, aber REVIEW_AUTO_MERGE=0; kein Merge.")
+            return 0
+        if issue is None:
+            try:
+                issue = gh_json("issue", "view", str(pr["issue_no"]), "--json", "number,title,body")
+            except subprocess.CalledProcessError:
+                issue = None
+        if issue and is_auto_merge(issue.get("body")):
+            merge_or_queue(n, pr["headRefOid"], state)
+            save_state(state)
+        else:
+            log(f"PR #{n}: Freigegeben, aber Merge-Modus manuell; liegt bei Stephan.")
+            to_stephan(n, key, "Freigegeben, Merge-Modus manuell: bitte prüfen und mergen.", state)
     return 0
 
 
@@ -470,6 +591,8 @@ def run_once() -> int:
         log("LITELLM_REVIEW_KEY fehlt (/etc/qwen-reviewer.env), nichts zu tun.")
         return 0
     try:
+        if POST and AUTO_MERGE:
+            retry_merges(load_state())
         return _run_pr_review()
     finally:
         unblock_dependent_issues()

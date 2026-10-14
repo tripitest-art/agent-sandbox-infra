@@ -7,7 +7,7 @@
 #   MODEL=qwen3-coder-64k OLLAMA=http://… bash …       # andere Werte als die Vorgaben
 #   AGENT=opencode bash …                              # OpenCode statt Qwen Code
 #   WAKE_PC=1 TAKT=30min bash …                        # PC bei Arbeit wecken, seltener schauen
-#   REVIEW_POST=1 bash …                               # Review-Takt postet Reviews & auto-merged (Vorgabe: nur Entwurf)
+#   REVIEW_POST=1 bash …                               # Review-Takt postet, mergt, entblockt (bleibt bei späteren Läufen)
 #
 # Der GitHub-Zugang wird hier bewusst NICHT eingerichtet: den Token gibt Stephan selbst
 # verdeckt ein (README, Schritt 3). Das Skript prüft nur, ob er da ist.
@@ -28,12 +28,17 @@ OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
 AGENT=${AGENT:-qwen-code}                       # oder opencode
 TAKT=${TAKT:-5min}                              # so oft sucht der Worker Arbeit
-MAX_WORKERS=${MAX_WORKERS:-1}                   # Parallele Worker-Slots (nur bei BACKEND=litellm)
+# Ohne Angabe gilt die bisherige Einstellung: Ein erneuter Lauf (z. B. nach git pull) soll nicht
+# still auf 1 Worker bzw. REVIEW_POST=0 zurückfallen.
+prev_slots=$(ls /etc/systemd/system/timers.target.wants/qwen-worker@*.timer 2>/dev/null | wc -l)
+MAX_WORKERS=${MAX_WORKERS:-$(( prev_slots > 1 ? prev_slots : 1 ))}   # Parallele Worker-Slots (nur bei BACKEND=litellm)
 [ "$BACKEND" = litellm ] || MAX_WORKERS=1       # Ollama auf RX 6800 XT erlaubt nur 1 Worker
 WAKE_PC=${WAKE_PC:-0}                           # 1: Gaming-PC bei Arbeit per WoL wecken
 QWEN_CODE_VERSION=${QWEN_CODE_VERSION:-0.24.7}  # fest: ein Update soll bewusst passieren
 # Review-Takt (review_tick.py): Entwurf ohne Posten, solange REVIEW_POST=0
-REVIEW_POST=${REVIEW_POST:-0}                   # 1: Review als Kommentar auf GitHub posten
+prev_post=$(sed -n 's/^Environment=REVIEW_POST=//p' /etc/systemd/system/qwen-review.service 2>/dev/null | tail -1)
+REVIEW_POST=${REVIEW_POST:-${prev_post:-0}}     # 1: Review posten, mergen, entblocken (sonst nur Entwurf)
+REVIEW_LABELS=${REVIEW_LABELS:-agent-qwen,agent-antigravity,agent-claude}   # diese Worker-PRs prüft der Takt
 REVIEW_AUTO_MERGE=${REVIEW_AUTO_MERGE:-1}       # 1: Freigegebene PRs mit Modus automatisch squashen
 REVIEW_TAKT=${REVIEW_TAKT:-10min}               # so oft sucht der Review-Takt einen PR
 REVIEW_MODEL=${REVIEW_MODEL:-coder-glm}         # LiteLLM-Alias (GLM, andere Familie als der Worker)
@@ -258,7 +263,7 @@ TUNIT
   done
   echo "Taktgeber: Multi-Worker mit $MAX_WORKERS Slots aktiv (qwen-worker@1..$MAX_WORKERS.timer)"
 else
-  for i in $(seq 2 5); do
+  for i in $(seq 1 5); do
     systemctl disable --now "qwen-worker@$i.timer" >/dev/null 2>&1 || true
   done
   systemctl enable qwen-worker.timer >/dev/null
@@ -282,6 +287,7 @@ Environment=REVIEW_MODEL_BIG=$REVIEW_MODEL_BIG
 Environment=REVIEWER_NAME=$REVIEWER_NAME
 Environment=REVIEW_POST=$REVIEW_POST
 Environment=REVIEW_AUTO_MERGE=$REVIEW_AUTO_MERGE
+Environment=REVIEW_LABELS=$REVIEW_LABELS
 Environment=LANG=C.UTF-8
 ExecStart=/usr/bin/flock -n /run/qwen-review.lock /usr/bin/python3 /root/review_tick.py
 StandardOutput=append:/root/worker.log
@@ -379,11 +385,13 @@ elif curl -s -m 10 "$OLLAMA/api/tags" | grep -q "\"$MODEL"; then echo "Ollama: $
 else echo "Ollama: $MODEL nicht erreichbar (PC aus, Bildmodus oder Modell fehlt)"; fi
 (cd "$REPO_DIR" && /root/venv/bin/python -m pytest -q 2>&1 | tail -1)
 
+# Welche Timer laufen, hat der Abschnitt Taktgeber oben entschieden (ein Timer oder Slots).
+# Hier nur noch an/aus nach der Prüfung; nie zusätzlich qwen-worker.timer neben den Slots.
+if [ "$MAX_WORKERS" -gt 1 ]; then worker_timers=$(seq -f "qwen-worker@%g.timer" 1 "$MAX_WORKERS"); else worker_timers=qwen-worker.timer; fi
 if [ "$ok" = 1 ]; then
-  systemctl enable qwen-worker.timer >/dev/null
-  systemctl restart qwen-worker.timer   # neuer TAKT gilt sofort
-  echo "Timer aktiv:"; systemctl list-timers qwen-worker.timer --no-pager | sed -n 2p
+  for t in $worker_timers; do systemctl enable "$t" >/dev/null; systemctl restart "$t"; done   # neuer TAKT gilt sofort
+  echo "Timer aktiv:"; systemctl list-timers 'qwen-worker*' qwen-review.timer --no-pager | sed '1d;/^$/,$d'
 else
-  systemctl disable --now qwen-worker.timer >/dev/null 2>&1 || true
+  for t in $worker_timers; do systemctl disable --now "$t" >/dev/null 2>&1 || true; done
   echo "Timer bleibt aus, bis GitHub angemeldet und (bei litellm) der Key gültig ist. Danach dieses Skript erneut ausführen."
 fi
