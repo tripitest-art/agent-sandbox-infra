@@ -41,9 +41,13 @@ except projects.ProjectConfigError as e:
 ' "$SCRIPT_DIR"
 }
 
-# Hält den Basis-Klon auf main. Ein Klon, der auf einem alten Feature-Branch hängt, ließ schon
-# Tests rot werden (#202-Branch auf CT 112). Nichts geht verloren: der alte Branch bleibt
-# bestehen, nur HEAD wechselt. Mit lokalen Änderungen wird nichts angefasst, nur gewarnt.
+# Hält den Basis-Klon auf dem Stand von origin/main. Ein Klon, der auf einem alten Feature-Branch
+# hängt, ließ schon Tests rot werden (#202-Branch auf CT 112). Nichts geht verloren: der alte Branch
+# bleibt bestehen, nur HEAD wechselt. Mit lokalen Änderungen wird nichts angefasst, nur gewarnt.
+# HEAD wird abgelöst (--detach), den Branch `main` belegt der Klon NICHT: Die Worker-Worktrees
+# (<workdir>-worktrees/w<N>) checken `main` aus, und Git erlaubt einen Branch nur an einer Stelle.
+# Mit `checkout -B main` hielt der Basis-Klon ihn fest, und beide Slots scheiterten mit
+# „'main' is already checked out“ (14.10.).
 sync_clone_to_main() {   # $1 = Name, $2 = Klon-Ordner
   local name=$1 dir=$2
   if ! git -C "$dir" fetch -q origin main; then
@@ -54,7 +58,7 @@ sync_clone_to_main() {   # $1 = Name, $2 = Klon-Ordner
     echo "Projekt $name: lokale Änderungen in $dir, Klon wird nicht auf main gesetzt" >&2
     return 0
   fi
-  git -C "$dir" checkout -q -B main origin/main || { echo "Projekt $name: Wechsel auf main fehlgeschlagen" >&2; return 0; }
+  git -C "$dir" checkout -q --detach origin/main || { echo "Projekt $name: Wechsel auf origin/main fehlgeschlagen" >&2; return 0; }
   echo "Projekt $name: Klon steht auf origin/main"
 }
 

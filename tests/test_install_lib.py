@@ -138,14 +138,16 @@ def existing_clone(tmp_path):
     return pf
 
 
-def test_existing_clone_is_set_to_origin_main(tmp_path):
+def test_existing_clone_is_detached_at_origin_main(tmp_path):
     pf = existing_clone(tmp_path)
     r = sh("ensure_projects", tmp_path, AGENT_PROJECTS=pf)
     assert r.returncode == 0, r.stderr
     log = git_log(tmp_path)
     d = str(tmp_path / "a-dir")
     assert f"git -C {d} fetch -q origin main" in log
-    assert f"git -C {d} checkout -q -B main origin/main" in log
+    assert f"git -C {d} checkout -q --detach origin/main" in log
+    # Der Branch main darf nicht belegt werden: Die Worker-Worktrees brauchen ihn (Regression 14.10.)
+    assert not any(" -B main" in l or l.endswith("checkout -q main") for l in log)
     assert not any(l.startswith(("git clone", "git reset")) for l in log)
 
 
