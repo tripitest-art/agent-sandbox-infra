@@ -100,6 +100,8 @@ Ein späterer Lauf (z. B. nach `git pull`) übernimmt sie, wenn du nichts angibs
 die schon laufenden Slot-Timer. Die Hilfsfunktionen stehen in `sandbox/install-lib.sh`.
 
 ### Mehrere Projekte (Projektliste)
+Ausführlich: [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) (Aufbau, Einrichten, neues Projekt aufnehmen, Sonderregeln für dieses Repo).
+
 Worker- und Review-Takt arbeiten nicht mehr fest auf sc-digger, sondern auf einer Projektliste in
 `/etc/agent-projects.json` (Vorlage: [`sandbox/projects.example.json`](sandbox/projects.example.json),
 Lademodul: `sandbox/projects.py`). Fehlt die Datei, läuft alles wie bisher mit sc-digger allein.
@@ -138,8 +140,8 @@ kein Fork-PR), dessen Checks fertig sind und für dessen aktuellen Commit es noc
 * **Vom Skript, nicht vom Modell:** Teststatus (nur aus den Check-Runs), die Zeile
   `Worker: … Reviewer: …` und die Regel „andere Modellfamilie“ (Worker und Reviewer aus derselben
   Familie: kein Review, Meldung an Stephan). Rote Pflicht-Checks (`tests`, `acceptance-guard`, `CodeQL`) ergeben ohne Modellaufruf
-  „Änderungen nötig“. Regeln und Vorlage liest er bei jedem Lauf aus `sc-digger/main`
-  (`AGENTS.md`, Abschnitt Reviewer und Goldene Regeln, `skills/sc-digger-review/SKILL.md`).
+  „Änderungen nötig“. Regeln und Vorlage liest er bei jedem Lauf aus `main` des jeweiligen Projekts
+  (`AGENTS.md`, Abschnitt Reviewer und Goldene Regeln, bei sc-digger zusätzlich `skills/sc-digger-review/SKILL.md`).
 * **Grenzen:** Das Modell sieht nur den Diff, nicht den übrigen Code. Unbrauchbare Antworten werden
   einmal wiederholt, danach geht der PR an Stephan. Nach zwei Reviews „Änderungen nötig“ je PR ebenso (`MAX_ROUNDS`).
 * **Durchgängig (`REVIEW_POST=1`):** Review als Kommentar posten; bei „Änderungen nötig“ startet die
