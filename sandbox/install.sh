@@ -31,14 +31,26 @@ OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
 AGENT=${AGENT:-qwen-code}                       # oder opencode
 TAKT=${TAKT:-5min}                              # so oft sucht der Worker Arbeit
+# Wo die Unit-Dateien und die aktivierten Timer liegen. Nur für Tests überschreibbar (dort zeigen
+# beide auf ein Ersatzverzeichnis, damit kein Lauf auf /etc/systemd/system zugreift; Regel 4).
+UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
+TIMER_DIR=${TIMER_DIR:-/etc/systemd/system/timers.target.wants}
 # Ohne Angabe gilt die gemerkte Einstellung (/etc/agent-sandbox.conf, install-lib.sh): Ein erneuter
 # Lauf (z. B. nach git pull) soll nicht still auf 1 Worker bzw. REVIEW_POST=0 zurückfallen. Beim
 # allerersten Lauf mit der Datei zählen die Timer, die schon laufen.
-prev_slots=$(ls /etc/systemd/system/timers.target.wants/qwen-worker@*.timer 2>/dev/null | wc -l || true)
+prev_slots=$(ls "$TIMER_DIR"/qwen-worker@*.timer 2>/dev/null | wc -l || true)
 saved_workers=$(conf_get MAX_WORKERS)
 MAX_WORKERS=${MAX_WORKERS:-${saved_workers:-$(( prev_slots > 1 ? prev_slots : 1 ))}}   # Parallele Worker-Slots (nur bei BACKEND=litellm)
 WORKERS_WANTED=$MAX_WORKERS                     # gemerkt wird der Wunsch, nicht die Ollama-Beschränkung
 [ "$BACKEND" = litellm ] || MAX_WORKERS=1       # Ollama auf RX 6800 XT erlaubt nur 1 Worker
+# Vor dem Merken prüfen: die Einstellungsdatei lässt Buchstaben zu, und ein gemerktes „zwei“ ließe jeden
+# weiteren Lauf am `[ "$MAX_WORKERS" -gt 1 ]` unten scheitern – eine Sackgasse, die nur von Hand in
+# $CONF wieder aufgeht. Geprüft wird WORKERS_WANTED, also der Wert, der gemerkt würde; das
+# Ollama-Limit eine Zeile darüber betrifft nur die Zahl der laufenden Worker.
+if ! [[ $WORKERS_WANTED =~ ^[1-9][0-9]*$ ]]; then
+  echo "MAX_WORKERS=$WORKERS_WANTED ist keine Zahl >= 1. Nichts gemerkt; mit MAX_WORKERS=<N> erneut starten oder die Zeile aus $CONF entfernen." >&2
+  exit 1
+fi
 WAKE_PC=${WAKE_PC:-0}                           # 1: Gaming-PC bei Arbeit per WoL wecken
 QWEN_CODE_VERSION=${QWEN_CODE_VERSION:-0.24.7}  # fest: ein Update soll bewusst passieren
 # Review-Takt (review_tick.py): Entwurf ohne Posten, solange REVIEW_POST=0
@@ -263,13 +275,24 @@ OnUnitActiveSec=$TAKT
 WantedBy=timers.target
 UNIT
 
+# Alle im System aktivierten Slot-Timer abschalten. Die Liste kommt aus dem System, nicht aus dem
+# festen Bereich 1–5: Nach einem Lauf mit MAX_WORKERS=8 blieben qwen-worker@6.timer bis @8.timer
+# aktiv, und es liefen mehr Worker als gewünscht (Regel 8: worker_tick.py ist der Engpass).
+disable_slot_timers() {
+  local timer
+  for timer in $(ls "$TIMER_DIR"/qwen-worker@*.timer 2>/dev/null || true); do
+    systemctl disable --now "$(basename "$timer")" >/dev/null 2>&1 || true
+  done
+}
+
 systemctl daemon-reload
 if [ "$MAX_WORKERS" -gt 1 ]; then
   # Bei Multi-Worker Instanz-Timer aktivieren (Slots gestaffelt starten)
   systemctl disable --now qwen-worker.timer >/dev/null 2>&1 || true
+  disable_slot_timers   # beim Verkleinern fallen so auch Slots oberhalb von MAX_WORKERS weg
   for i in $(seq 1 "$MAX_WORKERS"); do
     boot_delay=$(( i * 2 ))
-    cat > "/etc/systemd/system/qwen-worker@$i.timer" <<TUNIT
+    cat > "$UNIT_DIR/qwen-worker@$i.timer" <<TUNIT
 [Unit]
 Description=Qwen-Worker Slot $i alle $TAKT
 [Timer]
@@ -283,9 +306,7 @@ TUNIT
   done
   echo "Taktgeber: Multi-Worker mit $MAX_WORKERS Slots aktiv (qwen-worker@1..$MAX_WORKERS.timer)"
 else
-  for i in $(seq 1 5); do
-    systemctl disable --now "qwen-worker@$i.timer" >/dev/null 2>&1 || true
-  done
+  disable_slot_timers   # auch hier aus dem System, nicht nur aus dem festen Bereich 1–5
   systemctl enable qwen-worker.timer >/dev/null
   systemctl restart qwen-worker.timer
   echo "Taktgeber: Single-Worker an (alle $TAKT)"
@@ -415,5 +436,7 @@ if [ "$ok" = 1 ]; then
   echo "Timer aktiv:"; systemctl list-timers 'qwen-worker*' qwen-review.timer --no-pager | sed '1d;/^$/,$d'
 else
   for t in $worker_timers; do systemctl disable --now "$t" >/dev/null 2>&1 || true; done
+  disable_slot_timers   # Reste aus einem früheren Lauf mit mehr Slots
+  systemctl disable --now qwen-review.timer >/dev/null 2>&1 || true   # sonst postet und mergt der Review-Takt weiter
   echo "Timer bleibt aus, bis GitHub angemeldet und (bei litellm) der Key gültig ist. Danach dieses Skript erneut ausführen."
 fi

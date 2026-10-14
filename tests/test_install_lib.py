@@ -21,9 +21,16 @@ def sh(script, tmp_path, **env):
                    '[ "$3" = status ] && [ "$FAKE_DIRTY" = 1 ] && echo " M datei"\n'
                    '[ "$1" = clone ] && mkdir -p "$4/.git"\nexit 0\n')
     git.chmod(git.stat().st_mode | stat.S_IEXEC)
+    # systemctl-Fake: zeichnet die Aufrufe auf, damit die Timer-Logik ohne Server prüfbar ist.
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text('#!/bin/sh\necho "systemctl $*" >> "$SYSTEMCTL_LOG"\nexit 0\n')
+    systemctl.chmod(systemctl.stat().st_mode | stat.S_IEXEC)
+    (tmp_path / "units").mkdir(exist_ok=True)
+    (tmp_path / "timers.target.wants").mkdir(exist_ok=True)
     full = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "GIT_LOG": str(tmp_path / "git.log"),
             "AGENT_SANDBOX_CONF": str(tmp_path / "agent-sandbox.conf"), "SCRIPT_DIR": str(SANDBOX),
-            "INFRA_DIR": str(tmp_path / "deploy-klon"), **env}
+            "INFRA_DIR": str(tmp_path / "deploy-klon"), "SYSTEMCTL_LOG": str(tmp_path / "systemctl.log"),
+            "UNIT_DIR": str(tmp_path / "units"), "TIMER_DIR": str(tmp_path / "timers.target.wants"), **env}
     return subprocess.run(["bash", "-c", f"set -euo pipefail\n. {SANDBOX}/install-lib.sh\n{script}"],
                           capture_output=True, text=True, env=full)
 
@@ -191,3 +198,87 @@ def test_fresh_clone_is_not_synced_again(tmp_path):
     pf = projects_file(tmp_path, ("a", "o/a", "a-dir"))
     sh("ensure_projects", tmp_path, AGENT_PROJECTS=pf)
     assert not any("checkout" in l for l in git_log(tmp_path))
+
+
+# ---- install.sh: MAX_WORKERS prüfen, Slot-Timer aus dem System abschalten ----
+
+INSTALL_SOURCE = (SANDBOX / "install.sh").read_text()
+
+
+def install_sh_slice(start, end):
+    """Zeichengenauer Ausschnitt aus install.sh.
+
+    install.sh selbst läuft nie (apt-get, systemctl, /etc; Regel 4 – das macht Stephan). Damit die
+    neuen Bausteine trotzdem prüfbar sind, werden sie einzeln herausgeschnitten und mit dem
+    systemctl-Fake oben gefahren. Fehlt ein Marker, bricht der Test ab, statt still nichts zu prüfen.
+    """
+    i = INSTALL_SOURCE.index(start)
+    j = INSTALL_SOURCE.index(end, i)
+    return INSTALL_SOURCE[i:j + len(end)]
+
+
+def disable_slot_timers_fn():
+    """Die Funktion aus install.sh, die jeden gefundenen Slot-Timer abschaltet."""
+    return install_sh_slice("disable_slot_timers() {", "\n}\n")
+
+
+def systemctl_log(tmp_path):
+    f = tmp_path / "systemctl.log"
+    return f.read_text().splitlines() if f.exists() else []
+
+
+def slot_timers_present(tmp_path, *slots):
+    d = tmp_path / "timers.target.wants"
+    d.mkdir(parents=True, exist_ok=True)
+    for i in slots:
+        (d / f"qwen-worker@{i}.timer").touch()
+
+
+def test_disable_slot_timers_shuts_down_every_slot_found_in_the_system(tmp_path):
+    """Der Bereich kommt aus dem System, nicht aus 1–5: Slots 6 und 7 dürfen nicht aktiv bleiben."""
+    slot_timers_present(tmp_path, *range(1, 8))
+    fn = install_sh_slice("disable_slot_timers() {", "\n}\n")
+    r = sh(f"{fn}\ndisable_slot_timers", tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert systemctl_log(tmp_path) == [f"systemctl disable --now qwen-worker@{i}.timer"
+                                      for i in range(1, 8)]
+
+
+def test_multi_worker_branch_stops_slots_above_the_wanted_number(tmp_path):
+    """Beim Verkleinern (hier 8 → 2) muss der Multi-Worker-Zweig die Slots 3–7 abschalten."""
+    slot_timers_present(tmp_path, *range(1, 8))
+    block = install_sh_slice(
+        'if [ "$MAX_WORKERS" -gt 1 ]; then',
+        'echo "Taktgeber: Multi-Worker mit $MAX_WORKERS Slots aktiv (qwen-worker@1..$MAX_WORKERS.timer)"\n')
+    r = sh(f"MAX_WORKERS=2\nTAKT=5min\n{disable_slot_timers_fn()}\n{block}\nfi\n", tmp_path)
+    assert r.returncode == 0, r.stderr
+    log = systemctl_log(tmp_path)
+    abgeschaltet = {l.split()[-1] for l in log if l.startswith("systemctl disable --now qwen-worker@")}
+    assert {f"qwen-worker@{i}.timer" for i in range(3, 8)} <= abgeschaltet
+    aktiviert = {l.split()[-1] for l in log if l.startswith("systemctl enable qwen-worker@")}
+    assert aktiviert == {"qwen-worker@1.timer", "qwen-worker@2.timer"}
+    assert "systemctl disable --now qwen-worker.timer" in log
+    assert sorted(p.name for p in (tmp_path / "units").glob("qwen-worker@*.timer")) == \
+        ["qwen-worker@1.timer", "qwen-worker@2.timer"]
+
+
+def test_ungueltiger_max_workers_bricht_ab_und_merkt_nichts(tmp_path):
+    """Ein gemerktes „zwei“ darf die Datei nicht erreichen: sonst scheitert jeder weitere Lauf."""
+    (tmp_path / "agent-sandbox.conf").write_text("MAX_WORKERS=5\n")
+    pruefung = install_sh_slice("if ! [[ $WORKERS_WANTED =~ ", "\nfi\n")
+    r = sh(f"MAX_WORKERS=zwei\nWORKERS_WANTED=$MAX_WORKERS\n{pruefung}\nconf_save MAX_WORKERS", tmp_path)
+    assert r.returncode != 0
+    assert "MAX_WORKERS=zwei ist keine Zahl >= 1" in r.stderr
+    assert "MAX_WORKERS=<N>" in r.stderr   # nennt den Weg aus einer schon gemerkten Sackgasse
+    assert (tmp_path / "agent-sandbox.conf").read_text() == "MAX_WORKERS=5\n"
+
+
+def test_gescheiterte_pruefung_schaltet_worker_und_review_timer_ab(tmp_path):
+    """ok != 1: Die Meldung „Timer bleibt aus“ stimmt nur, wenn auch der Review-Takt aus ist."""
+    block = install_sh_slice('if [ "$ok" = 1 ]; then', "\nfi\n")
+    r = sh(f"ok=0\nMAX_WORKERS=1\nworker_timers=qwen-worker.timer\n"
+           f"{disable_slot_timers_fn()}\n{block}", tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "systemctl disable --now qwen-worker.timer" in systemctl_log(tmp_path)
+    assert "systemctl disable --now qwen-review.timer" in systemctl_log(tmp_path)
+    assert "Timer bleibt aus" in r.stdout
