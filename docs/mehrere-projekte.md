@@ -18,7 +18,7 @@ eine **Projektliste**. Das zweite Projekt ist diese Infrastruktur selbst
 | Worker-Takt | `sandbox/worker_tick.py` | `pick_job()` geht die Projekte der Reihe nach durch |
 | Review-Takt | `sandbox/review_tick.py` | `run_once()` prüft je Projekt einen PR |
 | Einrichtung | `sandbox/install.sh`, `sandbox/install-lib.sh` | klont die Projekte, merkt Einstellungen in `/etc/agent-sandbox.conf` |
-| Branch-Schutz | `.github/rulesets/main-schutz.json` | Vorlage des Rulesets (Import in GitHub, siehe unten) |
+| Branch-Schutz | `docs/main-schutz.ruleset.json` | Vorlage des Rulesets (Import in GitHub, siehe unten) |
 
 ## Die Projektliste
 
@@ -92,7 +92,7 @@ Voraussetzung ist der Vertrag aus sc-digger:
    `.github/scripts/acceptance_guard.py`. Vorbild: dieses Repo oder sc-digger.
 2. **Labels:** `worker-task`, `bereit`, `in-arbeit`, `blockiert`, `braucht-stephan`,
    `freigabe-geschützt`, `phase-N`, `agent-qwen`, `agent-antigravity`, `agent-claude`.
-3. **Branch-Schutz:** `.github/rulesets/main-schutz.json` importieren (Settings → Rules → Rulesets → New
+3. **Branch-Schutz:** `docs/main-schutz.ruleset.json` importieren (Settings → Rules → Rulesets → New
    ruleset → Import a ruleset). Der Import setzt `tests` und `acceptance-guard` als Pflicht-Checks voraus,
    die Workflows müssen also schon auf `main` liegen.
 4. **Server:** Eintrag in `/etc/agent-projects.json`, dann `bash sandbox/install.sh`.
