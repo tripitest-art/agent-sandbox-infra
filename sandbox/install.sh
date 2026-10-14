@@ -17,7 +17,10 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # sandbox/ dieses Repos
-REPO_DIR=/root/sc-digger
+INFRA_DIR=$(cd "$SCRIPT_DIR/.." && pwd)                    # Deploy-Klon dieser Infrastruktur (git pull)
+REPO_DIR=/root/sc-digger                                   # Klon von sc-digger (Tests, requirements)
+# shellcheck source=install-lib.sh
+. "$SCRIPT_DIR/install-lib.sh"
 BACKEND=${BACKEND:-litellm}                     # litellm (DeepSeek über LXC 113) oder ollama
 LITELLM=${LITELLM:-http://192.168.0.211:4000}
 LITELLM_MODEL=${LITELLM_MODEL:-coder}           # Alias im LiteLLM-Proxy
@@ -28,23 +31,32 @@ OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
 AGENT=${AGENT:-qwen-code}                       # oder opencode
 TAKT=${TAKT:-5min}                              # so oft sucht der Worker Arbeit
-# Ohne Angabe gilt die bisherige Einstellung: Ein erneuter Lauf (z. B. nach git pull) soll nicht
-# still auf 1 Worker bzw. REVIEW_POST=0 zurückfallen.
-prev_slots=$(ls /etc/systemd/system/timers.target.wants/qwen-worker@*.timer 2>/dev/null | wc -l)
-MAX_WORKERS=${MAX_WORKERS:-$(( prev_slots > 1 ? prev_slots : 1 ))}   # Parallele Worker-Slots (nur bei BACKEND=litellm)
+# Ohne Angabe gilt die gemerkte Einstellung (/etc/agent-sandbox.conf, install-lib.sh): Ein erneuter
+# Lauf (z. B. nach git pull) soll nicht still auf 1 Worker bzw. REVIEW_POST=0 zurückfallen. Beim
+# allerersten Lauf mit der Datei zählen die Timer, die schon laufen.
+prev_slots=$(ls /etc/systemd/system/timers.target.wants/qwen-worker@*.timer 2>/dev/null | wc -l || true)
+saved_workers=$(conf_get MAX_WORKERS)
+MAX_WORKERS=${MAX_WORKERS:-${saved_workers:-$(( prev_slots > 1 ? prev_slots : 1 ))}}   # Parallele Worker-Slots (nur bei BACKEND=litellm)
+WORKERS_WANTED=$MAX_WORKERS                     # gemerkt wird der Wunsch, nicht die Ollama-Beschränkung
 [ "$BACKEND" = litellm ] || MAX_WORKERS=1       # Ollama auf RX 6800 XT erlaubt nur 1 Worker
 WAKE_PC=${WAKE_PC:-0}                           # 1: Gaming-PC bei Arbeit per WoL wecken
 QWEN_CODE_VERSION=${QWEN_CODE_VERSION:-0.24.7}  # fest: ein Update soll bewusst passieren
 # Review-Takt (review_tick.py): Entwurf ohne Posten, solange REVIEW_POST=0
-prev_post=$(sed -n 's/^Environment=REVIEW_POST=//p' /etc/systemd/system/qwen-review.service 2>/dev/null | tail -1)
+prev_post=$(sed -n 's/^Environment=REVIEW_POST=//p' /etc/systemd/system/qwen-review.service 2>/dev/null | tail -1 || true)
+REVIEW_POST=${REVIEW_POST:-$(conf_get REVIEW_POST)}
 REVIEW_POST=${REVIEW_POST:-${prev_post:-0}}     # 1: Review posten, mergen, entblocken (sonst nur Entwurf)
 REVIEW_LABELS=${REVIEW_LABELS:-agent-qwen,agent-antigravity,agent-claude}   # diese Worker-PRs prüft der Takt
+REVIEW_AUTO_MERGE=${REVIEW_AUTO_MERGE:-$(conf_get REVIEW_AUTO_MERGE)}
 REVIEW_AUTO_MERGE=${REVIEW_AUTO_MERGE:-1}       # 1: Freigegebene PRs mit Modus automatisch squashen
 REVIEW_TAKT=${REVIEW_TAKT:-10min}               # so oft sucht der Review-Takt einen PR
 REVIEW_MODEL=${REVIEW_MODEL:-coder-glm}         # LiteLLM-Alias (GLM, andere Familie als der Worker)
 REVIEW_MODEL_BIG=${REVIEW_MODEL_BIG:-longctx-lite}   # für sehr große Diffs
 REVIEWER_NAME=${REVIEWER_NAME:-GLM}             # steht als „Reviewer: …“ im Review
 export DEBIAN_FRONTEND=noninteractive
+# Gleich merken, nicht erst am Ende: Bricht ein späterer Schritt ab, gilt der Wunsch beim nächsten Lauf trotzdem.
+( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS REVIEW_POST REVIEW_AUTO_MERGE ) \
+  && echo "Einstellungen gemerkt ($CONF): MAX_WORKERS=$WORKERS_WANTED REVIEW_POST=$REVIEW_POST REVIEW_AUTO_MERGE=$REVIEW_AUTO_MERGE" \
+  || echo "Warnung: Einstellungen konnten nicht gemerkt werden ($CONF)"
 # Alle LiteLLM-Aliase, die der Worker nutzen kann (Hauptmodell zuerst, ohne Doppelte)
 LITELLM_ALL=$(printf '%s\n' "$LITELLM_MODEL" ${LITELLM_FALLBACKS//,/ } | awk 'NF && !seen[$0]++')
 
@@ -67,9 +79,14 @@ apt-get install -y -qq gh >/dev/null
 echo "== Repo und Python-Umgebung"
 git config --global user.name >/dev/null || git config --global user.name "Stephan (Sandbox-Agent)"
 git config --global user.email >/dev/null || git config --global user.email "tripitest@gmail.com"
-[ -d "$REPO_DIR/.git" ] || git clone -q https://github.com/tripitest-art/sc-digger.git "$REPO_DIR"
+# Alle Projekte der Projektliste (/etc/agent-projects.json; ohne Datei nur sc-digger) klonen.
+# Eine kaputte Liste bricht das Skript ab, statt ein Projekt still wegzulassen.
+ensure_projects
 [ -x /root/venv/bin/python ] || python3 -m venv /root/venv
-/root/venv/bin/pip install -q -r "$REPO_DIR/requirements.txt" pytest
+for dir in $(project_workdirs); do
+  if [ -f "$dir/requirements.txt" ]; then /root/venv/bin/pip install -q -r "$dir/requirements.txt"; fi
+done
+/root/venv/bin/pip install -q pytest
 grep -q 'source /root/venv/bin/activate' /root/.bashrc || echo 'source /root/venv/bin/activate' >> /root/.bashrc
 
 echo "== Geheimnisse (nur lokal, nie im Repo)"
@@ -184,8 +201,7 @@ echo "== Taktgeber"
 install -m 644 "$SCRIPT_DIR/projects.py" /root/projects.py
 install -m 755 "$SCRIPT_DIR/worker_tick.py" /root/worker_tick.py
 
-# Basis- und Worktree-Verzeichnisse vorbereiten
-[ "$MAX_WORKERS" -gt 1 ] && mkdir -p /root/sc-digger-worktrees
+# Worktree-Ordner je Projekt legt ensure_projects an (bei MAX_WORKERS > 1).
 
 # Instanziierte Template-Unit für Slot-Worker (qwen-worker@1, qwen-worker@2, ...)
 cat > /etc/systemd/system/qwen-worker@.service <<UNIT
@@ -385,7 +401,9 @@ if [ "$BACKEND" = litellm ]; then
   else echo "LiteLLM: HTTP $code (Proxy aus oder Key falsch)"; ok=0; fi
 elif curl -s -m 10 "$OLLAMA/api/tags" | grep -q "\"$MODEL"; then echo "Ollama: $MODEL vorhanden"
 else echo "Ollama: $MODEL nicht erreichbar (PC aus, Bildmodus oder Modell fehlt)"; fi
-(cd "$REPO_DIR" && /root/venv/bin/python -m pytest -q 2>&1 | tail -1)
+# Nur zur Information: rote Tests der Projekte (oft fehlt in CT 112 nur ein Werkzeug) dürfen die
+# Einrichtung nicht abbrechen, sonst bleiben die Timer unberührt (set -e, pipefail).
+(cd "$REPO_DIR" && /root/venv/bin/python -m pytest -q 2>&1 | tail -1) || echo "(Tests von $REPO_DIR nicht grün, siehe oben; Einrichtung läuft weiter)"
 
 # Welche Timer laufen, hat der Abschnitt Taktgeber oben entschieden (ein Timer oder Slots).
 # Hier nur noch an/aus nach der Prüfung; nie zusätzlich qwen-worker.timer neben den Slots.

@@ -93,6 +93,12 @@ CTID=$(pvesh get /cluster/nextid) bash host-create.sh
 * **Parallele Worker (`MAX_WORKERS`):** Mit `MAX_WORKERS=2 bash sandbox/install.sh` werden 2 parallele Worker-Slots (`qwen-worker@1.timer`, `qwen-worker@2.timer`) gestaffelt aktiviert. Jeder Slot arbeitet in einem isolierten Git-Worktree (`/root/sc-digger-worktrees/w<N>`). Der Taktgeber verhindert automatisch Kollisionen: Issues mit `berührt-main.py` oder Überschneidungen in `### Betroffene Dateien` mit bereits aktiven Aufgaben werden übersprungen (Regel 8). Parallele Worker sind nur bei `BACKEND=litellm` aktiv; bei `BACKEND=ollama` wird strikt 1 Worker erzwungen.
 * YAML-Snippets aus [`homeassistant/`](homeassistant/) in die `configuration.yaml` und das Dashboard einfügen.
 
+### Einstellungen bleiben erhalten
+`install.sh` merkt sich `MAX_WORKERS`, `REVIEW_POST` und `REVIEW_AUTO_MERGE` in `/etc/agent-sandbox.conf`.
+Ein späterer Lauf (z. B. nach `git pull`) übernimmt sie, wenn du nichts angibst; eine ausdrückliche Angabe
+(`MAX_WORKERS=1 bash sandbox/install.sh`) gilt und wird neu gemerkt. Beim ersten Lauf mit der Datei zählen
+die schon laufenden Slot-Timer. Die Hilfsfunktionen stehen in `sandbox/install-lib.sh`.
+
 ### Mehrere Projekte (Projektliste)
 Worker- und Review-Takt arbeiten nicht mehr fest auf sc-digger, sondern auf einer Projektliste in
 `/etc/agent-projects.json` (Vorlage: [`sandbox/projects.example.json`](sandbox/projects.example.json),
@@ -111,6 +117,9 @@ Lademodul: `sandbox/projects.py`). Fehlt die Datei, läuft alles wie bisher mit 
 - **Worktrees und Zustand:** Jedes Projekt hat eigene Worktrees (`<workdir>-worktrees/w<N>`). Zustandsschlüssel,
   Review-Zustand (`review-state-<name>.json`) und Entwürfe (`reviews-<name>/`) tragen ab dem zweiten
   Projekt den Namen, damit PR-Nummern nicht kollidieren. Das erste Projekt behält die alten Pfade.
+- **Klone:** `install.sh` klont jedes Projekt der Liste nach `workdir` und bricht bei einer kaputten Liste oder einem
+  fehlgeschlagenen Klon ab. `workdir` darf nie der Klon sein, in dem du `git pull` ausführst: Der Worker setzt seinen
+  Klon mit `reset --hard` und `clean` zurück. Für diese Infrastruktur also z. B. `/root/work/agent-sandbox-infra`.
 - **Voraussetzung je Projekt:** der Vertrag aus sc-digger (`AGENTS.md`, Labels `worker-task`, `bereit`, `in-arbeit`,
   `agent-*`, Akzeptanztests unter `tests/acceptance/`, Checks `tests` und `acceptance-guard`).
 - **Fehlerverhalten:** Eine kaputte Projektliste lässt die Takte mit Fehlermeldung abbrechen, damit kein Projekt

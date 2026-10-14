@@ -13,7 +13,7 @@
     {
       "name": "agent-sandbox-infra",
       "repo": "tripitest-art/agent-sandbox-infra",
-      "workdir": "/root/agent-sandbox-infra",
+      "workdir": "/root/work/agent-sandbox-infra",
       "auto_merge": false
     }
   ]
