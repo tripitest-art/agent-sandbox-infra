@@ -38,3 +38,15 @@ Kopiere den Inhalt aus [`configuration_sensors.yaml`](configuration_sensors.yaml
 ## 3. Dashboard-Karte anlegen
 
 Erstelle eine neue Karte auf deinem Dashboard und füge den YAML-Code aus [`dashboard_card.yaml`](dashboard_card.yaml) ein.
+
+---
+
+## 4. Benachrichtigung „PR braucht Stephan“
+
+Der Review-Takt meldet mit einer Log-Zeile `⚠ Stephan: …`, wenn er an einem PR nicht weiterkommt
+(Merge-Modus manuell, zwei Runden „Änderungen nötig“, Merge scheitert dauerhaft, unbrauchbare
+Modellantworten, Diff zu groß). Mit `REVIEW_POST=1` bekommt der PR zusätzlich das Label
+`braucht-stephan` und einen Kommentar. Die Automation aus
+[`automation_stephan.yaml`](automation_stephan.yaml) schickt daraus eine Push-Nachricht mit Link auf
+die Liste dieser PRs. Notify-Dienst darin anpassen, dann unter Einstellungen → Automationen →
+„YAML bearbeiten“ einfügen.
