@@ -747,13 +747,18 @@ def prepare_workdir() -> None:
     except Exception as e:
         log(f"Warnung bei git fetch im Basis-Repo: {e}")
 
-    # Worktree anlegen oder bereinigen
+    # Worktree anlegen oder bereinigen — detached an origin/main, nicht auf dem Branch `main`.
+    # Git erlaubt einen Branch nur an einer Stelle, und mehrere Slots teilen sich diesen Klon:
+    # `worktree add -B main` bzw. `checkout -qf main` scheitern, sobald der andere Slot `main`
+    # hält (exit 255/128), und der Takt stirbt mit CalledProcessError, nachdem er das Issue
+    # schon übernommen hat (14.10.: „fatal: 'main' is already checked out at …/w2“, Issue #40).
+    # install-lib.sh hält den Basis-Klon aus demselben Grund detached (Zeilen 47–49, 61).
     if not os.path.exists(WORKDIR):
         os.makedirs(os.path.dirname(WORKDIR), exist_ok=True)
-        subprocess.run(["git", "worktree", "add", "--force", "-B", "main", WORKDIR, "origin/main"],
+        subprocess.run(["git", "worktree", "add", "--force", "--detach", WORKDIR, "origin/main"],
                        cwd=base, check=True, env=ENV)
     else:
-        for cmd in (["git", "checkout", "-qf", "main"],
+        for cmd in (["git", "checkout", "-qf", "--detach", "origin/main"],
                     ["git", "reset", "-q", "--hard", "origin/main"],
                     ["git", "clean", "-qfd"]):
             subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
