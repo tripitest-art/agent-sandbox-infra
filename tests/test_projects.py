@@ -92,6 +92,13 @@ def test_example_file_is_valid():
     assert [p.name for p in pj.parse_projects(text)] == ["sc-digger", "agent-sandbox-infra"]
 
 
+# ---- Ausgabe ----
+
+def test_format_projects_automatic_merge_without_hotspot():
+    p = pj.Project(name="infra", repo="o/infra", workdir="/root/infra", auto_merge=True, hotspot=None)
+    assert pj.format_projects([p]) == "infra (o/infra): Merge automatisch, kein Hotspot"
+
+
 # ---- Worker ----
 
 @pytest.fixture
