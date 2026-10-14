@@ -816,6 +816,51 @@ def test_prepare_workdir_creates_worktree(monkeypatch, tmp_path):
     assert any("worktree" in c[0] and "add" in c[0] for c in commands)
 
 
+def test_prepare_workdir_reuses_existing_worktree_detached(monkeypatch):
+    """Vorhandener Worktree: detached auf origin/main statt auf dem Branch `main`.
+
+    `checkout -qf main` scheitert mit exit 128, sobald der andere Slot `main` in seinem Worktree
+    hält — der Takt stirbt dann mit CalledProcessError, nachdem er das Issue schon übernommen hat
+    (Log vom 14.10., Issue #40). Gefaked, damit weder git noch das Dateisystem angefasst werden.
+    """
+    import os as _os
+
+    calls = []
+
+    class _Null:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    # Ohne O_EXCL entfällt der flock-Zweig, damit der Ablauf auf Windows und Linux gleich ist.
+    fake_os = type("FakeOs", (), {
+        "path": type("FakePath", (), {
+            "exists": staticmethod(lambda p: True),
+            "join": staticmethod(_os.path.join),
+            "dirname": staticmethod(_os.path.dirname),
+        }),
+        "makedirs": staticmethod(lambda *a, **k: None),
+    })
+    monkeypatch.setattr(w, "BASE_WORKDIR", "/base")
+    monkeypatch.setattr(w, "WORKDIR", "/base-worktrees/w2")
+    monkeypatch.setattr(w, "os", fake_os)
+    monkeypatch.setattr(w, "open", lambda *a, **k: _Null(), raising=False)
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, cwd=None, **kw: calls.append(list(cmd)))
+
+    w.prepare_workdir()
+
+    assert calls == [
+        ["git", "fetch", "-q", "origin"],
+        ["git", "checkout", "-qf", "--detach", "origin/main"],
+        ["git", "reset", "-q", "--hard", "origin/main"],
+        ["git", "clean", "-qfd"],
+    ]
+    for cmd in calls:
+        assert "main" not in cmd and "-B" not in cmd
+
+
 def test_slot_logging(capsys, monkeypatch):
     monkeypatch.setattr(w, "SLOT_TAG", "w2")
     w.log("Testmeldung")
