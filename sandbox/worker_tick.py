@@ -131,7 +131,16 @@ def use_project(p: "projects.Project", first: bool) -> None:
 
 def gh(*args: str):
     out = subprocess.run(["gh", *args, "--repo", REPO], capture_output=True, text=True, check=True, env=ENV)
-    return json.loads(out.stdout) if out.stdout.strip() else None
+    text = out.stdout.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        # `gh issue edit` & Co. geben die URL aus, kein JSON. Der Befehl ist gelungen; wer eine
+        # Liste erwartet, bekommt den Text und scheitert dort sichtbar. Früher brach hier das
+        # Claiming ab, obwohl das Label schon gesetzt war (#52, #246, #247 blieben auf in-arbeit).
+        return text
 
 
 def pr_template() -> str:
@@ -368,7 +377,9 @@ def claim_issue(n: int) -> bool:
         log(f"Issue #{n} erfolgreich auf 'in-arbeit' gesetzt.")
         return True
     except Exception as e:
-        log(f"Claiming von Issue #{n} fehlgeschlagen: {e}")
+        # Bei einem gescheiterten gh-Aufruf steht der Grund in stderr, nicht in der Exception.
+        detail = ((getattr(e, "stderr", None) or "").strip().splitlines() or [""])[0][:200]
+        log(f"Claiming von Issue #{n} fehlgeschlagen: {e}" + (f" ({detail})" if detail else ""))
         return False
 
 
