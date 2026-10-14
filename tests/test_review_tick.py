@@ -30,10 +30,18 @@ def _pr(number=7, **kw):
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path):
+    # BASE_* mitpatchen: use_project() leitet STATE/DRAFT_DIR daraus ab, sobald die Projektliste
+    # (/etc/agent-projects.json) mehr als ein Projekt nennt. Ohne diese zwei Zeilen schreiben die
+    # Tests dann in die Zustandsdateien des Servers, statt in tmp_path.
+    monkeypatch.setattr(r, "BASE_STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(r, "BASE_DRAFT_DIR", str(tmp_path / "reviews"))
     monkeypatch.setattr(r, "STATE", str(tmp_path / "state.json"))
     monkeypatch.setattr(r, "DRAFT_DIR", str(tmp_path / "reviews"))
     monkeypatch.setattr(r, "REVIEW_KEY", "test-key")
     monkeypatch.setattr(r, "REVIEWER_NAME", "GLM")
+    # Vollständige Reviewer-Konfiguration in einer Familie, unabhängig von der Umgebung: sonst sperrt
+    # reviewer_config_problem() jeden Review (⚠ Stephan:) und kein Test kommt zum Modellaufruf.
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "coder-glm")
     monkeypatch.setattr(r, "POST", False)
 
     def no_network(*a, **k):
@@ -102,6 +110,26 @@ def test_worker_family_and_same_family():
     assert r.worker_from_body("kein Hinweis") is None
 
 
+def test_worker_family_resolves_the_names_from_the_worker_table():
+    assert r.worker_family("DeepSeek (LiteLLM coder-fast)") == "deepseek"
+    assert r.worker_family("Codestral (LiteLLM coder-free)") == "mistral"
+    assert r.worker_family("Qwen3-Coder 30B") == "qwen"   # nicht in der Tabelle (BACKEND=ollama)
+    assert r.worker_family("Rätselmodell 7") is None
+    assert r.worker_family(None) is None and r.worker_family("") is None
+
+
+def test_model_family_is_only_called_by_the_family_checks():
+    """Früher rief _run_pr_review() model_family() selbst auf und übersprang die Regel, wenn None."""
+    import ast
+    source = Path(r.__file__).read_text(encoding="utf-8")
+    assert "if wf and wf == rf" not in source
+    tree = ast.parse(source)
+    callers = {fn.name for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef)
+               for call in ast.walk(fn)
+               if isinstance(call, ast.Call) and getattr(call.func, "id", None) == "model_family"}
+    assert callers == {"worker_family", "independence_problem", "reviewer_config_problem"}
+
+
 def test_checks_summary_pending_and_red():
     done, rows, red = r.checks_summary(GOOD_CHECKS)
     assert done and not red and ("tests", "SUCCESS") in rows
@@ -116,7 +144,7 @@ def test_checks_summary_pending_and_red():
 
 def test_assemble_sets_model_line_and_check_line_itself():
     raw = OK_REVIEW.replace("\n\n### Muss", "\n\nReview nach AGENTS.md → Reviewer. Worker: x, Reviewer: Claude.\n- Checks: alles grün\n\n### Muss", 1)
-    out = r.assemble(raw, "DeepSeek", [("tests", "SUCCESS"), ("CodeQL", "FAILURE")])
+    out = r.assemble(raw, "DeepSeek", [("tests", "SUCCESS"), ("CodeQL", "FAILURE")], "GLM")
     assert out.splitlines()[0] == "**Freigegeben**"
     assert "Worker: DeepSeek, Reviewer: GLM (andere Modellfamilie)." in out
     assert "Claude" not in out and "alles grün" not in out
@@ -137,7 +165,7 @@ def test_pick_pr_skips_forks_wrong_label_and_reviewed():
     assert r.pick_pr([_pr(5)], {"erledigt": [f"pr5@{SHA}"]}, lambda n: labels[5]) is None
 
 
-def _fake_github(monkeypatch, prs, llm_text=OK_REVIEW, calls=None):
+def _fake_github(monkeypatch, prs, llm_text=OK_REVIEW, calls=None, diff="diff --git a/a.py b/a.py\n+x\n"):
     calls = calls if calls is not None else {}
 
     def gh_json(*args):
@@ -152,7 +180,7 @@ def _fake_github(monkeypatch, prs, llm_text=OK_REVIEW, calls=None):
         raise AssertionError(args)
 
     monkeypatch.setattr(r, "gh_json", gh_json)
-    monkeypatch.setattr(r, "gh_text", lambda *a, **k: "diff --git a/a.py b/a.py\n+x\n")
+    monkeypatch.setattr(r, "gh_text", lambda *a, **k: diff)
     monkeypatch.setattr(r, "repo_file", lambda p: "### Reviewer\nregel\n## Goldene Regeln\ng\n## Schritt 5\nf\n## Schritt 7\nx" if "AGENTS" in p else "## Schritt 5\nf\n## Schritt 6\nd\n## Schritt 7\nx")
 
     def call_llm(model, messages):
@@ -170,7 +198,7 @@ def test_dry_run_writes_draft_and_does_not_post(monkeypatch, capsys, tmp_path):
     assert r.run_once() == 0
     assert calls["llm"] == 1 and calls["model"] == "coder-glm" and "posted" not in calls
     draft = (tmp_path / "reviews" / f"pr7-{SHA[:7]}.md").read_text(encoding="utf-8")
-    assert "Reviewer: GLM" in draft and "Worker: DeepSeek (LiteLLM coder-fast)" in draft
+    assert "Reviewer: coder-glm" in draft and "Worker: DeepSeek (LiteLLM coder-fast)" in draft
     assert "REVIEW_POST=0, nicht gepostet" in capsys.readouterr().out
     assert "Keine Werkzeuge" not in calls["system"] and "Goldene Regeln" in calls["system"]
     # zweiter Takt: nichts mehr zu tun
@@ -203,10 +231,45 @@ def test_pending_checks_and_missing_worker_line_wait(monkeypatch):
 
 
 def test_same_family_is_skipped(monkeypatch, capsys):
+    # Reviewer und Worker in derselben Familie: kein Modellaufruf, sondern eine Zeile für Stephan.
+    monkeypatch.setattr(r, "REVIEW_MODEL", "coder-fast")
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "coder-fast")
     monkeypatch.setattr(r, "REVIEWER_NAME", "DeepSeek")
     calls = _fake_github(monkeypatch, [_pr()])
     r.run_once()
-    assert "llm" not in calls and "gleiche Modellfamilie" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "llm" not in calls and "gleiche Modellfamilie" in out and "⚠ Stephan:" in out
+
+
+def test_unknown_worker_family_blocks_the_review(monkeypatch, capsys, tmp_path):
+    # Vorher lief der Review trotzdem (`if wf and wf == rf`); jetzt wird die unbekannte Familie gemeldet.
+    calls = _fake_github(monkeypatch, [_pr(body="Closes #5\n\nWorker: Rätselmodell 7\n")])
+    assert r.run_once() == 0
+    out = capsys.readouterr().out
+    assert "llm" not in calls and "Modellfamilie nicht prüfbar" in out and "⚠ Stephan:" in out
+    assert f"pr7@{SHA}" in json.loads((tmp_path / "state.json").read_text())["erledigt"]
+
+
+def test_broken_reviewer_config_blocks_once_per_key(monkeypatch, capsys, tmp_path):
+    # Unbekannter Alias in der Konfiguration: kein Modellaufruf, und die Meldung wiederholt sich nicht.
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "unbekannt-7b")
+    calls = _fake_github(monkeypatch, [_pr()])
+    assert r.run_once() == 0
+    out = capsys.readouterr().out
+    assert "llm" not in calls and "⚠ Stephan:" in out and "REVIEW_MODEL_BIG" in out
+    r.run_once()
+    assert "⚠ Stephan:" not in capsys.readouterr().out
+    assert "config:GLM" in json.loads((tmp_path / "state.json").read_text())["gemeldet"]
+
+
+def test_big_diff_names_the_model_actually_called(monkeypatch, tmp_path):
+    # Über BIG_DIFF_CHARS zieht der Takt REVIEW_MODEL_BIG; die Reviewer-Zeile nennt ihn, nicht REVIEWER_NAME.
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "glm-4.6-longctx")
+    calls = _fake_github(monkeypatch, [_pr()], diff="x" * (r.BIG_DIFF_CHARS + 1))
+    r.run_once()
+    assert calls["model"] == "glm-4.6-longctx"
+    text = next((tmp_path / "reviews").glob("pr7-*.md")).read_text(encoding="utf-8")
+    assert "Reviewer: glm-4.6-longctx" in text and "Reviewer: GLM" not in text
 
 
 def test_unusable_answer_is_retried_once_then_dropped(monkeypatch, capsys):

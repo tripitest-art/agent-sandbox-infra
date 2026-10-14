@@ -10,7 +10,10 @@ PR- und Diff-Texte sind fremder Input, ein Modell mit GitHub-Zugriff ließe sich
 Nur dieses Skript schreibt etwas (festes Format, ein Kommentar-Review, nie Approve oder Merge).
 
 Prüfbar vom Skript, nicht vom Modell: Teststatus (nur aus den Check-Runs), Modellzeile
-(Worker aus dem PR-Text, Reviewer aus REVIEWER_NAME) und die Regel „andere Modellfamilie“.
+(Worker aus dem PR-Text, Reviewer aus dem Alias, der für diesen Diff wirklich aufgerufen wird)
+und die Regel „andere Modellfamilie“. Lässt sich die Familie des Workers nicht bestimmen (z. B.
+„Worker: siehe Log“) oder passen REVIEW_MODEL, REVIEW_MODEL_BIG und REVIEWER_NAME nicht in eine
+bekannte Familie, gibt es keinen Modellaufruf, sondern eine Zeile „⚠ Stephan:“.
 Rote Pflicht-Checks (tests, acceptance-guard, CodeQL) ergeben ohne Modellaufruf „Änderungen nötig“.
 
 Vorgabe (REVIEW_POST=0): nur Entwurf. Er landet in /root/reviews/pr<N>-<sha>.md, eine Zeile im
@@ -39,8 +42,9 @@ import time
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py liegt daneben
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py und worker_tick.py liegen daneben
 import projects  # noqa: E402
+import worker_tick  # noqa: E402   # nur lesen: WORKER_NAMES für die Familienprüfung
 
 PROJECTS = projects.load_projects()   # ohne /etc/agent-projects.json: sc-digger allein
 # Aktives Projekt dieses Laufs; use_project() schaltet um. Zustand und Entwürfe des ersten Projekts
@@ -55,7 +59,12 @@ STEPHAN_LABEL = "braucht-stephan"   # PR braucht eine Entscheidung von Stephan
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 REVIEW_KEY = os.environ.get("LITELLM_REVIEW_KEY", "")
 REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "coder-glm")
-REVIEW_MODEL_BIG = os.environ.get("REVIEW_MODEL_BIG", "longctx-lite")   # für große Diffs
+# Ohne eigene Angabe dasselbe Modell wie für kleine Diffs. Eine Vorgabe, deren Familie nicht belegt
+# ist (früher „longctx-lite“), macht die Reviewer-Konfiguration für sich allein schon unbrauchbar:
+# reviewer_config_problem() würde in jeder Umgebung ohne REVIEW_MODEL_BIG jeden Review sperren.
+# Das systemd-Unit setzt die Einstellung ausdrücklich (install.sh schreibt dort seine eigene Vorgabe
+# „longctx-lite“ hinein); für den Serverbetrieb ist diese Zeile deshalb ohne Wirkung.
+REVIEW_MODEL_BIG = os.environ.get("REVIEW_MODEL_BIG") or REVIEW_MODEL   # für große Diffs
 REVIEWER_NAME = os.environ.get("REVIEWER_NAME", "GLM")                 # Zeile „Reviewer: …“
 POST = os.environ.get("REVIEW_POST", "0") == "1"
 AUTO_MERGE = os.environ.get("REVIEW_AUTO_MERGE", "1") == "1"
@@ -73,7 +82,8 @@ REQUIRED_CHECKS = ("tests", "acceptance-guard", "CodeQL")
 # Modellfamilien: Worker und Reviewer dürfen nie aus derselben stammen (AGENTS.md). Die Reihenfolge
 # zählt: „Qwen3-Coder“ und „coder-glm“ enthalten „coder“, gehören aber nicht zu DeepSeek. Die
 # Worker-Zeile nennt bei unbekannten Aliasen nur „coder-fast (LiteLLM)“; coder, coder-fast, coder-pro
-# und coder-or sind die DeepSeek-Aliase in LiteLLM.
+# und coder-or sind die DeepSeek-Aliase in LiteLLM. Lässt sich eine Familie nicht bestimmen, blockieren
+# independence_problem()/reviewer_config_problem() den Review, statt die Regel still zu überspringen.
 FAMILIES = (("glm", r"glm|zhipu|z\.ai"), ("mistral", r"mistral|codestral|coder-free"),
             ("qwen", r"qwen"), ("gemini", r"gemini|gemma"), ("claude", r"claude|anthropic|opus|sonnet"),
             ("deepseek", r"deepseek|\bcoder(?:-fast|-pro|-or)?\b"))
@@ -149,6 +159,64 @@ def model_family(name: str) -> str | None:
     for family, pattern in FAMILIES:
         if re.search(pattern, low):
             return family
+    return None
+
+
+def worker_family(name: str | None) -> str | None:
+    """Familie eines Worker-Anzeigenamens aus `worker_tick.WORKER_NAMES`
+    (z. B. "DeepSeek (LiteLLM coder-fast)" -> "deepseek", "Codestral (LiteLLM coder-free)" -> "mistral").
+    None, wenn `name` leer/None ist oder keine Familie aus FAMILIES passt. Kein Fehler, kein Netz."""
+    if not name:
+        return None
+    # Namen aus der Tabelle zuerst über den Alias auflösen; sonst direkt gegen FAMILIES prüfen
+    # (trifft die Namen der anderen Backends, etwa „Qwen3-Coder 30B“ bei BACKEND=ollama).
+    for alias, display in worker_tick.WORKER_NAMES.items():
+        if display == name:
+            return model_family(alias)
+    return model_family(name)
+
+
+def independence_problem(worker: str | None, model: str) -> str | None:
+    """Grund, warum kein Review stattfinden darf, sonst None.
+    Blockiert, wenn die Familie des Workers ODER die des tatsächlich aufgerufenen Reviewers
+    unbekannt ist (dann ist die Regel nicht prüfbar) oder wenn beide Familien gleich sind.
+    Der Text nennt Worker, Modell und beide Familien, enthält keine Zeilenumbrüche (der Worker
+    kommt aus `worker_from_body`, das nur bis zum Zeilenende liest) und ist logfähig."""
+    wf, rf = worker_family(worker), model_family(model)
+    if wf is None or rf is None:
+        return (f"Modellfamilie nicht prüfbar (Worker {wf or 'unbekannt'}: {worker!r}, "
+                f"Reviewer {rf or 'unbekannt'}: {model!r}), kein Review.")
+    if wf == rf:
+        return (f"Worker ({worker}) und Reviewer ({model}) gleiche Modellfamilie ({wf}), kein Review; "
+                "bitte einen anderen Reviewer starten.")
+    return None
+
+
+def reviewer_model(diff: str) -> str:
+    """Der Alias, der für diesen Diff wirklich aufgerufen wird: REVIEW_MODEL_BIG ab
+    BIG_DIFF_CHARS Zeichen, sonst REVIEW_MODEL. Genau dieser Alias zählt für die Familienprüfung
+    und für die Reviewer-Zeile (bisher stand dort immer REVIEWER_NAME)."""
+    return REVIEW_MODEL_BIG if len(diff) > BIG_DIFF_CHARS else REVIEW_MODEL
+
+
+def reviewer_config_problem() -> str | None:
+    """Grund, warum die Reviewer-Konfiguration unbrauchbar ist, sonst None.
+    Verlangt, dass model_family(REVIEW_MODEL), model_family(REVIEW_MODEL_BIG) und
+    model_family(REVIEWER_NAME) bekannt sind und alle dieselbe Familie ergeben. Der Text nennt
+    die abweichende Einstellung. Reine Funktion, kein Netz, keine Seiteneffekte."""
+    settings = (("REVIEW_MODEL", REVIEW_MODEL), ("REVIEW_MODEL_BIG", REVIEW_MODEL_BIG),
+                ("REVIEWER_NAME", REVIEWER_NAME))
+    families = {name: model_family(alias) for name, alias in settings}
+    unknown = [name for name, family in families.items() if family is None]
+    if unknown:
+        return (f"Reviewer-Konfiguration unbrauchbar: {', '.join(unknown)} ist keiner bekannten "
+                "Modellfamilie zuzuordnen; kein Review.")
+    values = list(families.values())
+    if len(set(values)) > 1:
+        common = max(set(values), key=values.count)
+        off = [name for name, family in families.items() if family != common]
+        return (f"Reviewer-Konfiguration unbrauchbar: {', '.join(off)} gehört nicht zur Familie "
+                f"{common} der übrigen Reviewer-Einstellungen; kein Review.")
     return None
 
 
@@ -239,19 +307,20 @@ def parse_review(text: str) -> tuple[str | None, int, int, str | None]:
     return verdict, muss, kann, None
 
 
-def assemble(model_text: str, worker: str, checks: list[tuple[str, str]]) -> str:
-    """Urteil bleibt vom Modell; Modellzeile und Checkzeile setzt das Skript selbst (nie raten)."""
+def assemble(model_text: str, worker: str, checks: list[tuple[str, str]], reviewer: str) -> str:
+    """Urteil bleibt vom Modell; Modellzeile und Checkzeile setzt das Skript selbst (nie raten).
+    `reviewer` ist der Alias, der für diesen Diff wirklich aufgerufen wurde (siehe reviewer_model)."""
     lines = model_text.strip().splitlines()
     first = next(i for i, l in enumerate(lines) if l.strip())
     rest = [l for l in lines[first + 1:] if not l.startswith("Review nach AGENTS.md") and not l.lstrip("- ").startswith("Checks:")]
-    head = [lines[first].strip(), "", f"Review nach AGENTS.md → Reviewer. Worker: {worker}, Reviewer: {REVIEWER_NAME} (andere Modellfamilie).", "",
+    head = [lines[first].strip(), "", f"Review nach AGENTS.md → Reviewer. Worker: {worker}, Reviewer: {reviewer} (andere Modellfamilie).", "",
             "- Checks (laut Check-Runs): " + ", ".join(f"{n} {'✅' if r == 'SUCCESS' else r}" for n, r in checks)]
     return "\n".join(head + rest).strip() + "\n"
 
 
-def red_check_review(red: list[str], worker: str, checks: list[tuple[str, str]]) -> str:
+def red_check_review(red: list[str], worker: str, checks: list[tuple[str, str]], reviewer: str) -> str:
     items = "\n".join(f"{i}. Check `{n}` ist nicht grün. Ursache im Log des Checks lesen und beheben." for i, n in enumerate(red, 1))
-    return assemble(f"{VERDICTS[1]}\n\n### Muss\n{items}\n\n### Kann\n- keine\n", worker, checks)
+    return assemble(f"{VERDICTS[1]}\n\n### Muss\n{items}\n\n### Kann\n- keine\n", worker, checks, reviewer)
 
 
 def build_messages(issue: dict, pr: dict, files: list[dict], diff: str, checks: list[tuple[str, str]], rules: str) -> list[dict]:
@@ -498,6 +567,17 @@ def _run_pr_review() -> int:
     if not pr:
         return 0
     n, key = pr["number"], f"pr{pr['number']}@{pr['headRefOid']}"
+    # Vor jedem Modellaufruf: Eine unbrauchbare Reviewer-Konfiguration (unbekannte oder gemischte
+    # Familien) blockiert den Review. Sonst würde die Unabhängigkeitsregel still ausfallen.
+    problem = reviewer_config_problem()
+    if problem:
+        gemeldet = state.setdefault("gemeldet", [])
+        config_key = f"config:{REVIEWER_NAME}"
+        if config_key not in gemeldet:
+            log(f"⚠ Stephan: {problem}")
+            gemeldet.append(config_key)
+            save_state(state)
+        return 0
     done, checks, red = checks_summary(pr.get("statusCheckRollup") or [])
     if not done or not checks:
         log(f"PR #{n}: Checks laufen noch, warte.")
@@ -506,15 +586,7 @@ def _run_pr_review() -> int:
     if not worker:
         log(f"PR #{n}: Zeile „Worker: …“ fehlt im PR-Text, kein Review (Worker-Takt trägt sie nach).")
         return 0
-    wf, rf = model_family(worker), model_family(REVIEWER_NAME)
-    if wf and wf == rf:
-        log(f"PR #{n}: Worker ({worker}) und Reviewer ({REVIEWER_NAME}) gleiche Modellfamilie, kein Review.")
-        state.setdefault("erledigt", []).append(key); save_state(state)
-        to_stephan(n, key, f"Worker ({worker}) und Reviewer ({REVIEWER_NAME}) aus derselben Modellfamilie; "
-                   "bitte einen anderen Reviewer starten.", state)
-        return 0
 
-    meta = f"PR #{n} {pr['headRefOid'][:7]} Reviewer {REVIEWER_NAME}"
     issue: dict | None = None
     draft = pending_draft(pr) if POST else None
     if draft:   # schon geprüft (REVIEW_POST=0), jetzt nur noch posten; die Runde ist bereits gezählt
@@ -529,8 +601,9 @@ def _run_pr_review() -> int:
             to_stephan(n, key, f"nach {MAX_ROUNDS} Runden „Änderungen nötig“ noch nicht fertig.", state)
             return 0
         if red:
-            text = red_check_review(red, worker, checks)
-            meta += " (ohne Modell: rote Checks)"
+            # Ohne Modellaufruf; REVIEWER_NAME steht hier nur in der Zeile, geprüft wird nichts.
+            text = red_check_review(red, worker, checks, REVIEWER_NAME)
+            meta = f"PR #{n} {pr['headRefOid'][:7]} Reviewer {REVIEWER_NAME} (ohne Modell: rote Checks)"
         else:
             try:
                 agents = repo_file("AGENTS.md")
@@ -546,10 +619,19 @@ def _run_pr_review() -> int:
                 state.setdefault("erledigt", []).append(key); save_state(state)
                 to_stephan(n, key, f"Diff zu groß für den Review-Takt ({len(diff)} Zeichen), bitte von Hand prüfen.", state)
                 return 0
+            model = reviewer_model(diff)
+            # Der Reviewer, der wirklich aufgerufen wird, muss in einer anderen Familie als der Worker
+            # liegen. Unbekannte Familien sperren den Review, statt die Regel still zu überspringen.
+            problem = independence_problem(worker, model)
+            if problem:
+                log(f"PR #{n}: {problem}")
+                state.setdefault("erledigt", []).append(key); save_state(state)
+                to_stephan(n, key, problem, state)
+                return 0
+            meta = f"PR #{n} {pr['headRefOid'][:7]} Reviewer {model}"
             rules = "\n\n".join(filter(None, (
                 extract_section(agents, "### Reviewer"), extract_section(agents, "## Goldene Regeln"),
                 extract_section(skill, "## Schritt 5", until=("## Schritt 7",)))))
-            model = REVIEW_MODEL_BIG if len(diff) > BIG_DIFF_CHARS else REVIEW_MODEL
             try:
                 raw, usage = call_llm(model, build_messages(issue, pr, files, diff, checks, rules))
             except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
@@ -570,7 +652,7 @@ def _run_pr_review() -> int:
                 if tries >= 2:
                     to_stephan(n, key, f"Review-Modell {model} lieferte zweimal keine brauchbare Antwort; bitte von Hand prüfen.", state)
                 return 0
-            text = assemble(raw, worker, checks)
+            text = assemble(raw, worker, checks, model)
             meta += f" Modell {model} Token {usage.get('prompt_tokens')}/{usage.get('completion_tokens')}"
 
     verdict, muss, kann, problem = parse_review(text)
