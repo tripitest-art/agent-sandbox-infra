@@ -36,6 +36,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py liegt daneben
 import projects  # noqa: E402
@@ -215,7 +216,7 @@ def pr_snapshot(pr: dict) -> tuple:
     return pr["headRefOid"], pr.get("title", ""), (pr.get("body") or "").replace("\r\n", "\n")
 
 
-def rework_job(done=frozenset()):
+def rework_job(done=frozenset(), skip: Callable[[str], bool] | None = None):
     """(Schlüssel, Auftrag, PR-Nummer, pr_snapshot) für die älteste fällige Nacharbeit oder None.
 
     `done`: Schlüssel schon angekommener Nacharbeiten. Betraf sie nur den PR-Text, bleibt der
@@ -241,6 +242,8 @@ def rework_job(done=frozenset()):
         key = f"pr{pr['number']}@{review['submittedAt']}"
         if key in done:
             continue
+        if skip and skip(key):
+            continue   # geparkt: der nächste Kandidat kommt dran, der Takt läuft weiter
         if review_is_current(review, pr) and "Änderungen nötig" in review["body"][:80]:
             n = pr["number"]
             task = f"""Du arbeitest ein Review ab (AGENTS.md, Worker, Schritt 8). Du bist Worker: {WORKER}.
@@ -269,7 +272,7 @@ Du gibst den PR nie selbst frei und mergst nie; das macht der Reviewer.
     return None
 
 
-def text_fix_job():
+def text_fix_job(skip: Callable[[str], bool] | None = None):
     """(Schlüssel, Auftrag, PR-Nummer, pr_snapshot) für den ältesten PR mit unvollständigem Text.
 
     Der Schlüssel hängt am Head-Commit: Neue Commits geben einen neuen Anlauf, sonst gilt
@@ -289,6 +292,9 @@ def text_fix_job():
         if LABEL not in {lab["name"] for lab in issue["labels"]}:
             continue
         n = pr["number"]
+        key = f"text{n}@{pr['headRefOid'][:7]}"
+        if skip and skip(key):
+            continue   # geparkt: der nächste Kandidat kommt dran, der Takt läuft weiter
         task = f"""Im Text von PR #{n} (Issue #{issue_no}) fehlt: {", ".join(missing)}.
 Du bist Worker: {WORKER}. Du änderst nur den PR-Text, keinen Code, keinen Commit.
 Gehe genau diese Schritte durch und führe jeden als Befehl aus:
@@ -389,8 +395,10 @@ def issue_branch(n: int) -> str:
     return f"feature/issue-{n}"
 
 
-def issue_job():
+def issue_job(skip: Callable[[str], bool] | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
+
+    `skip`: geparkte Kandidaten werden übersprungen — ohne Claim, und der nächste kommt dran.
 
     Der Auftrag nennt jeden Schritt mit Befehl und enthält das Issue wörtlich. Mit „Bearbeite die
     nächste Aufgabe nach AGENTS.md“ übersprang Qwen Label, Branch und Akzeptanz-Commit, arbeitete
@@ -417,6 +425,8 @@ def issue_job():
     for cand in issues:
         cand_no = cand["number"]
         cand_body = cand.get("body", "")
+        if skip and skip(f"issue{cand_no}"):
+            continue   # geparkt: der nächste Kandidat kommt dran, kein claim_issue
         cand_touches_main = touches_main_py(cand)
 
         # Regel 8: Keine zwei Agenten an main.py
@@ -652,8 +662,33 @@ def project_done(state: dict) -> frozenset:
     return frozenset(k for k in keys if "/" not in k)
 
 
+def job_parked(state: dict, key: str) -> bool:
+    """True, wenn der Auftrag `key` im aktiven Projekt MAX_TRIES erreicht hat.
+
+    Der Zustand wird nur um die Meldung ergänzt, nicht um einen Zähler: beim ersten Überspringen
+    genau eine Logzeile, danach keine weitere (log_on_change merkt sich den Vorsatz-Schlüssel).
+
+    Warum das in die Auswahl gehört und nicht in main(): Ein geparkter erster Kandidat ließ
+    main() an derselben Stelle enden, sodass kein anderer Auftrag und kein anderes Projekt mehr
+    dran kam (14.10.: `agent-sandbox-infra/issue14` stand auf 2 und legte die Warteschlange still).
+    """
+    skey = PREFIX + key
+    if state.get(skey, 0) < MAX_TRIES:
+        return False
+    log_on_change(state, f"_park:{skey}", "geparkt",
+                  f"{skey}: schon {MAX_TRIES} Versuche, wartet auf Stephan.")
+    return True
+
+
 def find_job(state: dict):
-    return rework_job(project_done(state)) or text_fix_job() or issue_job()
+    """Erster Auftrag, dessen Schlüssel nicht geparkt ist, oder None.
+
+    Ein liegengebliebener Auftrag darf den Takt und die weiteren Projekte nicht blockieren.
+    """
+    def skip(key: str) -> bool:
+        return job_parked(state, key)
+
+    return rework_job(project_done(state), skip) or text_fix_job(skip) or issue_job(skip)
 
 
 def pick_job(state: dict):
@@ -788,9 +823,6 @@ def main() -> int:
         return 0
     key, task, pr_no, before = job
     skey = PREFIX + key          # im Zustand und im Log mit Projektvorsatz (beim ersten Projekt leer)
-    if state.get(skey, 0) >= MAX_TRIES:
-        log_on_change(state, LAST_WORK, f"{skey} liegt", f"{skey}: schon {MAX_TRIES} Versuche, wartet auf Stephan.")
-        return 0
     if BACKEND != "litellm" and not ollama_free(
             status, say=lambda m: log_on_change(state, LAST_WORK, f"{skey} belegt", m)):
         return 0
@@ -812,8 +844,6 @@ def main() -> int:
                 return 0
             key, task, pr_no, before = job
             skey = PREFIX + key
-            if state.get(skey, 0) >= MAX_TRIES:
-                return 0
     state[LAST_WORK] = skey
 
     state[skey] = state.get(skey, 0) + 1

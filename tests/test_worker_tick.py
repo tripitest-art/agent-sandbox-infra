@@ -283,6 +283,53 @@ def test_main_stops_after_max_tries(monkeypatch, tmp_path, capsys):
     assert "wartet auf Stephan" in capsys.readouterr().out
 
 
+def test_job_parked_gilt_je_projektvorsatz(monkeypatch, tmp_path):
+    """Geparkt ist der Schlüssel des aktiven Projekts — derselbe Name in einem anderen Projekt nicht."""
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "PREFIX", "a/")
+    assert w.job_parked({"a/issue7": w.MAX_TRIES}, "issue7") is True
+    assert w.job_parked({"issue7": w.MAX_TRIES}, "issue7") is False
+
+
+def test_job_parked_meldet_nur_einmal(monkeypatch, tmp_path, capsys):
+    """Regel 7: sichtbar melden, aber nicht alle fünf Minuten dieselbe Zeile."""
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    state = {"issue7": w.MAX_TRIES}
+    assert w.job_parked(state, "issue7") is True
+    first = capsys.readouterr().out
+    assert "issue7" in first and "wartet auf Stephan" in first
+    assert w.job_parked(state, "issue7") is True
+    assert capsys.readouterr().out == ""
+
+
+def test_geparkter_text_fix_blockiert_das_issue_nicht(monkeypatch, tmp_path):
+    """Ein geparkter Text-Fix-Auftrag darf den nächsten Kandidaten nicht blockieren (Issue #39)."""
+    bad_pr = {"number": 41, "headRefName": "feature/issue-24", "headRefOid": "abcdef1234",
+              "isCrossRepository": False, "title": "T", "body": "## Was und warum\n\nCloses #24\n",
+              "reviews": [], "commits": [{"committedDate": "2026-10-02T10:00:00Z"}]}
+    issue = {"number": 30, "title": "Issue 30", "body": "### Ziel\n\nEtwas.",
+             "author": {"login": "tripitest-art"}}
+
+    def gh(*args):
+        if args[:2] == ("pr", "list"):
+            return [bad_pr]
+        if args[:2] == ("issue", "view"):
+            return {"labels": [{"name": w.LABEL}]}
+        if args[:2] == ("issue", "list"):
+            return [] if "in-arbeit" in args else [issue]
+        if args[:2] == ("issue", "edit"):
+            return None
+        raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
+
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "gh", gh)
+
+    assert w.find_job({"text41@abcdef1": w.MAX_TRIES})[0] == "issue30"
+    assert w.find_job({})[0] == "text41@abcdef1"
+
+
 def test_main_without_work_does_not_touch_ollama(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
     monkeypatch.setattr(w, "gh", FakeGH())
