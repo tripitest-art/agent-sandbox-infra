@@ -10,16 +10,14 @@ Closes #
 - [ ] `python -m pytest -q` grün
 - [ ] Akzeptanztests aus dem Issue zeichengenau in `tests/acceptance/test_issue_<N>.py` (falls vorhanden)
 - [ ] Neue Logik / behobener Fehler hat einen eigenen Test
-- [ ] Bei Änderungen am Lauf: `--dry-run --no-telegram -v` einmal ausgeführt
 
 ## Checkliste (AGENTS.md)
 
 - [ ] Ein Thema, nur die im Issue genannten Dateien
 - [ ] Keine Akzeptanztests geändert, keine neuen `skip`/`xfail`, nichts unter `.github/` (sonst begründen, Stephan entscheidet)
-- [ ] Sammlung (`/music/Schranz`) wird nicht verändert
-- [ ] Keine Zugangsdaten in Code, Logs oder Fehlermeldungen (Telegram nur über `telegram_call`)
-- [ ] `config.yaml`: neue Optionen haben einen Standardwert und einen Kommentar
+- [ ] Keine Zugangsdaten in Code, Logs oder Fehlermeldungen (das Repo ist öffentlich)
 - [ ] Doku angepasst (README / AGENTS.md / ROADMAP), falls sich Verhalten oder Betrieb ändert
+- [ ] Neue Datei unter `sandbox/`, die ein Takt-Skript importiert: in `install.sh` mitkopiert
 
 ## Offene Punkte / Abweichungen vom Issue
 

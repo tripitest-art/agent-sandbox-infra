@@ -1,0 +1,93 @@
+name: Aufgabe für einen Agenten
+description: Klar abgegrenzte Aufgabe, die ein Worker-Agent in einem Pull Request umsetzen kann
+labels: ["worker-task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ein Issue ist der Vertrag mit dem Worker. Je genauer Schnittstellen und
+        Akzeptanztests, desto weniger rät der Worker. Ablauf: `AGENTS.md`, Abschnitt
+        „Worker-Aufgaben“.
+
+  - type: textarea
+    id: ziel
+    attributes:
+      label: Ziel
+      description: Was soll danach anders sein? Ein, zwei Sätze.
+    validations:
+      required: true
+
+  - type: textarea
+    id: dateien
+    attributes:
+      label: Betroffene Dateien
+      description: Nur diese Dateien dürfen geändert werden (plus die Testdateien).
+      placeholder: |
+        - sandbox/review_tick.py (pick_pr)
+        - tests/test_review_tick.py
+    validations:
+      required: true
+
+  - type: textarea
+    id: schnittstellen
+    attributes:
+      label: Schnittstellen
+      description: Neue oder geänderte Funktionen mit exakter Signatur, Rückgabewert und Verhalten im Fehlerfall.
+      render: python
+      placeholder: |
+        def project_done(state: dict) -> frozenset:
+            """Erledigte Nacharbeiten des aktiven Projekts; leer, wenn der Zustand fehlt."""
+    validations:
+      required: true
+
+  - type: textarea
+    id: nicht-anfassen
+    attributes:
+      label: Nicht Teil dieser Aufgabe
+      description: Was ausdrücklich nicht geändert oder „gleich mit aufgeräumt“ wird.
+      placeholder: |
+        - keine Änderung an install.sh oder den systemd-Units
+        - kein Umbenennen bestehender Funktionen
+    validations:
+      required: true
+
+  - type: textarea
+    id: akzeptanztests
+    attributes:
+      label: Akzeptanztests
+      description: |
+        pytest-Code, den der Worker 1:1 als `tests/acceptance/test_issue_<Nummer>.py`
+        übernimmt. Der CI-Check `acceptance-guard` vergleicht die Datei mit diesem Block.
+        Netzwerk nur über Fakes. Leer lassen, wenn es keine festen Akzeptanztests gibt.
+      render: python
+    validations:
+      required: false
+
+  - type: textarea
+    id: fertig
+    attributes:
+      label: Fertig, wenn
+      value: |
+        - [ ] Akzeptanztests grün
+        - [ ] Weitere Tests decken das neue Verhalten ab (Netzwerk nur über Fakes)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: merge-modus
+    attributes:
+      label: Merge-Modus
+      description: Automatisch = Reviewer-Agent merged bei grünem CI. Manuell = Reviewer gibt frei, Stephan merged.
+      options:
+        - automatisch nach Review
+        - manuell durch Stephan (Betrieb, Server, Zugangsdaten)
+    validations:
+      required: true
+
+  - type: textarea
+    id: kontext
+    attributes:
+      label: Kontext
+      description: ROADMAP-Abschnitt, Logs, Beispiele, Abhängigkeiten. Keine Zugangsdaten.
+    validations:
+      required: false
