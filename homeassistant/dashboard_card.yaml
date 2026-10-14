@@ -41,6 +41,42 @@ cards:
       {{ state_attr('sensor.qwen_worker_log', 'log') }}
       ```
 
+  # Slot-Telemetrie: je Worker-Slot eine Karte (Status, Auftrag, Modell) aus
+  # sensor.qwen_worker_slot_1/2, gespeist per Webhook (sandbox/qwen_webhook.py).
+  - type: horizontal-stack
+    cards:
+      - type: custom:mushroom-template-card
+        entity: sensor.qwen_worker_slot_1
+        primary: "Slot 1 · {{ states('sensor.qwen_worker_slot_1') }}"
+        secondary: >-
+          {% set title = state_attr('sensor.qwen_worker_slot_1', 'title') %}
+          {% set message = state_attr('sensor.qwen_worker_slot_1', 'message') %}
+          {{ title or message or 'Kein Auftrag' }}
+        icon: >-
+          {% set s = states('sensor.qwen_worker_slot_1') %}
+          {% if s == 'running' %}mdi:robot{% elif s == 'idle' %}mdi:sleep{% else %}mdi:help-circle{% endif %}
+        icon_color: >-
+          {% set s = states('sensor.qwen_worker_slot_1') %}
+          {% if s == 'running' %}blue{% elif s == 'idle' %}grey{% else %}red{% endif %}
+        tap_action:
+          action: more-info
+
+      - type: custom:mushroom-template-card
+        entity: sensor.qwen_worker_slot_2
+        primary: "Slot 2 · {{ states('sensor.qwen_worker_slot_2') }}"
+        secondary: >-
+          {% set title = state_attr('sensor.qwen_worker_slot_2', 'title') %}
+          {% set message = state_attr('sensor.qwen_worker_slot_2', 'message') %}
+          {{ title or message or 'Kein Auftrag' }}
+        icon: >-
+          {% set s = states('sensor.qwen_worker_slot_2') %}
+          {% if s == 'running' %}mdi:robot{% elif s == 'idle' %}mdi:sleep{% else %}mdi:help-circle{% endif %}
+        icon_color: >-
+          {% set s = states('sensor.qwen_worker_slot_2') %}
+          {% if s == 'running' %}blue{% elif s == 'idle' %}grey{% else %}red{% endif %}
+        tap_action:
+          action: more-info
+
   # Steuerungs-Buttons
   - type: horizontal-stack
     cards:

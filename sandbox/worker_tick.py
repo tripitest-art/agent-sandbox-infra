@@ -55,6 +55,9 @@ WORKER_SLOT = os.environ.get("WORKER_SLOT", "")
 WORKDIR = os.environ.get("WORKDIR", f"{projects.worktrees_dir(PROJECTS[0])}/w{WORKER_SLOT}" if WORKER_SLOT else BASE_WORKDIR)
 STATE = os.environ.get("STATE", f"/root/worker-state-w{WORKER_SLOT}.json" if WORKER_SLOT else "/root/worker-state.json")
 SLOT_TAG = f"w{WORKER_SLOT}" if WORKER_SLOT else ""
+# Verzeichnis der Slot-Telemetrie (/run/worker-slots/slot-<n>.json). Legt der Takt selbst an;
+# install.sh und die systemd-Units bleiben unangetastet (#14). qwen_webhook.py liest es.
+SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
 OLLAMA = os.environ.get("OLLAMA", "http://192.168.0.210:11434")
 MODEL = os.environ.get("MODEL", "qwen3-coder-64k")
 LABEL = "agent-qwen"
@@ -119,6 +122,50 @@ ENV = dict(os.environ, PATH=f"/root/venv/bin:/root/.opencode/bin:{os.environ.get
 def log(msg: str) -> None:
     prefix = f" [{SLOT_TAG}]" if SLOT_TAG else ""
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}{prefix} {msg}", flush=True)
+
+
+def normalize_slot(slot: str | None) -> str:
+    """Slot-Name auf seine Ziffernfolge bringen; Vorgabe ist WORKER_SLOT oder „1“."""
+    m = re.search(r"\d+", str(slot if slot is not None else WORKER_SLOT))
+    return m.group(0) if m else "1"
+
+
+def write_slot_status(status: str, *, slot: str | None = None, message: str | None = None,
+                      issue: int | None = None, pr: int | None = None, title: str | None = None,
+                      branch: str | None = None, model: str | None = None, agent: str | None = None,
+                      started_at: str | None = None, pid: int | None = None,
+                      project: str | None = None, slot_dir: str = SLOT_DIR) -> None:
+    """Slot-Status atomar nach <slot_dir>/slot-<slot>.json schreiben (.tmp + os.replace).
+
+    Die Datei ist die Quelle für Home Assistant (qwen_webhook.read_slots). Das Verzeichnis legt
+    der Takt selbst an (#14), damit install.sh und die Units unverändert bleiben.
+    """
+    slot = normalize_slot(slot)
+    data: dict[str, object] = {"slot": slot, "status": status,
+                               "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    for key, value in (("message", message), ("issue", issue), ("pr", pr), ("title", title),
+                       ("branch", branch), ("model", model), ("agent", agent),
+                       ("started_at", started_at), ("pid", pid), ("project", project)):
+        if value is not None:
+            data[key] = value
+    os.makedirs(slot_dir, exist_ok=True)
+    path = os.path.join(slot_dir, f"slot-{slot}.json")
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def slot_status(status: str, **info) -> None:
+    """Slot-Status schreiben, ohne den Takt anhalten zu können (Regel 7: nie still scheitern).
+
+    Ein misslungenes Schreiben wird als Warnzeile sichtbar, bricht den Lauf aber nicht ab:
+    Die Telemetrie ist Beiwerk, der Auftrag nicht. slot_dir aus dem Modul, damit Tests es belegen.
+    """
+    try:
+        write_slot_status(status, slot_dir=SLOT_DIR, **info)
+    except OSError as e:
+        log(f"Warnung: Slot-Status nicht schreibbar ({type(e).__name__}: {e}).")
 
 
 def use_project(p: "projects.Project", first: bool) -> None:
@@ -680,6 +727,19 @@ def job_parked(state: dict, key: str) -> bool:
     return True
 
 
+def parked_job(state: dict) -> str | None:
+    """Schlüssel des geparkten Auftrags, den job_parked zuletzt gemeldet hat, sonst None.
+
+    job_parked legt beim Überspringen `_park:<skey>` im Zustand ab. main() nutzt diesen Hinweis,
+    damit die Slot-Telemetrie im Stillstand den genauen Grund nennt („wartet auf Stephan“) statt
+    nur „Warte auf nächsten Takt“ (#14). Die Auswahl selbst bleibt unberührt.
+    """
+    for key in state:
+        if key.startswith("_park:"):
+            return key[len("_park:"):]
+    return None
+
+
 def find_job(state: dict):
     """Erster Auftrag, dessen Schlüssel nicht geparkt ist, oder None.
 
@@ -825,6 +885,9 @@ def main() -> int:
     job = pick_job(state)
     if not job:
         log_on_change(state, LAST_WORK, "keine", "Keine Arbeit.")
+        parked = parked_job(state)
+        slot_status("idle", project=PROJECT,
+                    message=f"{parked}: wartet auf Stephan" if parked else "Warte auf nächsten Takt")
         return 0
     key, task, pr_no, before = job
     skey = PREFIX + key          # im Zustand und im Log mit Projektvorsatz (beim ersten Projekt leer)
@@ -867,11 +930,23 @@ def main() -> int:
     if BACKEND == "litellm":
         name += f" mit {ACTIVE_MODEL}"
     log(f"{skey} (Versuch {state[skey]}): starte {name}.")
+    # Slot-Telemetrie (#14): running vor dem Lauf, idle danach. Der Lebenszyklus ist so in HA
+    # sichtbar; write_slot_status bricht den Takt nie ab (slot_status fängt OSError).
+    info: dict[str, object] = {"model": ACTIVE_MODEL, "agent": AGENT, "project": PROJECT,
+                               "started_at": time.strftime("%H:%M:%S"), "pid": os.getpid()}
+    issue_match = re.match(r"issue(\d+)", key)
+    if issue_match:
+        info["issue"] = int(issue_match.group(1))
+        info["branch"] = issue_branch(int(issue_match.group(1)))
+    if pr_no is not None:
+        info["pr"] = pr_no
+    slot_status("running", **info)
     rc = run_agent(prompt)
     if rc == 124:
         log(f"{skey}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
     else:
         log(f"{skey}: {name} beendet (Exit {rc}).")
+    slot_status("idle", message="Takt beendet", project=PROJECT)
     # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
     if key.startswith("issue"):
         check_issue_result(key)

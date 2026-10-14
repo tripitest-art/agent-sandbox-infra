@@ -26,6 +26,8 @@ def _repo_workdir(monkeypatch, tmp_path):
     # Die PR-Vorlage liest der Taktgeber aus WORKDIR; in Tests ist das dieses Repo.
     monkeypatch.setattr(w, "WORKDIR", str(REPO_ROOT))
     monkeypatch.setattr(w, "STATE", str(tmp_path / "state-default.json"))
+    # Slot-Telemetrie nie ins echte /run/worker-slots schreiben (#14).
+    monkeypatch.setattr(w, "SLOT_DIR", str(tmp_path / "slots"))
     # use_model() ändert diese Globalen; nach jedem Test zurück auf die Vorgabe.
     monkeypatch.setattr(w, "WORKER", w.WORKER)
     monkeypatch.setattr(w, "ACTIVE_MODEL", w.LITELLM_MODEL)
@@ -913,6 +915,94 @@ def test_slot_logging(capsys, monkeypatch):
     w.log("Testmeldung")
     out = capsys.readouterr().out
     assert "[w2] Testmeldung" in out
+
+
+# --- Slot-Telemetrie für Home Assistant (#14) ---
+
+def test_normalize_slot_digits_and_default(monkeypatch):
+    monkeypatch.setattr(w, "WORKER_SLOT", "")
+    assert w.normalize_slot(None) == "1"        # Vorgabe ohne Slot-Umgebung
+    monkeypatch.setattr(w, "WORKER_SLOT", "w2")
+    assert w.normalize_slot(None) == "2"        # Vorgabe aus WORKER_SLOT
+    assert w.normalize_slot("slot-7") == "7"
+    assert w.normalize_slot("w1") == "1"
+    assert w.normalize_slot("quatsch") == "1"   # ohne Ziffer -> Vorgabe
+
+
+def test_write_slot_status_is_atomic_and_complete(tmp_path):
+    w.write_slot_status("running", slot="w2", issue=14, title="Slot-Telemetrie",
+                        branch="feature/issue-14", model="coder", agent="qwen-code",
+                        started_at="17:20:00", pid=12345, project="sc-digger", slot_dir=str(tmp_path))
+    data = json.loads((tmp_path / "slot-2.json").read_text(encoding="utf-8"))
+    assert data["slot"] == "2" and data["status"] == "running"
+    assert data["issue"] == 14 and data["branch"] == "feature/issue-14"
+    assert data["pid"] == 12345 and data["project"] == "sc-digger"
+    assert "updated_at" in data
+    assert list(tmp_path.iterdir()) == [tmp_path / "slot-2.json"]   # keine .tmp-Reste
+
+
+def test_write_slot_status_omits_empty_fields(tmp_path):
+    w.write_slot_status("idle", slot="1", message="Warte auf nächsten Takt", slot_dir=str(tmp_path))
+    data = json.loads((tmp_path / "slot-1.json").read_text(encoding="utf-8"))
+    assert data["status"] == "idle" and data["message"] == "Warte auf nächsten Takt"
+    assert "issue" not in data and "pid" not in data and "message" in data
+
+
+def test_slot_status_never_stops_the_tick(monkeypatch, capsys, tmp_path):
+    # Regel 7: Nicht still scheitern. Ein gescheitertes Schreiben wird geloggt, bricht aber ab-frei.
+    monkeypatch.setattr(w, "SLOT_DIR", str(tmp_path / "geschützt"))
+    (tmp_path / "geschützt").write_text("kein Verzeichnis", encoding="utf-8")   # makedirs -> Fehler
+    w.slot_status("idle", message="x")
+    assert "Slot-Status nicht schreibbar" in capsys.readouterr().out
+
+
+def test_main_writes_slot_status_lifecycle(monkeypatch, tmp_path):
+    """Der Takt meldet running vor dem Lauf und idle danach, mit Issue und Branch (#14)."""
+    monkeypatch.setattr(w, "BACKEND", "ollama")   # unabhängig von der Umgebung des Servers
+    monkeypatch.setattr(w, "WAKE_PC", False)
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w.urllib.request, "urlopen", _fake_urlopen([], PC_CHAT))
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
+    slots_dir = str(tmp_path / "slots")
+    monkeypatch.setattr(w, "SLOT_DIR", slots_dir)
+    seen = []
+    monkeypatch.setattr(w, "write_slot_status",
+                        lambda status, **info: seen.append((status, info)))
+    assert w.main() == 0
+    running = [i for s, i in seen if s == "running"]
+    assert running and running[0]["issue"] == 102 and running[0]["branch"] == "feature/issue-102"
+    assert running[0]["agent"] and running[0]["model"] and running[0]["pid"] > 0
+    assert "message" not in running[0]        # running ist kein Wartezustand
+    idle = [i for s, i in seen if s == "idle"]
+    assert idle and idle[-1]["message"] == "Takt beendet"
+
+
+def test_main_writes_idle_when_no_work(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "BACKEND", "ollama")   # unabhängig von der Umgebung des Servers
+    monkeypatch.setattr(w, "WAKE_PC", False)
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "gh", FakeGH())
+    monkeypatch.setattr(w.urllib.request, "urlopen", _fake_urlopen([], PC_CHAT))
+    monkeypatch.setattr(w, "SLOT_DIR", str(tmp_path / "slots"))
+    assert w.main() == 0
+    data = json.loads(Path(w.SLOT_DIR, "slot-1.json").read_text(encoding="utf-8"))
+    assert data["status"] == "idle" and data["message"] == "Warte auf nächsten Takt"
+
+
+def test_main_writes_idle_when_waiting_for_stephan(monkeypatch, tmp_path):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"issue102": w.MAX_TRIES}))
+    monkeypatch.setattr(w, "BACKEND", "ollama")   # unabhängig von der Umgebung des Servers
+    monkeypatch.setattr(w, "WAKE_PC", False)
+    monkeypatch.setattr(w, "STATE", str(state))
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()]))
+    monkeypatch.setattr(w, "ollama_free", lambda *a, **k: pytest.fail("Ollama darf nicht gefragt werden"))
+    monkeypatch.setattr(w, "SLOT_DIR", str(tmp_path / "slots"))
+    assert w.main() == 0
+    data = json.loads(Path(w.SLOT_DIR, "slot-1.json").read_text(encoding="utf-8"))
+    assert data["status"] == "idle" and data["message"] == "issue102: wartet auf Stephan"
 
 
 def test_ollama_single_slot_guard(monkeypatch, tmp_path, capsys):
