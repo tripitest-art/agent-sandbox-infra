@@ -25,6 +25,9 @@ postet REVIEW_POST=1 ihn ohne neuen Modellaufruf.
 
 Mit REVIEW_POST=1 zusätzlich: Freigegebene PRs mit Merge-Modus „automatisch“ werden gemergt; scheitert
 der Merge (z. B. noch nicht mergebar), versucht der nächste Takt es erneut (MERGE_RETRIES).
+Nach dem geposteten Review setzt der Takt auf den geprüften Commit den Status `review`
+(success bei „Freigegeben“, failure bei „Änderungen nötig“), damit Stephan ihn in `main-schutz`
+als Pflicht-Check eintragen kann; ohne Review bleibt der Status aus.
 Was der Takt nicht selbst lösen kann (Merge-Modus manuell, zu viele Runden, unbrauchbare Antworten,
 Diff zu groß, Merge scheitert dauerhaft), bekommt das Label `braucht-stephan` und einen Kommentar;
 im Log steht „⚠ Stephan:“ (HA kann darauf eine Benachrichtigung auslösen).
@@ -425,6 +428,37 @@ def post_review(number: int, text: str) -> None:
         os.unlink(path)
 
 
+def review_status(verdict: str) -> tuple[str, str] | None:
+    """(state, description) für den Commit-Status 'review', None bei jedem anderen Urteil.
+    '**Freigegeben**'      -> ('success', 'Review: Freigegeben')
+    '**Änderungen nötig**' -> ('failure', 'Review: Änderungen nötig')
+    Reine Funktion, kein Netz, keine Seiteneffekte."""
+    if verdict == VERDICTS[0]:
+        return "success", "Review: Freigegeben"
+    if verdict == VERDICTS[1]:
+        return "failure", "Review: Änderungen nötig"
+    return None
+
+
+def post_review_status(sha: str, verdict: str) -> bool:
+    """Setzt den Commit-Status 'review' für `sha`: `gh api repos/<REPO>/statuses/<sha>` mit
+    -f state=…, -f context=review, -f description=…. True, wenn gesetzt; ohne Status-Urteil
+    (review_status -> None) False ohne Aufruf. Ein Fehler bricht den Takt nie ab: Log-Zeile
+    '⚠ Stephan: Status review für <sha[:7]> nicht gesetzt (<ExceptionName>)', Rückgabe False.
+    Die Meldung enthält nie den Fehlertext von gh (Regel 5: keine Zugangsdaten in Logs)."""
+    res = review_status(verdict)
+    if res is None:
+        return False
+    state, description = res
+    try:
+        gh_text("api", f"repos/{REPO}/statuses/{sha}", "-f", f"state={state}",
+                "-f", "context=review", "-f", f"description={description}", repo=False)
+        return True
+    except Exception as exc:   # ein Status darf den Takt nie abbrechen
+        log(f"⚠ Stephan: Status review für {sha[:7]} nicht gesetzt ({type(exc).__name__})")
+        return False
+
+
 def is_auto_merge(issue_body: str | None) -> bool:
     """Prüft, ob das Issue automatischen Merge vorsieht.
     Standard ist False (im Zweifel manuell). True nur bei 'automatisch' ohne 'manuell'."""
@@ -706,6 +740,7 @@ def _run_pr_review() -> int:
         return 0
     if POST:
         post_review(n, text)
+        post_review_status(pr["headRefOid"], verdict)
         state.setdefault("gepostet", []).append(key)
         del state["gepostet"][:-500]
         log(f"PR #{n}: {verdict.strip('*')}, {muss} Muss / {kann} Kann, als Kommentar-Review gepostet ({path}).")
