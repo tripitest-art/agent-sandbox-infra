@@ -1,11 +1,18 @@
 """Tests für sandbox/install-lib.sh (gemerkte Einstellungen, Projekte klonen) ohne Server und Netzwerk."""
 
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
 
 import pytest
+
+if not (shutil.which("bash") and shutil.which("python3")):
+    if os.environ.get("CI"):
+        raise RuntimeError("bash und python3 fehlen, in CI Pflicht (Shell-Tests dürfen nicht entfallen)")
+    pytest.skip("bash oder python3 fehlt auf diesem Rechner (Linux-Server: vorhanden)",
+                allow_module_level=True)
 
 SANDBOX = Path(__file__).resolve().parents[1] / "sandbox"
 
