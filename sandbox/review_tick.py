@@ -85,7 +85,7 @@ REQUIRED_CHECKS = ("tests", "acceptance-guard", "CodeQL")
 # und coder-or sind die DeepSeek-Aliase in LiteLLM. Lässt sich eine Familie nicht bestimmen, blockieren
 # independence_problem()/reviewer_config_problem() den Review, statt die Regel still zu überspringen.
 FAMILIES = (("glm", r"glm|zhipu|z\.ai"), ("mistral", r"mistral|codestral|coder-free"),
-            ("qwen", r"qwen"), ("gemini", r"gemini|gemma"), ("claude", r"claude|anthropic|opus|sonnet"),
+            ("qwen", r"qwen"), ("gemini", r"gemini|gemma|longctx"), ("claude", r"claude|anthropic|opus|sonnet"),
             ("deepseek", r"deepseek|\bcoder(?:-fast|-pro|-or)?\b"))
 
 VERDICTS = ("**Freigegeben**", "**Änderungen nötig**")
@@ -202,8 +202,11 @@ def reviewer_model(diff: str) -> str:
 def reviewer_config_problem() -> str | None:
     """Grund, warum die Reviewer-Konfiguration unbrauchbar ist, sonst None.
     Verlangt, dass model_family(REVIEW_MODEL), model_family(REVIEW_MODEL_BIG) und
-    model_family(REVIEWER_NAME) bekannt sind und alle dieselbe Familie ergeben. Der Text nennt
-    die abweichende Einstellung. Reine Funktion, kein Netz, keine Seiteneffekte."""
+    model_family(REVIEWER_NAME) bekannt sind und REVIEWER_NAME zur Familie von REVIEW_MODEL passt.
+    REVIEW_MODEL_BIG darf in einer anderen bekannten Familie liegen (etwa Gemini für große Diffs):
+    Die Unabhängigkeit zum Worker prüft independence_problem() für den Alias, der wirklich
+    aufgerufen wird, und die Reviewer-Zeile nennt genau diesen Alias. Der Text nennt die
+    abweichende Einstellung. Reine Funktion, kein Netz, keine Seiteneffekte."""
     settings = (("REVIEW_MODEL", REVIEW_MODEL), ("REVIEW_MODEL_BIG", REVIEW_MODEL_BIG),
                 ("REVIEWER_NAME", REVIEWER_NAME))
     families = {name: model_family(alias) for name, alias in settings}
@@ -211,12 +214,9 @@ def reviewer_config_problem() -> str | None:
     if unknown:
         return (f"Reviewer-Konfiguration unbrauchbar: {', '.join(unknown)} ist keiner bekannten "
                 "Modellfamilie zuzuordnen; kein Review.")
-    values = list(families.values())
-    if len(set(values)) > 1:
-        common = max(set(values), key=values.count)
-        off = [name for name, family in families.items() if family != common]
-        return (f"Reviewer-Konfiguration unbrauchbar: {', '.join(off)} gehört nicht zur Familie "
-                f"{common} der übrigen Reviewer-Einstellungen; kein Review.")
+    if families["REVIEWER_NAME"] != families["REVIEW_MODEL"]:
+        return (f"Reviewer-Konfiguration unbrauchbar: REVIEWER_NAME gehört nicht zur Familie "
+                f"{families['REVIEW_MODEL']} von REVIEW_MODEL; kein Review.")
     return None
 
 
@@ -571,6 +571,8 @@ def _run_pr_review() -> int:
     # Familien) blockiert den Review. Sonst würde die Unabhängigkeitsregel still ausfallen.
     problem = reviewer_config_problem()
     if problem:
+        # Bei jedem Lauf ins Log: Eine nur einmal gemeldete Sperre hielt den Takt tagelang stumm.
+        log(f"PR #{n}: {problem}")
         gemeldet = state.setdefault("gemeldet", [])
         config_key = f"config:{REVIEWER_NAME}"
         if config_key not in gemeldet:

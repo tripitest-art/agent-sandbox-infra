@@ -262,6 +262,44 @@ def test_broken_reviewer_config_blocks_once_per_key(monkeypatch, capsys, tmp_pat
     assert "config:GLM" in json.loads((tmp_path / "state.json").read_text())["gemeldet"]
 
 
+def test_longctx_alias_belongs_to_gemini_family():
+    assert r.model_family("longctx-lite") == "gemini"
+
+
+def test_mixed_reviewer_families_are_allowed(monkeypatch):
+    # GLM für kleine, Gemini für große Diffs: die Unabhängigkeit prüft independence_problem() pro Aufruf.
+    monkeypatch.setattr(r, "REVIEW_MODEL", "coder-glm")
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "longctx-lite")
+    assert r.reviewer_config_problem() is None
+
+
+def test_reviewer_name_must_match_the_default_model_family(monkeypatch):
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "longctx-lite")
+    monkeypatch.setattr(r, "REVIEWER_NAME", "Mistral Large")
+    assert "REVIEWER_NAME" in r.reviewer_config_problem()
+
+
+def test_unknown_reviewer_setting_is_still_a_problem(monkeypatch):
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "unbekannt-7b")
+    assert "REVIEW_MODEL_BIG" in r.reviewer_config_problem()
+
+
+def test_mixed_families_still_review_big_diff_with_independent_model(monkeypatch):
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "longctx-lite")
+    calls = _fake_github(monkeypatch, [_pr()], diff="x" * (r.BIG_DIFF_CHARS + 1))
+    r.run_once()
+    assert calls["model"] == "longctx-lite"
+
+
+def test_broken_reviewer_config_is_logged_on_every_run(monkeypatch, capsys):
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "unbekannt-7b")
+    _fake_github(monkeypatch, [_pr()])
+    r.run_once()
+    capsys.readouterr()
+    r.run_once()
+    assert "PR #7: Reviewer-Konfiguration unbrauchbar" in capsys.readouterr().out
+
+
 def test_big_diff_names_the_model_actually_called(monkeypatch, tmp_path):
     # Über BIG_DIFF_CHARS zieht der Takt REVIEW_MODEL_BIG; die Reviewer-Zeile nennt ihn, nicht REVIEWER_NAME.
     monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "glm-4.6-longctx")
