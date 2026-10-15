@@ -125,8 +125,9 @@ Im Container CT 112:
 cd /root/agent-sandbox-infra
 bash sandbox/install.sh
 ```
-Das Skript fragt fehlende Geheimnisse verdeckt ab (LiteLLM-Key → `/etc/qwen-worker.env`, Reviewer-Key → `/etc/qwen-reviewer.env`, Webhook-URL → `/etc/qwen-webhook.env`, alle Rechte `0600`) und richtet die systemd-Dienste ein:
+Das Skript fragt fehlende Geheimnisse verdeckt ab (LiteLLM-Key → `/etc/qwen-worker.env`, Reviewer-Key → `/etc/qwen-reviewer.env`, Webhook-URL → `/etc/qwen-webhook.env`, Status-Webhook-URL → `/etc/ha-status.env`, alle Rechte `0600`) und richtet die systemd-Dienste ein:
 - Einstellungen wie `MAX_WORKERS=2`, `REVIEW_POST=1` und `REVIEW_AUTO_MERGE=1` werden dauerhaft in `/etc/agent-sandbox.conf` gespeichert.
+- Der Timer `ha-status.timer` startet `sandbox/ha_status.py` alle 2 Minuten über einen `ha-status.service` und meldet den Projektstand an die Webhook aus `HA_STATUS_URL` (in `/etc/ha-status.env`). Fehlt die URL, bleibt der Timer aus; Worker- und Review-Takt laufen davon unabhängig.
 
 ### 4. Home Assistant anbinden
 1. Webhook-IDs in Home Assistant `secrets.yaml` hinterlegen.

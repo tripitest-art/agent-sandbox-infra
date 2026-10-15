@@ -120,6 +120,8 @@ fi
 # Nur für das Live-Log im HA-Dashboard; fehlt sie, läuft der Worker trotzdem.
 # Es reicht die Webhook-ID; eine volle URL http://<HA>:8123/api/webhook/<ID> geht auch.
 ask_secret /etc/qwen-webhook.env HA_WEBHOOK_URL "HA-Webhook-ID (aus Vaultwarden)" || true
+# Nur für den Status-Bericht im HA-Dashboard; volle Webhook-URL (http://<HA>:8123/api/webhook/<ID>).
+ask_secret /etc/ha-status.env HA_STATUS_URL "HA-Webhook-URL für den Status (aus Vaultwarden)" || true
 # Eigener, eingeschränkter LiteLLM-Key nur für den Review-Takt (nur REVIEW_MODEL/REVIEW_MODEL_BIG).
 # Fehlt er, bleibt der Review-Takt aus; der Worker läuft trotzdem.
 review_key=0
@@ -371,6 +373,42 @@ if [ -f /etc/qwen-webhook.env ] && grep -q '^HA_WEBHOOK_URL=.' /etc/qwen-webhook
 else
   systemctl disable --now qwen-webhook.service >/dev/null 2>&1 || true
   echo "qwen-webhook: aus (/etc/qwen-webhook.env fehlt)"
+fi
+
+echo "== Status-Bericht"
+# ha_status.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py).
+cat > /etc/systemd/system/ha-status.service <<UNIT
+[Unit]
+Description=Workflow-Status an Home Assistant (sandbox/ha_status.py)
+[Service]
+Type=oneshot
+Environment=HOME=/root
+# HA_STATUS_URL (Geheimnis) und optional LITELLM_WORKER_KEY/LITELLM_PLANER_KEY für die Budgets.
+EnvironmentFile=/etc/ha-status.env
+# LITELLM_REVIEW_KEY für das Budget des Reviewers; fehlt die Datei, entfällt nur dieses Budget.
+EnvironmentFile=-/etc/qwen-reviewer.env
+Environment=LITELLM=$LITELLM
+Environment=LANG=C.UTF-8
+ExecStart=/usr/bin/flock -n /run/ha-status.lock /usr/bin/python3 /root/ha_status.py
+StandardOutput=append:/root/worker.log
+StandardError=append:/root/worker.log
+UNIT
+cat > /etc/systemd/system/ha-status.timer <<UNIT
+[Unit]
+Description=Status-Bericht alle 2 Minuten
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+if [ -f /etc/ha-status.env ] && grep -q '^HA_STATUS_URL=.' /etc/ha-status.env; then
+  systemctl enable ha-status.timer >/dev/null; systemctl restart ha-status.timer
+  echo "ha-status: $(systemctl is-active ha-status.timer)"
+else
+  systemctl disable --now ha-status.timer >/dev/null 2>&1 || true
+  echo "ha-status: aus (HA_STATUS_URL fehlt in /etc/ha-status.env)"
 fi
 
 echo "== Infra-Repo: Deploy-Key (nur lesen)"
