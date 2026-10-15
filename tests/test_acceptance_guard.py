@@ -154,6 +154,32 @@ def test_infra_changes_need_override(name):
     assert res.ok and "Erlaubt" in res.notes[0]
 
 
+@pytest.mark.parametrize("name", [
+    "tests/__init__.py",
+    "tests/acceptance/__init__.py",
+    "tests/unit/__init__.py",
+])
+def test_init_py_im_testbaum_ist_geschuetzte_infrastruktur(name):
+    # Der Code einer __init__.py läuft beim Einsammeln der Tests, bevor ein eingefrorener
+    # Akzeptanztest importiert wird — sie kann also das Modul unter Test ersetzen.
+    assert not g.evaluate([_file(name, "added")], set(), {}, _reader({})).ok
+    res = g.evaluate([_file(name, "added")], {g.OVERRIDE_LABEL}, {}, _reader({}))
+    assert res.ok and "Erlaubt" in res.notes[0]
+
+
+def test_bestehende_init_py_im_testbaum_ist_ein_verstoss():
+    # Auch die schon vorhandene Datei ist ein Verstoß, nicht nur eine neu hinzugefügte.
+    assert not g.evaluate([_file("tests/__init__.py", "modified")], set(), {}, _reader({})).ok
+
+
+def test_init_py_ausserhalb_des_testbaums_ist_normaler_code():
+    files = [
+        _file("sc_digger/__init__.py"),
+        _file("sc_digger/tests_helfer/__init__.py"),
+    ]
+    assert g.evaluate(files, set(), {}, _reader({})).ok
+
+
 def test_new_skip_in_tests_needs_override():
     f = _file("tests/test_core.py", patch="+@pytest.mark.xfail(reason='später')")
     assert not g.evaluate([f], set(), {}, _reader({})).ok
