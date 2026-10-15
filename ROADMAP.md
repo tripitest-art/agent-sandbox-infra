@@ -50,9 +50,11 @@ Umgesetzt in PR [#11](https://github.com/tripitest-art/agent-sandbox-infra/pull/
 
 ---
 
-### 🟡 Stufe 2: Strukturierte Slot-Telemetrie in Home Assistant (In Arbeit)
+### ✅ Stufe 2: Strukturierte Slot-Telemetrie in Home Assistant (Abgeschlossen)
 
-Aktuell sendet `qwen_webhook.py` rohe Textzeilen aus `worker.log` an Home Assistant. Ziel ist es, für die parallelen Worker-Slots strukturierte Entitäten in Home Assistant bereitzustellen.
+Umgesetzt in PR [#48](https://github.com/tripitest-art/agent-sandbox-infra/pull/48).
+
+Bisher sendete `qwen_webhook.py` rohe Textzeilen aus `worker.log` an Home Assistant. Ziel war es, für die parallelen Worker-Slots strukturierte Entitäten in Home Assistant bereitzustellen.
 
 #### Kernpunkte:
 1. **JSON-Payload mit strukturiertem Slot-Status:**
@@ -132,8 +134,17 @@ Die meiste manuelle Vorbereitungszeit fließt in das Ausformulieren präziser Sc
 | Stufe | Feature | Nutzen | Status |
 |---|---|---|:---:|
 | **Stufe 1** | Auto-Merge & `Wartet auf:` Auto-Unblock | ⭐⭐⭐⭐⭐ | ✅ **Gemergt (#11, #12)** |
-| **Stufe 2** | Strukturierte Slot-Telemetrie in Home Assistant | ⭐⭐⭐⭐ | 🟡 **In Arbeit** |
+| **Stufe 2** | Strukturierte Slot-Telemetrie in Home Assistant | ⭐⭐⭐⭐ | ✅ **Gemergt (#48)** |
 | **Stufe 3** | Continuous Deployment (`./update.sh` zum Server) | ⭐⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 4** | Prime-Time- & Budget-Scheduling | ⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🔵 **Geplant** |
 | **Baustein** | Mehrere Projekte (Projektliste, Infra-Repo als zweites Projekt) | ⭐⭐⭐⭐ | ✅ **Gemergt (#18, #19, #20)**; Inbetriebnahme auf dem Server: siehe [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) |
+
+---
+
+## 4. Backlog
+
+Das Backlog sind Issues mit Label `idee` (ohne Akzeptanztest, ohne `bereit`), keine Datei: so gibt es
+nur eine Quelle, die nicht auseinanderläuft. Offene Ideen: `gh issue list --label idee`. Der Planer
+macht daraus ein Issue mit Vertrag (`docs/planer-ablauf.md`). Hier stehen nur die Stufen oben; ändert
+sich ein Stand, wird diese Datei im selben PR angepasst.

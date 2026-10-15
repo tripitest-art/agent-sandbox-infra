@@ -160,6 +160,12 @@ Gleiche Regeln, mit den GitHub-Werkzeugen des Agenten (Einrichtung: `docs/mcp.md
 Label-Update ersetzt die ganze Liste: alle lesen, nur `bereit` ↔ `in-arbeit` tauschen. Der CI-Check
 `tests` ersetzt den lokalen Lauf. Fehlt ein Werkzeug (z. B. Merge): im PR nennen, Stephan erledigt es.
 
+## Doku und Changelog
+
+Doku gehört in denselben PR wie die Änderung: Verhalten, Betrieb oder neue Datei unter `sandbox/`
+→ `README.md` (und `ROADMAP.md`, falls eine Stufe betroffen ist) anpassen. Dazu eine Zeile unter
+„Unreleased“ in `CHANGELOG.md` mit PR-Nummer. Der Reviewer prüft das; `tests/test_doku.py` auch.
+
 ## Architektur und Stolperfallen
 
 Welche Datei wofür zuständig ist: `README.md` (Abschnitte Repository-Struktur und Projektliste).
