@@ -37,6 +37,49 @@ template:
             {% set current_log = state_attr('sensor.qwen_worker_log', 'log') | default('', true) %}
             {% set new_log = current_log ~ '\n' ~ (trigger.json.lines | default('')) %}
             {{ new_log[-2000:] }}
+          # Slot-Status aus dem Webhook; je Slot der zuletzt gemeldete Stand (qwen_webhook.py).
+          slots: >
+            {% set current = state_attr('sensor.qwen_worker_log', 'slots') | default({}, true) %}
+            {{ dict(current, **(trigger.json.slots | default({}, true))) }}
+
+  # 2b. Slot-Telemetrie: je Arbeitsslot ein Sensor, gespeist aus dem Attribut `slots`
+  #     des Webhook-Sensors oben (geschrieben von sandbox/worker_tick.py).
+  - sensor:
+      - name: "Qwen Worker Slot 1"
+        unique_id: qwen_worker_slot_1
+        variables:
+          slot: "1"
+          slots: "{{ state_attr('sensor.qwen_worker_log', 'slots') or {} }}"
+        state: "{{ slots.get(slot, {}).get('status', 'unbekannt') }}"
+        attributes:
+          message: "{{ slots.get(slot, {}).get('message', '') }}"
+          issue: "{{ slots.get(slot, {}).get('issue', '') }}"
+          pr: "{{ slots.get(slot, {}).get('pr', '') }}"
+          title: "{{ slots.get(slot, {}).get('title', '') }}"
+          branch: "{{ slots.get(slot, {}).get('branch', '') }}"
+          model: "{{ slots.get(slot, {}).get('model', '') }}"
+          agent: "{{ slots.get(slot, {}).get('agent', '') }}"
+          project: "{{ slots.get(slot, {}).get('project', '') }}"
+          started_at: "{{ slots.get(slot, {}).get('started_at', '') }}"
+          updated_at: "{{ slots.get(slot, {}).get('updated_at', '') }}"
+
+      - name: "Qwen Worker Slot 2"
+        unique_id: qwen_worker_slot_2
+        variables:
+          slot: "2"
+          slots: "{{ state_attr('sensor.qwen_worker_log', 'slots') or {} }}"
+        state: "{{ slots.get(slot, {}).get('status', 'unbekannt') }}"
+        attributes:
+          message: "{{ slots.get(slot, {}).get('message', '') }}"
+          issue: "{{ slots.get(slot, {}).get('issue', '') }}"
+          pr: "{{ slots.get(slot, {}).get('pr', '') }}"
+          title: "{{ slots.get(slot, {}).get('title', '') }}"
+          branch: "{{ slots.get(slot, {}).get('branch', '') }}"
+          model: "{{ slots.get(slot, {}).get('model', '') }}"
+          agent: "{{ slots.get(slot, {}).get('agent', '') }}"
+          project: "{{ slots.get(slot, {}).get('project', '') }}"
+          started_at: "{{ slots.get(slot, {}).get('started_at', '') }}"
+          updated_at: "{{ slots.get(slot, {}).get('updated_at', '') }}"
 
 # 3. Steuerungsbefehle
 rest_command:

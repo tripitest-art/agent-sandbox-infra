@@ -122,6 +122,94 @@ def test_step_caps_pending():
     assert pending and pending[-1] == "y" * 900   # die neuesten Zeilen bleiben
 
 
+# --- Slot-Telemetrie für Home Assistant (#14) ---
+
+def test_read_slots_missing_dir_is_empty(tmp_path):
+    assert q.read_slots(str(tmp_path / "fehlt")) == {}
+
+
+def test_read_slots_skips_invalid_files(tmp_path):
+    (tmp_path / "slot-1.json").write_text("{kaputt", encoding="utf-8")
+    (tmp_path / "slot-2.json").write_text(json.dumps(["kein dict"]), encoding="utf-8")
+    (tmp_path / "anderes.json").write_text(json.dumps({"slot": "9"}), encoding="utf-8")
+    assert q.read_slots(str(tmp_path)) == {}
+
+
+def test_read_slots_marks_orphan_running_as_idle(tmp_path):
+    (tmp_path / "slot-1.json").write_text(
+        json.dumps({"slot": "1", "status": "running", "pid": 99999, "issue": 14}), encoding="utf-8")
+    slots = q.read_slots(str(tmp_path), is_pid_alive=lambda pid: False)
+    assert slots["1"]["status"] == "idle"
+    assert slots["1"]["message"] == "Prozess beendet"
+    assert slots["1"]["issue"] == 14          # der Rest der Meldung bleibt erhalten
+
+
+def test_read_slots_keeps_idle_and_live_running(tmp_path):
+    (tmp_path / "slot-1.json").write_text(json.dumps({"slot": "1", "status": "idle"}), encoding="utf-8")
+    (tmp_path / "slot-2.json").write_text(
+        json.dumps({"slot": "2", "status": "running", "pid": 4}), encoding="utf-8")
+    slots = q.read_slots(str(tmp_path), is_pid_alive=lambda pid: True)
+    assert slots["1"]["status"] == "idle" and slots["2"]["status"] == "running"
+    assert "message" not in slots["2"]
+
+
+def test_pid_is_active_without_pid():
+    assert q.pid_is_active(None) is False
+    assert q.pid_is_active(0) is False
+    assert q.pid_is_active(-1) is False
+    assert q.pid_is_active(os.getpid()) is True
+
+
+def test_payload_without_slots_omits_key():
+    assert json.loads(q.payload(["a"])) == {"lines": "a"}
+    assert json.loads(q.payload(["a"], slots={})) == {"lines": "a", "slots": {}}
+
+
+def test_send_includes_slots_attribute():
+    seen = {}
+
+    def opener(req, timeout):
+        seen.update(body=req.data)
+        return _Resp(200)
+    assert q.send("http://ha.test/api/webhook/abc", ["zeile"],
+                  slots={"1": {"status": "idle"}}, opener=opener)
+    assert json.loads(seen["body"]) == {"lines": "zeile", "slots": {"1": {"status": "idle"}}}
+
+
+def test_step_without_slots_is_backward_compatible():
+    # Ohne last_slots bleibt es beim alten Verhalten: Rückgabe ist die Liste der offenen Zeilen.
+    f = _FakeFollower([["a"]])
+    assert q.step(f, [], "u", sender=lambda url, lines: True) == []
+
+
+def test_step_sends_slots_only_on_change(tmp_path):
+    (tmp_path / "slot-1.json").write_text(json.dumps({"slot": "1", "status": "idle"}), encoding="utf-8")
+    sent = []
+
+    def sender(url, lines, slots=None):
+        sent.append(slots)
+        return True
+
+    f = _FakeFollower([[], []])
+    pending, last = q.step(f, [], "u", last_slots={}, slot_dir=str(tmp_path), sender=sender)
+    assert len(sent) == 1 and last["1"]["status"] == "idle"
+    pending, last = q.step(f, pending, "u", last_slots=last, slot_dir=str(tmp_path), sender=sender)
+    assert len(sent) == 1                      # unverändert -> kein zweites Senden
+    (tmp_path / "slot-1.json").write_text(
+        json.dumps({"slot": "1", "status": "running", "pid": 4}), encoding="utf-8")
+    pending, last = q.step(f, pending, "u", last_slots=last, slot_dir=str(tmp_path),
+                           sender=sender, is_pid_alive=lambda pid: True)
+    assert len(sent) == 2 and last["1"]["status"] == "running"
+
+
+def test_step_keeps_lines_when_slots_send_fails(tmp_path):
+    (tmp_path / "slot-1.json").write_text(json.dumps({"slot": "1", "status": "idle"}), encoding="utf-8")
+    f = _FakeFollower([["a"], []])
+    pending, last = q.step(f, [], "u", last_slots={}, slot_dir=str(tmp_path),
+                           sender=lambda url, lines, slots=None: False)
+    assert pending == ["a"] and last == {"1": {"slot": "1", "status": "idle"}}
+
+
 # --- Webhook-ID oder URL; das Geheimnis erscheint nie in Ausgaben ---
 
 SECRET = "3a" * 24   # Platzhalter in der Form einer echten ID (48 Hex-Zeichen)
