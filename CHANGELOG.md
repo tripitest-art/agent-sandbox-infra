@@ -9,11 +9,19 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 
 ### Geändert
 - Review-Takt: Pflicht-Checks kommen aus der Projektliste (`required_checks`), Vorgabe `tests` und `acceptance-guard`; sc-digger nennt CodeQL dort selbst (#78).
+- `worker_tick`: Geheimnisse gehen nicht mehr an den Agentenprozess und nicht ins Log, der Agent bekommt nur eine Allowlist der Umgebung (#71).
+- `worker_tick`: die PR-Vorlage kommt aus `origin/main` statt aus dem Arbeitsbaum (#74).
+- `review_tick`: das Review-Ergebnis wird als Commit-Status `review` gesetzt (#75).
+- `tests/test_install_lib.py` wird ohne `bash` und `python3` ausgelassen, in CI nie (#70).
 - Doku-Pflicht: README, ROADMAP und Changelog werden im selben PR wie die Änderung gepflegt;
   ein Test hält die Dateiübersicht aktuell. README und ROADMAP auf den Stand von Stufe 2 gebracht.
 - `install.sh`: Der Status-Bericht `ha_status.py` bekommt Service und Timer `ha-status.timer`
   (alle 2 Minuten) und wird über `HA_STATUS_URL` in `/etc/ha-status.env` eingerichtet; ohne die
   URL bleibt der Timer aus, Worker und Review laufen unabhängig (#82).
+
+### Behoben
+- `worker_tick`: der Agentenprozess behält den PATH aus `ENV` (Fix zu #71), damit `pytest` aus `/root/venv` gefunden wird (#80).
+- `review_tick`: Fremdtext wird entschärft, damit keine gefälschte „⚠ Stephan“-Zeile ins Log und nach Home Assistant kommt (#73).
 
 ## 2026-10-15
 
