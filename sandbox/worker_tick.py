@@ -132,7 +132,7 @@ def alarm(skey: str, error: BaseException | str) -> None:
     - Der Text nach dem Zeitstempel ist höchstens 300 Zeichen lang; Längeres wird mit „…“
       abgeschnitten (der Zeitstempel kommt von `log()` davor, die Gesamtzeile bleibt <= 320).
     - `skey` ist der Zustandsschlüssel der laufenden Arbeit ("issue5",
-      "pr103 @<sha>", "text7 @<sha>") oder "-", wenn der Fehler vor der Auftragswahl auftritt.
+      "pr103@<sha>", "text7@<sha>") oder "-", wenn der Fehler vor der Auftragswahl auftritt.
     - Übergeben wird nie eine rohe stderr-/Kommandoausgabe und nie ein Umgebungswert;
       die Kurzbeschreibung ist ein fester Text oder höchstens die erste Zeile der
       Exception-Meldung (Regel 5)."""
@@ -147,6 +147,14 @@ def alarm(skey: str, error: BaseException | str) -> None:
     if len(msg) > limit:
         msg = msg[:limit - 1] + "…"
     log(msg)
+
+
+def first_line(error: BaseException | str) -> str:
+    """Nur die erste Zeile einer Meldung (Regel 5). So bekommt `alarm()` nie einen
+    mehrzeiligen Text: die Auswahl der ersten Zeile ist Sache des Aufrufers, nicht der
+    Normierung in `alarm()`."""
+    lines = str(error).splitlines()
+    return lines[0] if lines else ""
 
 
 def normalize_slot(slot: str | None) -> str:
@@ -1090,7 +1098,9 @@ def main() -> int:
                     "Nacharbeit nicht erledigt.")
         return 0
     except Exception as exc:   # der Timer darf nie mit Traceback enden (Regel 7)
-        alarm(skey, exc)
+        # Regel 5: an alarm() geht nur die erste Zeile der Meldung, nie die rohe, mehrzeilige
+        # Ausnahme; die Kurzbeschreibung bleibt damit einzeilig.
+        alarm(skey, first_line(exc))
         return 0
 
 

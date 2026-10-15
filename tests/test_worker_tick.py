@@ -1170,8 +1170,31 @@ def test_main_meldet_absturz_der_auftragsausfuehrung(monkeypatch, capsys):
 
     assert w.main() == 0
     out = capsys.readouterr().out
-    assert "⚠ Stephan: issue7: RuntimeError: Arbeitsverzeichnis kaputt" in out
+    # main() reicht nur die erste Zeile als Text weiter (Regel 5), daher Klasse "Fehler".
+    assert "⚠ Stephan: issue7: Fehler: Arbeitsverzeichnis kaputt" in out
     assert "Traceback" not in out
+
+
+def test_main_meldet_nur_die_erste_zeile(monkeypatch, capsys):
+    """Regel 5/7: eine mehrzeilige Exception geht nie vollständig an alarm() – nur Zeile 1."""
+    def boom():
+        raise RuntimeError("Arbeitsverzeichnis kaputt\nZeile zwei mit Geheimnis")
+
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "load_state", lambda: {})
+    monkeypatch.setattr(w, "save_state", lambda state: None)
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "prepare_workdir", boom)
+
+    assert w.main() == 0
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: issue7: Fehler: Arbeitsverzeichnis kaputt" in out
+    assert "Zeile zwei" not in out
+    assert out.count("⚠ Stephan:") == 1
 
 
 def test_main_meldet_fehler_vor_der_auftragswahl(monkeypatch, capsys):
@@ -1184,5 +1207,5 @@ def test_main_meldet_fehler_vor_der_auftragswahl(monkeypatch, capsys):
 
     assert w.main() == 0
     out = capsys.readouterr().out
-    assert "⚠ Stephan: -: OSError: Zustandsdatei nicht lesbar" in out
+    assert "⚠ Stephan: -: Fehler: Zustandsdatei nicht lesbar" in out
     assert "Traceback" not in out
