@@ -17,8 +17,15 @@ ROOT = Path(__file__).resolve().parents[2]
 def _load(name: str, rel: str):
     spec = importlib.util.spec_from_file_location(name, ROOT / rel)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
+    vorher = sys.modules.get(name)
+    sys.modules[name] = mod           # Dataclasses brauchen den Eintrag, solange das Modul läuft
+    try:
+        spec.loader.exec_module(mod)
+    finally:                          # danach zurück: andere Testdateien binden `projects` selbst
+        if vorher is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = vorher
     return mod
 
 
@@ -40,7 +47,8 @@ def test_eigene_liste_wird_gelesen():
     assert tuple(projekt.required_checks) == ("tests", "acceptance-guard", "CodeQL")
 
 
-def test_use_project_setzt_die_pflicht_checks():
+def test_use_project_setzt_die_pflicht_checks(monkeypatch):
+    monkeypatch.setattr(r, "REQUIRED_CHECKS", r.REQUIRED_CHECKS)   # nach dem Test zurückgesetzt
     projekt = p.parse_projects(json.dumps(MIT))[0]
     r.use_project(projekt, first=True)
     assert tuple(r.REQUIRED_CHECKS) == ("tests", "acceptance-guard", "CodeQL")
