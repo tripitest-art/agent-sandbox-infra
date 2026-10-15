@@ -57,8 +57,10 @@ def _pr(number=103, branch="feature/issue-100-camelot-distance", commit="2026-09
 
 
 class FakeGH:
-    def __init__(self, prs=(), labels=("agent-qwen",), issues=()):
+    def __init__(self, prs=(), labels=("agent-qwen",), issues=(), active=(), fail_active=False):
         self.prs, self.labels, self.issues = list(prs), list(labels), list(issues)
+        # Aktive Aufträge (Label `in-arbeit`) getrennt von den Kandidaten; in Tests meist leer.
+        self.active, self.fail_active = list(active), fail_active
         self.calls = []
 
     def __call__(self, *args):
@@ -68,6 +70,10 @@ class FakeGH:
         if args[:2] == ("issue", "view"):
             return {"labels": [{"name": n} for n in self.labels], "title": "Titel von Issue"}
         if args[:2] == ("issue", "list"):
+            if "in-arbeit" in args:
+                if self.fail_active:
+                    raise RuntimeError("gh nicht erreichbar")
+                return self.active
             return self.issues
         raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
 
@@ -133,7 +139,9 @@ def test_rework_job_ignores_newer_foreign_review(monkeypatch):
     assert "evil.example" not in task and REVIEW_CHANGES in task
 
 
-ISSUE_BODY = "### Ziel\n\nAbstand anzeigen.\n\n### Akzeptanztests\n\n```python\ndef test_x():\n    pass\n```"
+ISSUE_BODY = ("### Ziel\n\nAbstand anzeigen.\n\n"
+              "### Betroffene Dateien\n\n- `sc_digger/rekordbox.py`\n\n"
+              "### Akzeptanztests\n\n```python\ndef test_x():\n    pass\n```")
 
 
 def _issue(number=102, author="tripitest-art"):
@@ -186,6 +194,45 @@ def test_check_issue_result(monkeypatch, capsys):
 def test_issue_job_none(monkeypatch):
     monkeypatch.setattr(w, "gh", FakeGH())
     assert w.issue_job() is None
+
+
+def test_active_in_progress_issues_fehler_ist_unbekannt(monkeypatch, capsys):
+    """Regel 7/8: Eine gescheiterte Abfrage ist „unbekannt“ (None), nicht „kein aktiver Auftrag“ (#32)."""
+    monkeypatch.setattr(w, "gh", FakeGH(fail_active=True))
+    assert w.active_in_progress_issues() is None
+    assert "Warnung" in capsys.readouterr().out
+
+
+def test_active_in_progress_issues_leere_liste_ist_belegt(monkeypatch):
+    monkeypatch.setattr(w, "gh", FakeGH(active=[]))
+    assert w.active_in_progress_issues() == []
+
+
+def test_issue_job_baut_keinen_auftrag_bei_unbekannter_lage(monkeypatch, capsys):
+    fake = FakeGH(issues=[_issue()], fail_active=True)
+    monkeypatch.setattr(w, "gh", fake)
+    assert w.issue_job() is None
+    assert "nicht abfragbar" in capsys.readouterr().out
+    # Nichts beansprucht: ohne belegte Lage startet kein Auftrag.
+    assert not any(c[:2] == ("issue", "edit") for c in fake.calls)
+
+
+def test_issue_job_bricht_ab_wenn_aktiver_auftrag_ohne_dateiliste(monkeypatch, capsys):
+    aktiv = {"number": 5, "title": "Alt", "body": "### Ziel\n\nNur Text.\n",
+             "author": {"login": "tripitest-art"}}
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], active=[aktiv]))
+    assert w.issue_job() is None
+    assert "#5" in capsys.readouterr().out
+
+
+def test_issue_job_ueberspringt_kandidat_ohne_dateiliste(monkeypatch, capsys):
+    ohne = {"number": 7, "title": "Ohne Liste", "body": "### Ziel\n\nNur Text.\n",
+            "author": {"login": "tripitest-art"}}
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[ohne, _issue()]))
+    key, task, _, _ = w.issue_job()
+    assert key == "issue102" and "Du setzt Issue #102 um" in task
+    out = capsys.readouterr().out
+    assert "#7" in out and "keine belegte Dateiliste" in out
 
 
 def _fake_urlopen(models, status=None, calls=None):
@@ -310,7 +357,8 @@ def test_geparkter_text_fix_blockiert_das_issue_nicht(monkeypatch, tmp_path):
     bad_pr = {"number": 41, "headRefName": "feature/issue-24", "headRefOid": "abcdef1234",
               "isCrossRepository": False, "title": "T", "body": "## Was und warum\n\nCloses #24\n",
               "reviews": [], "commits": [{"committedDate": "2026-10-02T10:00:00Z"}]}
-    issue = {"number": 30, "title": "Issue 30", "body": "### Ziel\n\nEtwas.",
+    issue = {"number": 30, "title": "Issue 30",
+             "body": "### Ziel\n\nEtwas.\n\n### Betroffene Dateien\n\n- `sc_digger/beispiel.py`\n",
              "author": {"login": "tripitest-art"}}
 
     def gh(*args):
@@ -768,6 +816,38 @@ def test_touches_main_py():
     assert w.touches_main_py({"body": "### Berührt sc_digger/main.py\n\nja\n"}) is True
     assert w.touches_main_py({"body": "### Betroffene Dateien\n- `sc_digger/main.py`\n"}) is True
     assert w.touches_main_py({"labels": [], "body": "### Berührt sc_digger/main.py\n\nnein\n"}) is False
+    # Unbekannte Dateiliste (None) darf nicht abstürzen und ist kein Hotspot-Treffer (#32).
+    assert w.touches_main_py({"body": "### Ziel\n\nOhne Dateiliste.\n"}) is False
+
+
+def test_parse_affected_files_ohne_sektion_ist_unbekannt():
+    assert w.parse_affected_files("### Ziel\n\nEtwas tun.\n") is None
+    assert w.parse_affected_files("## Betroffene Dateien\n\n") is None
+
+
+@pytest.mark.parametrize("body, expected", [
+    ("## betroffene dateien\n- `a.py`\n", {"a.py"}),
+    ("### Betroffene Dateien (nur diese)\n- `a/b.py`\n", {"a/b.py"}),
+    ("##### Betroffene Dateien: nur diese\n- `a/b.py`\n", {"a/b.py"}),
+])
+def test_parse_affected_files_ueberschrift_tolerant(body, expected):
+    assert w.parse_affected_files(body) == expected
+
+
+def test_parse_affected_files_endungslos_und_verzeichnis():
+    body = ("## Betroffene Dateien (nur diese)\n\n"
+            "- `Dockerfile`\n- `Makefile`\n- `sandbox/`\n"
+            "- `irgendeine_variable = True` (keine Datei)\n"
+            "- `tests/acceptance/test_issue_32.py`\n\n"
+            "## Schnittstellen\n- `nicht_mehr.py`\n")
+    assert w.parse_affected_files(body) == {"Dockerfile", "Makefile", "sandbox"}
+
+
+def test_projects_example_hat_hotspot_fuer_dieses_repo():
+    data = json.loads((REPO_ROOT / "sandbox" / "projects.example.json").read_text(encoding="utf-8"))
+    infra = next(p for p in data["projects"] if p["name"] == "agent-sandbox-infra")
+    assert infra["hotspot"] == "sandbox/worker_tick.py"
+    assert infra["hotspot_label"]
 
 
 def test_issue_job_skips_main_py_conflict(monkeypatch):
