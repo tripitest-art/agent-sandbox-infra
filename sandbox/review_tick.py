@@ -97,6 +97,33 @@ def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{tag}] {msg}", flush=True)
 
 
+def safe_snippet(text: str | None, limit: int = 60) -> str:
+    """Einzeilige, gekürzte Fassung von Fremdtext für Log- und Meldezeilen.
+    - None wird zu "".
+    - "⚠" wird durch "!" ersetzt.
+    - "Stephan" wird ohne Rücksicht auf Groß-/Kleinschreibung entfernt.
+    - CR, LF und Tabulator werden zu je einem Leerzeichen.
+    - Mehrfache Leerzeichen werden zusammengezogen, außen wird getrimmt.
+    - Auf `limit` Zeichen gekürzt; wurde gekürzt, endet das Ergebnis auf "…".
+
+    Der Webhook schickt neue Zeilen aus worker.log nach Home Assistant, wo
+    homeassistant/automation_stephan.yaml die Teilkette „⚠ Stephan“ sucht. Issue-, PR- und
+    Diff-Text steuern die Modellantwort, und die erste Zeile der Antwort landet im Problemtext
+    und damit im Log: Ungefiltert könnte Fremdtext die Warnzeile erzeugen, die nur dieses
+    Skript schreiben darf (Regel 9). Der Rückgabewert enthält nie "⚠" und nie "Stephan",
+    ist immer einzeilig und höchstens `limit` Zeichen lang. Reine Funktion, kein Netz,
+    keine Seiteneffekte."""
+    if not text:
+        return ""
+    out = text.replace("⚠", "!")
+    out = re.sub(r"stephan", "", out, flags=re.I)
+    out = re.sub(r"[\r\n\t]", " ", out)
+    out = re.sub(r" +", " ", out).strip()
+    if len(out) > limit:
+        out = out[:limit - 1].rstrip() + "…"
+    return out
+
+
 def use_project(p: "projects.Project", first: bool) -> None:
     """Schaltet auf Projekt `p` um: Repo, Review-Skill, Merge-Erlaubnis, Zustandsdatei, Entwurfsordner."""
     global REPO, REVIEW_SKILL, PROJECT_AUTO_MERGE, STATE, DRAFT_DIR
@@ -296,7 +323,7 @@ def parse_review(text: str) -> tuple[str | None, int, int, str | None]:
     first = next((l.strip() for l in lines if l.strip()), "")
     verdict = first if first in VERDICTS else None
     if verdict is None:
-        return None, 0, 0, f"erste Zeile ist kein Urteil: {first[:60]!r}"
+        return None, 0, 0, f"erste Zeile ist kein Urteil: {safe_snippet(first, 60)!r}"
 
     def count(heading: str) -> int:
         sec = extract_section(text, "### " + heading) or extract_section(text, "## " + heading)
@@ -346,10 +373,19 @@ def build_messages(issue: dict, pr: dict, files: list[dict], diff: str, checks: 
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+def llm_payload(model: str, messages: list[dict]) -> dict:
+    """Der JSON-Body für POST {LITELLM}/v1/chat/completions:
+    {"model": model, "messages": messages, "max_tokens": MAX_TOKENS}.
+    Enthält bewusst weder "tools" noch "tool_choice": der Reviewer bekommt keine Werkzeuge und
+    hat keinen Schreibweg (Issue-, PR- und Diff-Text sind fremder Input). Eigene Funktion, damit
+    call_llm() seinen Body nur hierüber baut und der Body ohne Netz prüfbar ist."""
+    return {"model": model, "messages": messages, "max_tokens": MAX_TOKENS}
+
+
 def call_llm(model: str, messages: list[dict]) -> tuple[str, dict]:
     req = urllib.request.Request(
         f"{LITELLM}/v1/chat/completions",
-        data=json.dumps({"model": model, "messages": messages, "max_tokens": MAX_TOKENS}).encode(),
+        data=json.dumps(llm_payload(model, messages)).encode(),
         headers={"Authorization": f"Bearer {REVIEW_KEY}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
         data = json.load(resp)
@@ -419,7 +455,7 @@ def merge_pr(number: int, sha: str) -> bool:
         log(f"PR #{number}: erfolgreich gemergt (--squash).")
         return True
     except subprocess.CalledProcessError as exc:
-        log(f"PR #{number}: Merge fehlgeschlagen ({(exc.stderr or '').strip()[:160]}).")
+        log(f"PR #{number}: Merge fehlgeschlagen ({safe_snippet(exc.stderr, 160)}).")
         return False
 
 
@@ -554,7 +590,7 @@ def unblock_dependent_issues() -> list[int]:
                 log(f"Issue #{num}: Alle Abhängigkeiten {deps} erledigt -> Label 'bereit' gesetzt, 'blockiert' entfernt.")
                 unblocked.append(num)
             except subprocess.CalledProcessError as exc:
-                log(f"Issue #{num}: Entblocken fehlgeschlagen ({(exc.stderr or '').strip()[:160]}).")
+                log(f"Issue #{num}: Entblocken fehlgeschlagen ({safe_snippet(exc.stderr, 160)}).")
     return unblocked
 
 
@@ -620,7 +656,7 @@ def _run_pr_review() -> int:
                 files = gh_json("pr", "view", str(n), "--json", "files")["files"]
                 diff = gh_text("pr", "diff", str(n))
             except subprocess.CalledProcessError as exc:
-                log(f"PR #{n}: GitHub-Abfrage scheitert ({(exc.stderr or '').strip()[:120]}), nächster Takt.")
+                log(f"PR #{n}: GitHub-Abfrage scheitert ({safe_snippet(exc.stderr, 120)}), nächster Takt.")
                 return 0
             if len(diff) > MAX_DIFF_CHARS:
                 log(f"PR #{n}: Diff zu groß ({len(diff)} Zeichen), bitte von Hand prüfen.")
@@ -655,7 +691,7 @@ def _run_pr_review() -> int:
                 if tries >= 2:
                     state.setdefault("erledigt", []).append(key)
                 save_state(state)
-                log(f"PR #{n}: Antwort von {model} unbrauchbar ({problem}), Versuch {tries}"
+                log(f"PR #{n}: Antwort von {model} unbrauchbar ({safe_snippet(problem, 200)}), Versuch {tries}"
                     f"{', gebe auf (bitte von Hand prüfen)' if tries >= 2 else ', nächster Takt'}.")
                 if tries >= 2:
                     to_stephan(n, key, f"Review-Modell {model} lieferte zweimal keine brauchbare Antwort; bitte von Hand prüfen.", state)
@@ -666,7 +702,7 @@ def _run_pr_review() -> int:
     verdict, muss, kann, problem = parse_review(text)
     path = draft_path(pr) if draft else save_draft(pr, text, meta + (f" PROBLEM: {problem}" if problem else ""))
     if problem:
-        log(f"PR #{n}: Entwurf {verdict}, aber {problem}; nicht gepostet ({path}).")
+        log(f"PR #{n}: Entwurf {verdict}, aber {safe_snippet(problem, 200)}; nicht gepostet ({path}).")
         return 0
     if POST:
         post_review(n, text)
