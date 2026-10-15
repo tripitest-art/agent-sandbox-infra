@@ -379,20 +379,84 @@ def extract_section(md: str, heading: str, until: tuple[str, ...] = ()) -> str:
     return "\n".join(out).strip()
 
 
-def parse_affected_files(issue_body: str) -> set[str]:
-    """Extrahiert alle betroffenen Dateipfade aus der Sektion '### Betroffene Dateien'."""
-    sec = extract_section(issue_body, "### Betroffene Dateien")
-    if not sec:
-        return set()
-    files = set()
-    for m in re.finditer(r"`([\w./-]+\.[a-zA-Z0-9]+)`", sec):
-        p = m.group(1).strip()
-        if "/" in p or p.endswith((".py", ".yaml", ".yml", ".json", ".txt", ".md", ".sh", ".sql")):
-            if not re.match(r"^tests/acceptance/test_issue_\d+\.py$", p):
-                files.add(p)
-    for m in re.finditer(r"^\s*[-*]\s+([\w./-]+\.[a-zA-Z0-9]+)", sec, re.M):
-        p = m.group(1).strip()
-        if not re.match(r"^tests/acceptance/test_issue_\d+\.py$", p):
+# Überschrift „Betroffene Dateien“ tolerant: jede Ebene ab „##“, Groß-/Kleinschreibung egal,
+# Zusatz hinter dem Titel erlaubt. Ein handschriftlicher Titel ließ die Dateiliste früher leer,
+# und Regel 8 fiel offen aus (#32).
+_FILES_HEADING_RE = re.compile(r"^(#{2,6})\s*betroffene\s+dateien\b", re.I)
+_ACCEPTANCE_PATH_RE = re.compile(r"^tests/acceptance/test_issue_\d+\.py$")
+# Ein Kandidat ist ein Pfad, wenn er nur Pfadzeichen enthält: keine Leerzeichen, kein „=“, kein „:“.
+_PATH_TOKEN_RE = re.compile(r"[\w./@+~-]+")
+_BULLET_RE = re.compile(r"^\s*[-*]\s+(.*)$")
+_BACKTICK_RE = re.compile(r"`([^`\n]*)`")
+
+
+def affected_files_section(md: str) -> str | None:
+    """Sektion „Betroffene Dateien“ roh, oder None, wenn die Überschrift fehlt.
+
+    Die Sektion endet an der nächsten Überschrift gleicher oder höherer Ebene.
+    """
+    lines = (md or "").replace("\r\n", "\n").split("\n")
+    start = level = None
+    for i, line in enumerate(lines):
+        m = _FILES_HEADING_RE.match(line.strip())
+        if m:
+            start, level = i + 1, len(m.group(1))
+            break
+    if start is None:
+        return None
+    for i in range(start, len(lines)):
+        s = lines[i].strip()
+        if s.startswith("#"):
+            l = len(s) - len(s.lstrip("#"))
+            if l <= level:
+                return "\n".join(lines[start:i])
+    return "\n".join(lines[start:])
+
+
+def _path_candidate(text: str) -> str | None:
+    """Token als Pfad, wenn es keine Leerzeichen und kein „=“ enthält; Verzeichnis ohne „/“."""
+    p = text.strip()
+    if not _PATH_TOKEN_RE.fullmatch(p):
+        return None
+    return p.rstrip("/")
+
+
+def parse_affected_files(issue_body: str) -> set[str] | None:
+    """Dateipfade aus der Sektion „Betroffene Dateien“; None, wenn die Sektion fehlt oder leer ist.
+
+    None heißt „unbekannt“ und wird von den Aufrufern als Kollision gewertet (Regel 8 fällt
+    nicht mehr offen aus). Ein Aufrufer, der nur den Hotspot prüfen will, benutzt
+    `parse_affected_files(body) or set()` und stürzt damit nicht ab.
+
+    Die Überschrift wird tolerant gesucht: jede Ebene ab „##“, Groß-/Kleinschreibung egal,
+    Zusatz hinter dem Titel erlaubt („### Betroffene Dateien (nur diese)“). Die Sektion endet
+    an der nächsten Überschrift gleicher oder höherer Ebene.
+
+    Erkannt werden Pfade in Backticks und in Aufzählungen, auch ohne Endung (`Dockerfile`,
+    `Makefile`) und als Verzeichnis (`sandbox/` -> "sandbox", ohne abschließenden Schrägstrich).
+    Ein Kandidat ist nur dann ein Pfad, wenn er keine Leerzeichen und kein „=“ enthält:
+    `- `irgendeine_variable = True` (keine Datei)` bleibt ausgeschlossen.
+    `tests/acceptance/test_issue_<N>.py` steht weiterhin nie in der Menge. Die bestehende
+    Zusicherung aus `tests/test_worker_tick.py::test_parse_affected_files` gilt unverändert.
+    """
+    sec = affected_files_section(issue_body)
+    if sec is None or not sec.strip():
+        return None
+    files: set[str] = set()
+    for m in _BACKTICK_RE.finditer(sec):
+        p = _path_candidate(m.group(1))
+        if p and not _ACCEPTANCE_PATH_RE.match(p):
+            files.add(p)
+    for line in sec.splitlines():
+        m = _BULLET_RE.match(line)
+        if not m:
+            continue
+        rest = _BACKTICK_RE.sub("", m.group(1)).lstrip()
+        token = _PATH_TOKEN_RE.match(rest)
+        if not token:
+            continue
+        p = _path_candidate(token.group(0))
+        if p and not _ACCEPTANCE_PATH_RE.match(p):
             files.add(p)
     return files
 
@@ -409,18 +473,27 @@ def touches_main_py(issue: dict) -> bool:
     sec = extract_section(body, f"### Berührt {HOTSPOT}").strip().lower()
     if sec.startswith("ja"):
         return True
-    return HOTSPOT in parse_affected_files(body)
+    # Unbekannte Dateiliste (None) darf nicht abstürzen und zählt nicht als Hotspot-Treffer (#32).
+    return HOTSPOT in (parse_affected_files(body) or set())
 
 
-def active_in_progress_issues() -> list[dict]:
-    """Alle aktuell offenen Issues mit Label 'in-arbeit' von tripitest-art."""
+def active_in_progress_issues() -> list[dict] | None:
+    """Offene Issues mit Label `in-arbeit` von Stephans Konto.
+
+    None, wenn die Abfrage scheitert (Netz, Rate-Limit, gh-Fehler); die Ursache steht als
+    Warnung im Log, aber ohne Geheimnisse. Eine leere Liste heißt dagegen belegt „kein
+    aktiver Auftrag“. Der Aufrufer wertet None als unbekannt und baut keinen Auftrag.
+    """
     try:
         active = gh("issue", "list", "--state", "open", "--label", "in-arbeit",
                     "--json", "number,title,body,author,labels")
         return [i for i in active or [] if (i.get("author") or {}).get("login") == OWNER]
     except Exception as e:
-        log(f"Warnung: Abfrage aktiver Issues fehlgeschlagen: {e}")
-        return []
+        # Nicht still scheitern: Früher lieferte dieser Zweig [], und ein zweiter Agent startete
+        # in denselben Dateien (Regel 8 fiel offen aus, #32).
+        log(f"Warnung: Abfrage aktiver Issues fehlgeschlagen ({type(e).__name__}: {e}); "
+            "Lage unbekannt, kein Auftrag.")
+        return None
 
 
 def claim_issue(n: int) -> bool:
@@ -445,6 +518,14 @@ def issue_branch(n: int) -> str:
 def issue_job(skip: Callable[[str], bool] | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
 
+    Neu (#32):
+    - `active_in_progress_issues() is None` -> kein Auftrag (Rückgabe None), Logzeile mit Grund.
+    - Hat ein aktiver Auftrag keine belegte Dateiliste (`parse_affected_files() is None`),
+      wird kein Auftrag gebaut (Rückgabe None): die Lage ist nicht beurteilbar.
+    - Hat ein Kandidat keine belegte Dateiliste, wird genau dieser Kandidat übersprungen
+      (Logzeile mit Issue-Nummer) und der nächste geprüft.
+    Sonst unverändert: ältestes Issue zuerst, Fremd-Issues nie, Kollisionen wie bisher.
+
     `skip`: geparkte Kandidaten werden übersprungen — ohne Claim, und der nächste kommt dran.
 
     Der Auftrag nennt jeden Schritt mit Befehl und enthält das Issue wörtlich. Mit „Bearbeite die
@@ -459,12 +540,21 @@ def issue_job(skip: Callable[[str], bool] | None = None):
     if not issues:
         return None
 
-    # Konfliktprüfung mit aktiven Aufträgen (Regel 8: main.py und dieselben Dateien)
+    # Konfliktprüfung mit aktiven Aufträgen (Regel 8: main.py und dieselben Dateien).
+    # Unbekannt heißt blockieren: Ohne belegte Lage baut der Takt keinen Auftrag (#32).
     active = active_in_progress_issues()
+    if active is None:
+        log("Kein Auftrag: aktive Aufträge nicht abfragbar (Regel 8 nicht beurteilbar).")
+        return None
     active_touches_main = any(touches_main_py(a) for a in active)
     active_files = set()
     for a in active:
-        active_files |= parse_affected_files(a.get("body", ""))
+        a_files = parse_affected_files(a.get("body", ""))
+        if a_files is None:
+            log(f"Kein Auftrag: aktiver Auftrag #{a.get('number')} hat keine belegte "
+                "Dateiliste (Regel 8 nicht beurteilbar).")
+            return None
+        active_files |= a_files
         if touches_main_py(a):
             active_files.add(HOTSPOT)
 
@@ -476,6 +566,12 @@ def issue_job(skip: Callable[[str], bool] | None = None):
             continue   # geparkt: der nächste Kandidat kommt dran, kein claim_issue
         cand_touches_main = touches_main_py(cand)
 
+        # Regel 8: Ohne belegte Dateiliste ist der Kandidat nicht beurteilbar -> überspringen.
+        cand_files = parse_affected_files(cand_body)
+        if cand_files is None:
+            log(f"Issue #{cand_no} übersprungen: keine belegte Dateiliste (Regel 8).")
+            continue
+
         # Regel 8: Keine zwei Agenten an main.py
         if cand_touches_main and active_touches_main:
             log(f"Issue #{cand_no} übersprungen: berührt {HOTSPOT}, während bereits ein Auftrag "
@@ -483,7 +579,6 @@ def issue_job(skip: Callable[[str], bool] | None = None):
             continue
 
         # Regel 8: Keine zwei Agenten in denselben Dateien
-        cand_files = parse_affected_files(cand_body)
         if cand_touches_main:
             cand_files.add(HOTSPOT)
         overlap = cand_files & active_files

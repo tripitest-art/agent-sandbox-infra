@@ -20,7 +20,7 @@ def _good_body(issue_no=100):
 
 
 def _issue(n=102):
-    return {"number": n, "title": f"Issue {n}", "body": "### Ziel\n\nEtwas.",
+    return {"number": n, "title": f"Issue {n}", "body": "### Ziel\n\nEtwas.\n\n### Betroffene Dateien\n\n- `sandbox/takt.py`\n",
             "author": {"login": "tripitest-art"}}
 
 
