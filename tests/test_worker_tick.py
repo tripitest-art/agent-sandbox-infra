@@ -656,6 +656,18 @@ def test_agent_env_liest_os_environ_und_laesst_geheimnisse_weg(monkeypatch):
     assert GEHEIM not in " ".join(env.values())
 
 
+def test_agent_env_behaelt_den_path_aus_env(monkeypatch):
+    # Nur ENV trägt den PATH-Zusatz des Servers; os.environ hat den Systemd-Standard (#72).
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("LITELLM_API_KEY", GEHEIM)
+    assert w.ENV["PATH"].startswith("/root/venv/bin:/root/.opencode/bin:")
+    env = w.agent_env(w.ENV)
+    assert env["PATH"] == w.ENV["PATH"]
+    assert env["PATH"] != "/usr/bin:/bin"
+    assert set(env).isdisjoint(w.SECRET_ENV_KEYS)
+    assert GEHEIM not in " ".join(env.values())
+
+
 def test_redact_ohne_angabe_liest_die_gesetzten_schluessel(monkeypatch):
     monkeypatch.setenv("LITELLM_API_KEY", GEHEIM)
     line = w.redact(f"Bearer {GEHEIM}")

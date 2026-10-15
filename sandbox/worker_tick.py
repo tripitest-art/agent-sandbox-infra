@@ -807,11 +807,13 @@ def log_stream_line(line: str) -> None:
 def run_agent(prompt: str) -> int:
     """Startet den Agenten; `timeout` beendet ihn hart, falls er selbst nicht aufhört.
 
-    Der Agentenprozess bekommt `agent_env()` statt `ENV`: nur die Allowlist, keine
-    Geheimnisse (#35). Die bei OpenCode ungefiltert gedruckte Ausgabe läuft durch
-    `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home Assistant kommt."""
+    Der Agentenprozess bekommt `agent_env(ENV)` statt `ENV`: nur die Allowlist, keine
+    Geheimnisse (#35). `ENV` statt `os.environ` ist nötig, weil nur dort der PATH-Zusatz
+    `/root/venv/bin:/root/.opencode/bin` steht; die Worker-Units setzen keinen PATH, und
+    `pytest` liegt nur im venv (#72). Die bei OpenCode ungefiltert gedruckte Ausgabe läuft
+    durch `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home Assistant kommt."""
     cmd = ["timeout", "-k", "30", str(RUN_TIMEOUT + 60), *agent_cmd(prompt)]
-    with subprocess.Popen(cmd, cwd=WORKDIR, env=agent_env(), stdout=subprocess.PIPE,
+    with subprocess.Popen(cmd, cwd=WORKDIR, env=agent_env(ENV), stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                           errors="replace") as proc:
         for line in proc.stdout:
