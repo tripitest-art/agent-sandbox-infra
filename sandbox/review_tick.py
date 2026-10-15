@@ -556,11 +556,26 @@ def retry_merges(state: dict) -> None:
 
 
 def parse_dependencies(body: str | None) -> list[int]:
-    """Findet alle Referenzen (#123 oder URL) in Zeilen der Form 'Wartet auf: #X, #Y'."""
+    """Findet alle Referenzen (#123 oder URL) in Zeilen der Form 'Wartet auf: #X, #Y'.
+
+    Zeilen **innerhalb** eines Code-Blocks (``` oder ~~~, auch mehrzeilig) zählen nicht: Ein Issue,
+    das die Schreibweise nur zitiert oder testet, soll sich nicht von den Beispielnummern abhängig
+    machen. Reihenfolge wie im Text, jede Nummer einmal."""
     if not body:
         return []
     deps: list[int] = []
+    fence: str | None = None        # aktive Zaunart des Code-Blocks (Backtick oder Tilde), sonst None
     for line in body.splitlines():
+        m_fence = re.match(r"\s*(`{3,}|~{3,})", line)
+        if m_fence:
+            marker = m_fence.group(1)[0]
+            if fence is None:
+                fence = marker
+            elif fence == marker:
+                fence = None
+            continue                # die Zaunzeile selbst ist nie eine Abhängigkeitszeile
+        if fence is not None:
+            continue                # innerhalb des Code-Blocks zählt keine Zeile
         m = re.search(r"Wartet\s+auf\s*:\s*(.+)", line, re.I)
         if m:
             for num_str in re.findall(r"(?:#|/(?:issues|pull)/)(\d+)", m.group(1)):
@@ -593,7 +608,10 @@ def is_dependency_resolved(dep_no: int, cache: dict[int, str] | None = None) -> 
 def unblock_dependent_issues() -> list[int]:
     """Sucht offene Issues mit Label 'blockiert'.
     Sind alle in 'Wartet auf: #X, #Y' genannten Abhängigkeiten geschlossen/gemergt,
-    wird das Issue auf 'bereit' gesetzt (und 'blockiert' entfernt)."""
+    wird das Issue auf 'bereit' gesetzt (und 'blockiert' entfernt).
+
+    Hat ein blockiertes Issue keine erkennbare Abhängigkeit, wird es einmal je Issue gemeldet
+    (Zustandsliste `entblock_gemeldet`) statt still übersprungen (Regel 7)."""
     try:
         blocked = gh_json("issue", "list", "--state", "open", "--label", "blockiert", "--json", "number,title,body")
     except Exception as exc:
@@ -608,6 +626,14 @@ def unblock_dependent_issues() -> list[int]:
         num = issue["number"]
         deps = parse_dependencies(issue.get("body"))
         if not deps:
+            # Regel 7: nicht still scheitern. Ein blockiertes Issue ohne erkennbare Abhängigkeit
+            # bliebe sonst für immer auf `blockiert`; gemeldet wird einmal je Issue.
+            state = load_state()
+            seen = state.setdefault("entblock_gemeldet", [])
+            if num not in seen:
+                log(f"Issue #{num}: blockiert, aber keine Abhängigkeit erkannt (erwartet „Wartet auf: …“).")
+                seen.append(num)
+                save_state(state)
             continue
         all_resolved = all(is_dependency_resolved(d, dep_cache) for d in deps)
         if all_resolved:

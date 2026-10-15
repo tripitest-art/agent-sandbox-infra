@@ -406,6 +406,42 @@ def test_parse_dependencies():
     assert r.parse_dependencies(None) == []
 
 
+def test_parse_dependencies_ignores_code_blocks():
+    """Dieselbe Zeile zählt außerhalb eines Code-Blocks, innerhalb nicht (Regel 1)."""
+    zeile = "Wartet auf: " + ", ".join(f"#{n}" for n in (189, 190))
+    assert r.parse_dependencies(zeile) == [189, 190]
+    assert r.parse_dependencies(f"```\n{zeile}\n```") == []
+    assert r.parse_dependencies(f"```python\n{zeile}\n```") == []
+    assert r.parse_dependencies(f"~~~\n{zeile}\n~~~") == []
+
+
+def test_parse_dependencies_skips_a_multiline_block():
+    """Ein mehrzeiliger Block wird korrekt übersprungen; nur die Zeile danach zählt."""
+    body = "```\nWartet auf: #1\nnoch im Block #2\n```\nWartet auf: #189, #190\n"
+    assert r.parse_dependencies(body) == [189, 190]
+
+
+def test_blockiertes_issue_ohne_zeile_wird_genau_einmal_gemeldet(monkeypatch, capsys):
+    """Ohne erkennbare Zeile wird gemeldet statt still übersprungen (Regel 7) — genau einmal.
+    load_state/save_state ersetzt: der Test schreibt nichts außerhalb von tmp_path."""
+    blocked = [{"number": 8, "title": "T", "body": "### Kontext\n\nkein Hinweis auf eine Abhängigkeit"}]
+    state: dict = {}
+    edits = []
+    monkeypatch.setattr(r, "gh_json", lambda *a, **k: blocked)
+    monkeypatch.setattr(r, "load_state", lambda: state)
+    monkeypatch.setattr(r, "save_state", lambda s: None)
+    monkeypatch.setattr(r, "gh_text", lambda *a, **k: edits.append(a) or "")
+    monkeypatch.setattr(r, "POST", True)
+
+    assert r.unblock_dependent_issues() == []
+    assert "Issue #8: blockiert, aber keine Abhängigkeit erkannt" in capsys.readouterr().out
+    assert state["entblock_gemeldet"] == [8]
+    assert edits == []                       # melden, nicht entblocken
+
+    assert r.unblock_dependent_issues() == []
+    assert capsys.readouterr().out == ""     # zweiter Takt: keine zweite Zeile
+
+
 def test_is_dependency_resolved(monkeypatch):
     states = {100: "CLOSED", 101: "MERGED", 102: "OPEN"}
     monkeypatch.setattr(r, "gh_json", lambda *a, **k: {"state": states.get(int(a[2]), "OPEN")})
