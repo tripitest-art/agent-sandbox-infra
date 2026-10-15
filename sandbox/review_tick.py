@@ -14,7 +14,8 @@ Prüfbar vom Skript, nicht vom Modell: Teststatus (nur aus den Check-Runs), Mode
 und die Regel „andere Modellfamilie“. Lässt sich die Familie des Workers nicht bestimmen (z. B.
 „Worker: siehe Log“) oder passen REVIEW_MODEL, REVIEW_MODEL_BIG und REVIEWER_NAME nicht in eine
 bekannte Familie, gibt es keinen Modellaufruf, sondern eine Zeile „⚠ Stephan:“.
-Rote Pflicht-Checks (tests, acceptance-guard, CodeQL) ergeben ohne Modellaufruf „Änderungen nötig“.
+Rote Pflicht-Checks (Vorgabe dieses Repos: tests, acceptance-guard; je Projekt in der Projektliste
+überschreibbar, sc-digger nennt dort zusätzlich CodeQL) ergeben ohne Modellaufruf „Änderungen nötig“.
 
 Vorgabe (REVIEW_POST=0): nur Entwurf. Er landet in /root/reviews/pr<N>-<sha>.md, eine Zeile im
 Log (/root/worker.log, geht per Webhook ins HA-Dashboard). Mit REVIEW_POST=1 postet das Skript
@@ -80,7 +81,9 @@ BIG_DIFF_CHARS = 90_000     # darüber: REVIEW_MODEL_BIG
 MAX_DIFF_CHARS = 400_000    # darüber: nicht prüfen, an Stephan melden
 MAX_TOKENS = 6000           # Obergrenze der Modellantwort; erreicht sie das, gilt sie als unbrauchbar
 LLM_TIMEOUT = float(os.environ.get("REVIEW_LLM_TIMEOUT", "420"))
-REQUIRED_CHECKS = ("tests", "acceptance-guard", "CodeQL")
+# Pflicht-Checks dieses Repos (tests, acceptance-guard); sc-diggers Vertrag nennt zusätzlich CodeQL
+# und steht in dessen Projektlisteneintrag. use_project() übernimmt die Liste des aktiven Projekts.
+REQUIRED_CHECKS = ("tests", "acceptance-guard")
 
 # Modellfamilien: Worker und Reviewer dürfen nie aus derselben stammen (AGENTS.md). Die Reihenfolge
 # zählt: „Qwen3-Coder“ und „coder-glm“ enthalten „coder“, gehören aber nicht zu DeepSeek. Die
@@ -128,9 +131,11 @@ def safe_snippet(text: str | None, limit: int = 60) -> str:
 
 
 def use_project(p: "projects.Project", first: bool) -> None:
-    """Schaltet auf Projekt `p` um: Repo, Review-Skill, Merge-Erlaubnis, Zustandsdatei, Entwurfsordner."""
-    global REPO, REVIEW_SKILL, PROJECT_AUTO_MERGE, STATE, DRAFT_DIR
+    """Schaltet auf Projekt `p` um: Repo, Review-Skill, Merge-Erlaubnis, Pflicht-Checks,
+    Zustandsdatei, Entwurfsordner."""
+    global REPO, REVIEW_SKILL, PROJECT_AUTO_MERGE, REQUIRED_CHECKS, STATE, DRAFT_DIR
     REPO, REVIEW_SKILL, PROJECT_AUTO_MERGE = p.repo, p.review_skill, p.auto_merge
+    REQUIRED_CHECKS = tuple(p.required_checks)
     if first:
         STATE, DRAFT_DIR = BASE_STATE, BASE_DRAFT_DIR
     else:

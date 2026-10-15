@@ -8,7 +8,8 @@
       "hotspot": "sc_digger/main.py",
       "hotspot_label": "berührt-main.py",
       "review_skill": "skills/sc-digger-review/SKILL.md",
-      "auto_merge": true
+      "auto_merge": true,
+      "required_checks": ["tests", "acceptance-guard", "CodeQL"]
     },
     {
       "name": "agent-sandbox-infra",

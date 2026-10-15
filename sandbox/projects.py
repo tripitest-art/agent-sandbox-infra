@@ -33,6 +33,7 @@ class Project:
     hotspot_label: str = "berührt-main.py"      # Issue-Label, das den Hotspot anzeigt
     review_skill: str | None = None             # Pfad des Review-Skills im Repo, falls vorhanden
     auto_merge: bool = True                     # False: der Review-Takt mergt hier nie, Stephan immer
+    required_checks: tuple[str, ...] = ("tests", "acceptance-guard")   # Pflicht-Checks des Review-Takts
 
 
 def default_projects() -> list[Project]:
@@ -49,7 +50,8 @@ def _parse(entry: object, index: int) -> Project:
     where = f"Projekt {index + 1}"
     if not isinstance(entry, dict):
         raise ProjectConfigError(f"{where}: Objekt erwartet")
-    known = {"name", "repo", "workdir", "test_cmd", "hotspot", "hotspot_label", "review_skill", "auto_merge"}
+    known = {"name", "repo", "workdir", "test_cmd", "hotspot", "hotspot_label", "review_skill",
+             "auto_merge", "required_checks"}
     unknown = set(entry) - known
     if unknown:
         raise ProjectConfigError(f"{where}: unbekannte Schlüssel {', '.join(sorted(unknown))}")
@@ -67,6 +69,14 @@ def _parse(entry: object, index: int) -> Project:
             raise ProjectConfigError(f"{where}: „{key}“ muss Text oder null sein")
     if "auto_merge" in entry and not isinstance(entry["auto_merge"], bool):
         raise ProjectConfigError(f"{where}: „auto_merge“ muss true oder false sein")
+    if "required_checks" in entry:
+        checks = entry["required_checks"]
+        # Ohne Einträge gäbe es überhaupt keine Pflicht-Checks mehr: ein roter Testlauf bliebe
+        # dann folgenlos, weil checks_summary nur Namen aus dieser Liste bewertet.
+        if (not isinstance(checks, list) or not checks
+                or not all(isinstance(c, str) and c for c in checks)):
+            raise ProjectConfigError(f"{where}: „required_checks“ muss eine nicht-leere Liste nicht-leerer Strings sein")
+        entry = {**entry, "required_checks": tuple(checks)}   # Liste aus JSON -> Tupel wie im Feld
     kwargs = {k: v for k, v in entry.items() if k in known and not (k in ("test_cmd", "hotspot_label") and v is None)}
     return Project(**kwargs)
 
