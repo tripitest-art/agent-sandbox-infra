@@ -233,8 +233,12 @@ def test_post_mode_sets_review_commit_status(monkeypatch):
 
     monkeypatch.setattr(r, "gh_text", gh_text)
     r.run_once()
-    assert calls["posted"] == [7]
-    (args, kw), = status
+    # Menge statt Liste: sind in der Umgebung mehrere Projekte eingetragen, läuft run_once je
+    # Projekt; geprüft wird, dass genau PR 7 reviewt wurde, nicht wie oft.
+    assert set(calls["posted"]) == {7}
+    # status[-1]: mit mehreren Projekten gehört der letzte Aufruf zum zuletzt aktiven Projekt
+    # und passt damit zu r.REPO nach dem Lauf.
+    args, kw = status[-1]
     assert args[1] == f"repos/{r.REPO}/statuses/{SHA}" and kw.get("repo") is False
     assert "state=success" in args and "context=review" in args
     assert "description=Review: Freigegeben" in args
