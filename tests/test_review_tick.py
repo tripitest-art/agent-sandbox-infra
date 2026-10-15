@@ -143,6 +143,30 @@ def test_checks_summary_pending_and_red():
     assert r.checks_summary(ctx)[2] == []
 
 
+def _projekt_mit_pflicht_checks(*checks):
+    return r.projects.Project(name="sc-digger", repo="tripitest-art/sc-digger",
+                              workdir="/root/sc-digger", required_checks=tuple(checks))
+
+
+def test_use_project_uebernimmt_die_pflicht_checks(monkeypatch):
+    """Pflicht-Checks kommen aus der Projektliste (Issue #54) statt fest aus dem Code."""
+    monkeypatch.setattr(r, "REQUIRED_CHECKS", r.REQUIRED_CHECKS)   # Modulzustand danach wiederherstellen
+    r.use_project(_projekt_mit_pflicht_checks("tests", "acceptance-guard", "CodeQL"), first=True)
+    assert r.REQUIRED_CHECKS == ("tests", "acceptance-guard", "CodeQL")
+    r.use_project(_projekt_mit_pflicht_checks("tests"), first=True)
+    assert r.REQUIRED_CHECKS == ("tests",)
+
+
+def test_pflicht_check_aus_der_projektliste_macht_rot(monkeypatch):
+    """sc-digger verlangt CodeQL: ein nicht grüner Lauf ist rot; ohne den Eintrag bleibt er folgenlos."""
+    monkeypatch.setattr(r, "REQUIRED_CHECKS", r.REQUIRED_CHECKS)   # Modulzustand danach wiederherstellen
+    nicht_gruen = GOOD_CHECKS[:2] + [dict(GOOD_CHECKS[2], conclusion="NEUTRAL")]
+    r.use_project(_projekt_mit_pflicht_checks("tests", "acceptance-guard", "CodeQL"), first=True)
+    assert r.checks_summary(nicht_gruen)[2] == ["CodeQL"]
+    r.use_project(_projekt_mit_pflicht_checks("tests", "acceptance-guard"), first=True)
+    assert r.checks_summary(nicht_gruen)[2] == []
+
+
 def test_assemble_sets_model_line_and_check_line_itself():
     raw = OK_REVIEW.replace("\n\n### Muss", "\n\nReview nach AGENTS.md → Reviewer. Worker: x, Reviewer: Claude.\n- Checks: alles grün\n\n### Muss", 1)
     out = r.assemble(raw, "DeepSeek", [("tests", "SUCCESS"), ("CodeQL", "FAILURE")], "GLM")

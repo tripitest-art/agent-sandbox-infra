@@ -51,7 +51,15 @@ def test_parse_defaults_and_values():
     a, b = pj.parse_projects(json.dumps(GOOD))
     assert a.test_cmd == "python -m pytest -q" and a.hotspot_label == "berührt-main.py"
     assert b.hotspot is None and b.review_skill is None and b.auto_merge is False
+    assert a.required_checks == ("tests", "acceptance-guard") and b.required_checks == a.required_checks
     assert pj.worktrees_dir(b) == "/root/agent-sandbox-infra-worktrees"
+
+
+def test_required_checks_from_project_list():
+    """Jedes Projekt nennt seine Pflicht-Checks selbst (Issue #54); ohne Angabe gilt die Vorgabe."""
+    a, b = pj.parse_projects(_text(required_checks=["tests", "acceptance-guard", "CodeQL"]))
+    assert b.required_checks == ("tests", "acceptance-guard", "CodeQL")   # JSON-Liste wird zum Tupel
+    assert a.required_checks == ("tests", "acceptance-guard")
 
 
 def test_null_test_cmd_falls_back_to_default():
@@ -63,6 +71,10 @@ def test_null_test_cmd_falls_back_to_default():
     ({"repo": "nur-ein-name"}, "repo"),
     ({"workdir": "relativ/pfad"}, "workdir"),
     ({"auto_merge": "nein"}, "auto_merge"),
+    ({"required_checks": "tests"}, "required_checks"),
+    ({"required_checks": []}, "required_checks"),
+    ({"required_checks": ["tests", ""]}, "required_checks"),
+    ({"required_checks": ["tests", 7]}, "required_checks"),
     ({"test_cmd": ""}, "test_cmd"),
     ({"unbekannt": 1}, "unbekannt"),
     ({"name": "sc-digger"}, "doppelt"),
@@ -89,7 +101,10 @@ def test_broken_file_names_the_path(tmp_path):
 
 def test_example_file_is_valid():
     text = (_SANDBOX / "projects.example.json").read_text(encoding="utf-8")
-    assert [p.name for p in pj.parse_projects(text)] == ["sc-digger", "agent-sandbox-infra"]
+    ps = pj.parse_projects(text)
+    assert [p.name for p in ps] == ["sc-digger", "agent-sandbox-infra"]
+    assert ps[0].required_checks == ("tests", "acceptance-guard", "CodeQL")   # sc-digger verlangt CodeQL
+    assert ps[1].required_checks == ("tests", "acceptance-guard")             # dieses Repo: Vorgabe
 
 
 # ---- Ausgabe ----

@@ -27,7 +27,7 @@ eine **Projektliste**. Das zweite Projekt ist diese Infrastruktur selbst
   {"name": "sc-digger", "repo": "tripitest-art/sc-digger", "workdir": "/root/sc-digger",
    "test_cmd": "python -m pytest -q", "hotspot": "sc_digger/main.py",
    "hotspot_label": "berührt-main.py", "review_skill": "skills/sc-digger-review/SKILL.md",
-   "auto_merge": true},
+   "auto_merge": true, "required_checks": ["tests", "acceptance-guard", "CodeQL"]},
   {"name": "agent-sandbox-infra", "repo": "tripitest-art/agent-sandbox-infra",
    "workdir": "/root/work/agent-sandbox-infra", "auto_merge": false}
 ]}
@@ -43,10 +43,12 @@ eine **Projektliste**. Das zweite Projekt ist diese Infrastruktur selbst
 | `hotspot_label` | nein | Issue-Label für den Hotspot; Vorgabe `berührt-main.py` |
 | `review_skill` | nein | Pfad des Review-Skills im Repo; ohne ihn prüft der Reviewer nur nach `AGENTS.md` |
 | `auto_merge` | nein | `false`: Der Review-Takt mergt hier nie; Vorgabe `true` |
+| `required_checks` | nein | Checks, die den PR rot machen, wenn sie nicht `SUCCESS` sind; Vorgabe `["tests", "acceptance-guard"]`, sc-digger nennt zusätzlich `CodeQL` |
 
 Die Liste wird streng geprüft: unbekannte Schlüssel, doppelte Namen, Repos oder Ordner, ungültige
-Namen und Pfade führen zu `ProjectConfigError`. Die Takte brechen dann mit Fehlermeldung ab, damit kein
-Projekt still wegfällt; `install.sh` bricht ebenso ab.
+Namen und Pfade sowie eine leere oder nicht aus Strings bestehende `required_checks`-Liste führen zu
+`ProjectConfigError`. Die Takte brechen dann mit Fehlermeldung ab, damit kein Projekt still wegfällt;
+`install.sh` bricht ebenso ab.
 
 ## Wie die Takte mehrere Projekte behandeln
 
@@ -59,7 +61,8 @@ Projekt still wegfällt; `install.sh` bricht ebenso ab.
 - **Eigene Worktrees je Projekt:** `<workdir>-worktrees/w<N>`.
 - **Fehlender Klon:** wird einmal im Log gemeldet, das Projekt übersprungen.
 - **Review:** je Takt höchstens ein PR je Projekt. Ein Fehler in einem Projekt blockiert die anderen
-  nicht (Log: `Projekt <name>: Fehler: …`). Regeln und Review-Skill stammen aus dem jeweiligen Repo.
+  nicht (Log: `Projekt <name>: Fehler: …`). Regeln, Review-Skill und Pflicht-Checks stammen aus dem
+  jeweiligen Repo.
 - **`auto_merge: false`:** Auch bei „Merge-Modus automatisch“ im Issue mergt der Takt nicht. Der PR
   geht mit Label `braucht-stephan` und Kommentar an Stephan.
 - **Test-Befehl und Hotspot** stehen im Auftrag an den Worker bzw. steuern die Konfliktprüfung des
@@ -117,8 +120,9 @@ Die Skripte steuern die Agenten, die sie ändern. Deshalb gilt (siehe `AGENTS.md
 ## Bekannte Grenzen und Entscheidungen
 
 - Feste Priorität statt Rotation: ein dauerhaft volles erstes Projekt hungert die weiteren aus.
-- Der Review-Takt meldet rote Checks nur für `tests`, `acceptance-guard` und `CodeQL`; er wartet, bis
-  alle vorhandenen Checks fertig sind, und verlangt mindestens einen. Ein Projekt ohne `CodeQL` stört nicht.
+- Der Review-Takt meldet rote Checks nur für die `required_checks` des Projekts (Vorgabe `tests` und
+  `acceptance-guard`, in sc-digger zusätzlich `CodeQL`); er wartet, bis alle vorhandenen Checks fertig
+  sind, und verlangt mindestens einen. Ein Projekt ohne `CodeQL` stört nicht.
 - `main-schutz` im Infra-Repo kommt ohne CodeQL aus (dort nicht eingerichtet). In sc-digger ist CodeQL
   Pflicht.
 - Das Ruleset lässt sich von den Agenten nicht per API anlegen (Schreibzugriff darauf ist gesperrt);
