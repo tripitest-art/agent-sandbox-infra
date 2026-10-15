@@ -524,6 +524,78 @@ def test_tasks_embed_template(monkeypatch):
     assert "Ein Kästchen [x] nur, wenn es stimmt" in task
 
 
+# --- PR-Vorlage aus origin/main statt aus dem Arbeitsbaum (#37) ---
+
+def _ohne_vorlagen_cache(monkeypatch):
+    """Zwischenspeicher leeren, damit jeder Test bei null anfängt."""
+    monkeypatch.setattr(w, "_TEMPLATE_CACHE", None)
+
+
+def test_pr_template_liest_aus_origin_main(monkeypatch):
+    _ohne_vorlagen_cache(monkeypatch)
+    monkeypatch.setattr(w, "WORKDIR", "/work/w0")
+    monkeypatch.setattr(w, "BASE_WORKDIR", "/work/base")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return w.subprocess.CompletedProcess(cmd, 0, stdout="AUS ORIGIN/MAIN\n", stderr="")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    # Im Arbeitsbaum liegt eine abweichende (veraltete) Datei; sie darf nicht gewinnen.
+    monkeypatch.setattr(w, "open", lambda *a, **kw: io.StringIO("VERALTET\n"), raising=False)
+    assert w.pr_template() == "AUS ORIGIN/MAIN\n"
+    assert calls[0][:3] == ["git", "-C", "/work/w0"]
+    assert f"origin/main:{w.PR_TEMPLATE}" in calls[0]
+
+
+def test_pr_template_faellt_auf_arbeitsbaum_zurueck(monkeypatch, capsys):
+    _ohne_vorlagen_cache(monkeypatch)
+    monkeypatch.setattr(w, "WORKDIR", "/work/w0")
+    monkeypatch.setattr(w, "BASE_WORKDIR", "/work/base")
+
+    def boom(cmd, **kw):
+        raise w.subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(w.subprocess, "run", boom)
+    monkeypatch.setattr(w, "open", lambda *a, **kw: io.StringIO("AUS DEM ARBEITSBAUM\n"), raising=False)
+    assert w.pr_template() == "AUS DEM ARBEITSBAUM\n"
+    out = capsys.readouterr().out
+    assert "WARNUNG" in out and "/work/w0" in out
+
+
+def test_pr_template_meldet_wenn_nichts_geht(monkeypatch, capsys):
+    _ohne_vorlagen_cache(monkeypatch)
+    monkeypatch.setattr(w, "WORKDIR", "/work/w0")
+    monkeypatch.setattr(w, "BASE_WORKDIR", "/work/base")
+
+    def boom_run(cmd, **kw):
+        raise w.subprocess.CalledProcessError(1, cmd)
+
+    def boom_open(*a, **kw):
+        raise OSError("keine Vorlage")
+
+    monkeypatch.setattr(w.subprocess, "run", boom_run)
+    monkeypatch.setattr(w, "open", boom_open, raising=False)
+    assert w.pr_template() == ""
+    assert "WARNUNG" in capsys.readouterr().out
+
+
+def test_pr_template_holt_nur_einmal(monkeypatch):
+    _ohne_vorlagen_cache(monkeypatch)
+    monkeypatch.setattr(w, "WORKDIR", "/work/w0")
+    monkeypatch.setattr(w, "BASE_WORKDIR", "/work/base")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return w.subprocess.CompletedProcess(cmd, 0, stdout="AUS ORIGIN/MAIN\n", stderr="")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    assert w.pr_template() == w.pr_template() == "AUS ORIGIN/MAIN\n"
+    assert len(calls) == 1
+
+
 # --- Agent: Qwen Code oder OpenCode ---
 
 def test_agent_cmd(monkeypatch):

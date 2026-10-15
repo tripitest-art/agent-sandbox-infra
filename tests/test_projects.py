@@ -184,6 +184,7 @@ def test_worker_prompt_uses_project_test_command(w, monkeypatch):
         return None
 
     monkeypatch.setattr(w, "gh", fake_gh)
+    monkeypatch.setattr(w, "pr_template", lambda: "")   # Vorlage kommt nicht vom Rechner
     _, task, _, _ = w.issue_job()
     assert "`make test`" in task and "python -m pytest -q" not in task
 
