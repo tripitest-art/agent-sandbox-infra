@@ -220,6 +220,45 @@ def test_post_mode_posts_comment_review(monkeypatch):
     assert calls["posted"] == [7]
 
 
+def test_post_mode_sets_review_commit_status(monkeypatch):
+    """Mit REVIEW_POST=1 setzt der Takt nach dem Review den Status `review` auf den geprüften Commit."""
+    monkeypatch.setattr(r, "POST", True)
+    calls = _fake_github(monkeypatch, [_pr()])
+    status = []
+
+    def gh_text(*args, **kw):
+        if args[:1] == ("api",):
+            status.append((args, kw))
+        return "diff --git a/a.py b/a.py\n+x\n"
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    r.run_once()
+    # Menge statt Liste: sind in der Umgebung mehrere Projekte eingetragen, läuft run_once je
+    # Projekt; geprüft wird, dass genau PR 7 reviewt wurde, nicht wie oft.
+    assert set(calls["posted"]) == {7}
+    # status[-1]: mit mehreren Projekten gehört der letzte Aufruf zum zuletzt aktiven Projekt
+    # und passt damit zu r.REPO nach dem Lauf.
+    args, kw = status[-1]
+    assert args[1] == f"repos/{r.REPO}/statuses/{SHA}" and kw.get("repo") is False
+    assert "state=success" in args and "context=review" in args
+    assert "description=Review: Freigegeben" in args
+
+
+def test_dry_run_sets_no_review_commit_status(monkeypatch):
+    """Ohne REVIEW_POST=1 bleibt der Status aus; der Takt schreibt nur den Entwurf."""
+    calls = _fake_github(monkeypatch, [_pr()])
+    status = []
+
+    def gh_text(*args, **kw):
+        if args[:1] == ("api",):
+            status.append((args, kw))
+        return "diff --git a/a.py b/a.py\n+x\n"
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    r.run_once()
+    assert status == [] and "posted" not in calls
+
+
 def test_red_check_needs_no_model_and_counts_a_round(monkeypatch, tmp_path):
     red = [dict(GOOD_CHECKS[0], conclusion="FAILURE")] + GOOD_CHECKS[1:]
     calls = _fake_github(monkeypatch, [_pr(statusCheckRollup=red)])
