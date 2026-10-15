@@ -102,3 +102,17 @@ def load_projects(path: str | None = None, env: dict | None = None) -> list[Proj
         return parse_projects(text)
     except ProjectConfigError as exc:
         raise ProjectConfigError(f"{path}: {exc}") from exc
+
+
+def format_projects(items: list[Project]) -> str:
+    """Eine Zeile je Projekt in Listenreihenfolge, verbunden mit einem Zeilenumbruch (kein Zeilenende am Schluss).
+
+    Format: "<name> (<repo>): Merge <automatisch|manuell>, <Hotspot <hotspot>|kein Hotspot>".
+    Eine leere Liste ergibt einen leeren String.
+    """
+    lines = []
+    for p in items:
+        merge = "automatisch" if p.auto_merge else "manuell"
+        hotspot = f"Hotspot {p.hotspot}" if p.hotspot else "kein Hotspot"
+        lines.append(f"{p.name} ({p.repo}): Merge {merge}, {hotspot}")
+    return "\n".join(lines)
