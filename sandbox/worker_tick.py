@@ -262,14 +262,44 @@ def gh(*args: str):
         return text
 
 
+_TEMPLATE_CACHE: str | None = None      # Modulglobal; None = noch nicht geholt
+
+
 def pr_template() -> str:
+    """PR-Vorlage aus `origin/main`; einmal je Lauf geholt (Zwischenspeicher `_TEMPLATE_CACHE`).
+
+    Beim Auswählen der Arbeit ist der Arbeitsbaum noch nicht aufgeräumt — `prepare_workdir()`
+    läuft erst später in `main()`. Aus dem schmutzigen Baum ginge die Vorlage veraltet oder von
+    einem abgebrochenen Lauf verändert als verbindliche „Regeln“ in den Auftrag ein (#37).
+    Rückfall ist dieselbe Datei aus dem Arbeitsbaum, sonst "" — beides mit einer Warnung im Log
+    statt eines stillen leeren Strings."""
+    global _TEMPLATE_CACHE
+    if _TEMPLATE_CACHE is not None:
+        return _TEMPLATE_CACHE
     for base in (WORKDIR, BASE_WORKDIR):
         try:
-            with open(os.path.join(base, PR_TEMPLATE), encoding="utf-8") as fh:
-                return fh.read()
+            out = subprocess.run(["git", "-C", base, "show", f"origin/main:{PR_TEMPLATE}"],
+                                 capture_output=True, text=True, check=True, env=ENV)
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if out.stdout.strip():
+            _TEMPLATE_CACHE = out.stdout
+            return _TEMPLATE_CACHE
+    for base in (WORKDIR, BASE_WORKDIR):
+        path = os.path.join(base, PR_TEMPLATE)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
         except OSError:
-            pass
-    return ""
+            continue
+        if text.strip():
+            log(f"WARNUNG PR-Vorlage nicht aus origin/main, sondern aus dem Arbeitsbaum: {path}")
+            _TEMPLATE_CACHE = text
+            return _TEMPLATE_CACHE
+    log("WARNUNG PR-Vorlage weder aus origin/main noch aus dem Arbeitsbaum lesbar; "
+        "der Auftrag geht ohne Vorlage raus.")
+    _TEMPLATE_CACHE = ""
+    return _TEMPLATE_CACHE
 
 
 def pr_text_problems(body: str | None, issue_no: int) -> list[str]:
