@@ -267,11 +267,15 @@ def pending_draft(pr: dict) -> str | None:
 
 def pick_pr(prs: list[dict], state: dict, labels_of) -> dict | None:
     """Ältester offener Worker-PR ohne Review für den aktuellen Commit. `labels_of(issue_no)` -> Labelnamen.
-    Mit REVIEW_POST=1 zählen auch schon geprüfte PRs, deren Entwurf noch nicht gepostet ist."""
+    Mit REVIEW_POST=1 zählen auch schon geprüfte PRs, deren Entwurf noch nicht gepostet ist.
+    Draft-PRs werden übersprungen: Laut AGENTS.md (Worker 6) ist das genau der PR, bei dem der
+    Worker aufgegeben hat; GitHub lehnt den Merge ab, ein Review wäre also vergebens."""
     for pr in sorted(prs, key=lambda p: p["number"]):
         m = re.match(r"feature/issue-(\d+)", pr["headRefName"])
         if not m or pr.get("isCrossRepository") or not pr.get("commits"):
             continue   # Fork-PRs nie: Branch-Name und Inhalt bestimmt dort ein Fremder
+        if pr.get("isDraft"):
+            continue   # fehlt das Feld, gilt der PR als nicht-Draft
         key = f"pr{pr['number']}@{pr['headRefOid']}"
         unposted = POST and key not in state.get("gepostet", []) and pending_draft(pr)
         if key in state.get("erledigt", []) and not unposted:
@@ -406,10 +410,12 @@ def is_auto_merge(issue_body: str | None) -> bool:
     return False
 
 
-def merge_pr(number: int) -> bool:
-    """Führt `gh pr merge <number> --squash` aus."""
+def merge_pr(number: int, sha: str) -> bool:
+    """Führt `gh pr merge <number> --squash --match-head-commit <sha>` aus.
+    Der geprüfte Commit wird mitgegeben, damit ein Push zwischen Liste und Merge den Merge
+    unmöglich macht statt ihn ungeprüft durchzulassen."""
     try:
-        gh_text("pr", "merge", str(number), "--squash")
+        gh_text("pr", "merge", str(number), "--squash", "--match-head-commit", sha)
         log(f"PR #{number}: erfolgreich gemergt (--squash).")
         return True
     except subprocess.CalledProcessError as exc:
@@ -448,7 +454,7 @@ def to_stephan(n: int, key: str, reason: str, state: dict) -> None:
 
 def merge_or_queue(n: int, sha: str, state: dict) -> bool:
     """Mergen; scheitert es, für die nächsten Takte vormerken (retry_merges)."""
-    if merge_pr(n):
+    if merge_pr(n, sha):
         state.get("merge_offen", {}).pop(str(n), None)
         return True
     state.setdefault("merge_offen", {}).setdefault(str(n), {"sha": sha, "versuche": 0})
@@ -467,7 +473,7 @@ def retry_merges(state: dict) -> None:
         if pr.get("state") != "OPEN" or pr.get("headRefOid") != info["sha"]:
             offen.pop(n_str)   # gemergt, geschlossen oder neuer Commit (braucht ein neues Review)
             continue
-        if pr.get("mergeStateStatus") in ("CLEAN", "HAS_HOOKS", "UNSTABLE") and merge_pr(n):
+        if pr.get("mergeStateStatus") in ("CLEAN", "HAS_HOOKS", "UNSTABLE") and merge_pr(n, info["sha"]):
             offen.pop(n_str)
             continue
         info["versuche"] = info.get("versuche", 0) + 1
@@ -555,7 +561,7 @@ def unblock_dependent_issues() -> list[int]:
 def _run_pr_review() -> int:
     state = load_state()
     prs = gh_json("pr", "list", "--state", "open", "--json",
-                  "number,title,body,headRefName,headRefOid,isCrossRepository,reviews,commits,statusCheckRollup")
+                  "number,title,body,headRefName,headRefOid,isCrossRepository,isDraft,reviews,commits,statusCheckRollup")
     cache: dict[int, list[str]] = {}
 
     def labels_of(n: int) -> list[str]:

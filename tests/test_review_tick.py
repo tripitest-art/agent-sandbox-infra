@@ -644,6 +644,31 @@ def test_merge_retry_drops_pr_with_new_commit(monkeypatch, tmp_path):
     assert json.loads((tmp_path / "state.json").read_text())["merge_offen"] == {}
 
 
+def test_merge_or_queue_queues_when_head_commit_changed(monkeypatch):
+    """Ist der Kopf nicht mehr der geprüfte Commit, lehnt GitHub den Merge ab: merge_or_queue
+    merkt den geprüften Commit vor, statt den neuen Stand ungeprüft zu mergen."""
+    seen = []
+
+    def gh_text(*args, **kw):
+        seen.append(list(args))
+        raise r.subprocess.CalledProcessError(1, "gh", stderr="head commit has changed")
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    state = {}
+    assert r.merge_or_queue(7, SHA, state) is False
+    assert seen == [["pr", "merge", "7", "--squash", "--match-head-commit", SHA]]
+    assert state["merge_offen"] == {"7": {"sha": SHA, "versuche": 0}}
+
+
+def test_pick_pr_skips_a_lone_draft_pr_and_tolerates_missing_flag():
+    """Draft-PRs bekommen kein Review, auch wenn sie die einzigen Kandidaten sind; fehlt `isDraft`
+    im Eintrag, gilt der PR wie bisher als nicht-Draft."""
+    labels = {6: ["agent-qwen"], 8: ["agent-qwen"]}
+    assert r.pick_pr([_pr(8, headRefName="feature/issue-8", isDraft=True)], {}, lambda n: labels[n]) is None
+    got = r.pick_pr([_pr(6, headRefName="feature/issue-6")], {}, lambda n: labels[n])
+    assert got and got["number"] == 6
+
+
 def test_manual_mode_flags_stephan_once(monkeypatch, tmp_path):
     monkeypatch.setattr(r, "POST", True)
     calls = _github_with_merge(monkeypatch, merge_mode="manuell durch Stephan (Betrieb)")
