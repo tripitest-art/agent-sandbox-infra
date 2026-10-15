@@ -124,6 +124,31 @@ def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}{prefix} {msg}", flush=True)
 
 
+def alarm(skey: str, error: BaseException | str) -> None:
+    """Eine Logzeile „⚠ Stephan: <skey>: <Klasse>: <Kurzbeschreibung>“ (Regel 7, HA-Automation).
+
+    - Genau eine Zeile. Zeilenumbrüche in der Beschreibung werden zu Leerzeichen.
+    - `<Klasse>` ist `type(error).__name__` bei einer Ausnahme, sonst "Fehler".
+    - Der Text nach dem Zeitstempel ist höchstens 300 Zeichen lang; Längeres wird mit „…“
+      abgeschnitten (der Zeitstempel kommt von `log()` davor, die Gesamtzeile bleibt <= 320).
+    - `skey` ist der Zustandsschlüssel der laufenden Arbeit ("issue5",
+      "pr103 @<sha>", "text7 @<sha>") oder "-", wenn der Fehler vor der Auftragswahl auftritt.
+    - Übergeben wird nie eine rohe stderr-/Kommandoausgabe und nie ein Umgebungswert;
+      die Kurzbeschreibung ist ein fester Text oder höchstens die erste Zeile der
+      Exception-Meldung (Regel 5)."""
+    if isinstance(error, BaseException):
+        klass, detail = type(error).__name__, str(error)
+    else:
+        klass, detail = "Fehler", str(error)
+    detail = " ".join(detail.split())          # Regel 7: daraus darf keine zweite Zeile werden
+    prefix = f" [{SLOT_TAG}]" if SLOT_TAG else ""
+    msg = f"⚠ Stephan: {skey}: {klass}: {detail}"
+    limit = 300 - len(prefix) - 1              # Zeitstempel (19) + Vorsatz + Meldung <= 320
+    if len(msg) > limit:
+        msg = msg[:limit - 1] + "…"
+    log(msg)
+
+
 def normalize_slot(slot: str | None) -> str:
     """Slot-Name auf seine Ziffernfolge bringen; Vorgabe ist WORKER_SLOT oder „1“."""
     m = re.search(r"\d+", str(slot if slot is not None else WORKER_SLOT))
@@ -955,113 +980,118 @@ def prepare_workdir() -> None:
 
 
 def main() -> int:
-    state = load_state()
-    if BACKEND != "litellm" and WORKER_SLOT and WORKER_SLOT not in ("1", "w1", ""):
-        log_on_change(state, LAST_PC, "ollama_single_slot",
-                      f"Slot {WORKER_SLOT} inaktiv: Lokales Ollama-Backend erlaubt nur 1 Worker.")
-        return 0
-    status = None
-    if BACKEND == "litellm":
-        reason = litellm_ready()
-        if reason:
-            log_on_change(state, LAST_PC, reason, f"{reason}, warte.")
+    skey = "-"          # Regel 7: vor der Auftragswahl meldet der Takt „-“
+    try:
+        state = load_state()
+        if BACKEND != "litellm" and WORKER_SLOT and WORKER_SLOT not in ("1", "w1", ""):
+            log_on_change(state, LAST_PC, "ollama_single_slot",
+                          f"Slot {WORKER_SLOT} inaktiv: Lokales Ollama-Backend erlaubt nur 1 Worker.")
             return 0
-        if log_on_change(state, LAST_PC, "litellm", f"LiteLLM erreichbar ({LITELLM_MODEL}): suche Arbeit."):
-            state.pop(LAST_WORK, None)
-    elif not WAKE_PC:
-        # Zuerst der PC, dann GitHub: Ist er aus, kostet der Takt nur eine lokale Anfrage.
-        status = pc_status()
-        reason = pc_ready(status)
-        if reason:
-            log_on_change(state, LAST_PC, reason, f"{reason}, warte.")
-            return 0
-        if log_on_change(state, LAST_PC, "bereit", "Gaming-PC an, Chat aktiv: suche Arbeit."):
-            state.pop(LAST_WORK, None)   # Ergebnis der ersten Suche wieder zeigen
-    job = pick_job(state)
-    if not job:
-        log_on_change(state, LAST_WORK, "keine", "Keine Arbeit.")
-        parked = parked_job(state)
-        slot_status("idle", project=PROJECT,
-                    message=f"{parked}: wartet auf Stephan" if parked else "Warte auf nächsten Takt")
-        return 0
-    key, task, pr_no, before = job
-    skey = PREFIX + key          # im Zustand und im Log mit Projektvorsatz (beim ersten Projekt leer)
-    if BACKEND != "litellm" and not ollama_free(
-            status, say=lambda m: log_on_change(state, LAST_WORK, f"{skey} belegt", m)):
-        return 0
-    if BACKEND == "litellm":
-        # Erst hier prüfen: ohne Arbeit kostet der Takt keine Anfrage. Vor dem Zähler, damit ein
-        # gestörter Anbieter keine Versuche verbraucht.
-        model, failed = choose_model()
-        if model is None:
-            log_on_change(state, LAST_WORK, f"{skey} kein Modell",
-                          f"{skey}: kein Modell antwortet ({'; '.join(failed)}), warte. Versuch zählt nicht.")
-            return 0
-        if failed:
-            log(f"{'; '.join(failed)} – weiche auf {model} aus.")
-        if model != ACTIVE_MODEL:
-            use_model(model)
-            # Die Aufträge enthalten „Worker: …“; mit dem neuen Namen neu bauen.
-            job = find_job(state)   # Projekt steht schon fest; nicht noch einmal durch die Liste
-            if not job:
+        status = None
+        if BACKEND == "litellm":
+            reason = litellm_ready()
+            if reason:
+                log_on_change(state, LAST_PC, reason, f"{reason}, warte.")
                 return 0
-            key, task, pr_no, before = job
-            skey = PREFIX + key
-    state[LAST_WORK] = skey
+            if log_on_change(state, LAST_PC, "litellm", f"LiteLLM erreichbar ({LITELLM_MODEL}): suche Arbeit."):
+                state.pop(LAST_WORK, None)
+        elif not WAKE_PC:
+            # Zuerst der PC, dann GitHub: Ist er aus, kostet der Takt nur eine lokale Anfrage.
+            status = pc_status()
+            reason = pc_ready(status)
+            if reason:
+                log_on_change(state, LAST_PC, reason, f"{reason}, warte.")
+                return 0
+            if log_on_change(state, LAST_PC, "bereit", "Gaming-PC an, Chat aktiv: suche Arbeit."):
+                state.pop(LAST_WORK, None)   # Ergebnis der ersten Suche wieder zeigen
+        job = pick_job(state)
+        if not job:
+            log_on_change(state, LAST_WORK, "keine", "Keine Arbeit.")
+            parked = parked_job(state)
+            slot_status("idle", project=PROJECT,
+                        message=f"{parked}: wartet auf Stephan" if parked else "Warte auf nächsten Takt")
+            return 0
+        key, task, pr_no, before = job
+        skey = PREFIX + key          # im Zustand und im Log mit Projektvorsatz (beim ersten Projekt leer)
+        if BACKEND != "litellm" and not ollama_free(
+                status, say=lambda m: log_on_change(state, LAST_WORK, f"{skey} belegt", m)):
+            return 0
+        if BACKEND == "litellm":
+            # Erst hier prüfen: ohne Arbeit kostet der Takt keine Anfrage. Vor dem Zähler, damit ein
+            # gestörter Anbieter keine Versuche verbraucht.
+            model, failed = choose_model()
+            if model is None:
+                log_on_change(state, LAST_WORK, f"{skey} kein Modell",
+                              f"{skey}: kein Modell antwortet ({'; '.join(failed)}), warte. Versuch zählt nicht.")
+                return 0
+            if failed:
+                log(f"{'; '.join(failed)} – weiche auf {model} aus.")
+            if model != ACTIVE_MODEL:
+                use_model(model)
+                # Die Aufträge enthalten „Worker: …“; mit dem neuen Namen neu bauen.
+                job = find_job(state)   # Projekt steht schon fest; nicht noch einmal durch die Liste
+                if not job:
+                    return 0
+                key, task, pr_no, before = job
+                skey = PREFIX + key
+        state[LAST_WORK] = skey
 
-    state[skey] = state.get(skey, 0) + 1
-    save_state(state)
-    # Jeder Lauf startet auf sauberem main; Reste eines abgebrochenen Laufs stören sonst.
-    prepare_workdir()
+        state[skey] = state.get(skey, 0) + 1
+        save_state(state)
+        # Jeder Lauf startet auf sauberem main; Reste eines abgebrochenen Laufs stören sonst.
+        prepare_workdir()
 
-    prompt = (f"{task}\n\n"
-              "WICHTIGE REGELN FÜR DIESEN LAUF:\n"
-              "1. BRANCHE-CHECK: Verifiziere mit `git branch`, ob du auf dem Ziel-Branch bist, bevor du etwas änderst.\n"
-              "2. PRÄZISE ÄNDERUNGEN: Überschreibe niemals ganze Dateien! Nutze kleine Python-Skripte (z.B. mit `open()`, `.replace()`) oder `sed`, um nur die betroffenen Zeilen auszutauschen.\n"
-              f"3. TEST-PFLICHT: Führe vor jedem Push zwingend `{TEST_CMD}` aus. Ein roter Test heißt: Code weiter korrigieren.\n"
-              "4. ESKALATION: Arbeite ohne Rückfragen. Kommst du nicht weiter, schreibe das Problem als Kommentar ins Issue bzw. den PR und beende deine Arbeit.\n\n"
-              "Nutze gh für alle GitHub-Schritte.")
-    name = "OpenCode" if AGENT == "opencode" else "Qwen Code"
-    if BACKEND == "litellm":
-        name += f" mit {ACTIVE_MODEL}"
-    log(f"{skey} (Versuch {state[skey]}): starte {name}.")
-    # Slot-Telemetrie (#14): running vor dem Lauf, idle danach. Der Lebenszyklus ist so in HA
-    # sichtbar; write_slot_status bricht den Takt nie ab (slot_status fängt OSError).
-    info: dict[str, object] = {"model": ACTIVE_MODEL, "agent": AGENT, "project": PROJECT,
-                               "started_at": time.strftime("%H:%M:%S"), "pid": os.getpid()}
-    issue_match = re.match(r"issue(\d+)", key)
-    if issue_match:
-        info["issue"] = int(issue_match.group(1))
-        info["branch"] = issue_branch(int(issue_match.group(1)))
-    if pr_no is not None:
-        info["pr"] = pr_no
-    slot_status("running", **info)
-    rc = run_agent(prompt)
-    if rc == 124:
-        log(f"{skey}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
-    else:
-        log(f"{skey}: {name} beendet (Exit {rc}).")
-    slot_status("idle", message="Takt beendet", project=PROJECT)
-    # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
-    if key.startswith("issue"):
-        check_issue_result(key)
-    if pr_no is not None:
-        view = gh("pr", "view", str(pr_no), "--json", "headRefOid,headRefName,title,body")
-        after = pr_snapshot(view)
-        m = re.match(r"feature/issue-(\d+)", view.get("headRefName", ""))
-        if m:
-            warn_text(skey, pr_no, view.get("body"), int(m.group(1)))
-        if after != before:
-            if after[0] != before[0]:
-                log(f"{skey}: neuer Commit {after[0][:7]} auf PR #{pr_no}.")
-            else:
-                log(f"{skey}: PR-Text von #{pr_no} geändert, kein neuer Commit.")
-            state.setdefault(DONE, []).append(skey)
-            save_state(state)
+        prompt = (f"{task}\n\n"
+                  "WICHTIGE REGELN FÜR DIESEN LAUF:\n"
+                  "1. BRANCHE-CHECK: Verifiziere mit `git branch`, ob du auf dem Ziel-Branch bist, bevor du etwas änderst.\n"
+                  "2. PRÄZISE ÄNDERUNGEN: Überschreibe niemals ganze Dateien! Nutze kleine Python-Skripte (z.B. mit `open()`, `.replace()`) oder `sed`, um nur die betroffenen Zeilen auszutauschen.\n"
+                  f"3. TEST-PFLICHT: Führe vor jedem Push zwingend `{TEST_CMD}` aus. Ein roter Test heißt: Code weiter korrigieren.\n"
+                  "4. ESKALATION: Arbeite ohne Rückfragen. Kommst du nicht weiter, schreibe das Problem als Kommentar ins Issue bzw. den PR und beende deine Arbeit.\n\n"
+                  "Nutze gh für alle GitHub-Schritte.")
+        name = "OpenCode" if AGENT == "opencode" else "Qwen Code"
+        if BACKEND == "litellm":
+            name += f" mit {ACTIVE_MODEL}"
+        log(f"{skey} (Versuch {state[skey]}): starte {name}.")
+        # Slot-Telemetrie (#14): running vor dem Lauf, idle danach. Der Lebenszyklus ist so in HA
+        # sichtbar; write_slot_status bricht den Takt nie ab (slot_status fängt OSError).
+        info: dict[str, object] = {"model": ACTIVE_MODEL, "agent": AGENT, "project": PROJECT,
+                                   "started_at": time.strftime("%H:%M:%S"), "pid": os.getpid()}
+        issue_match = re.match(r"issue(\d+)", key)
+        if issue_match:
+            info["issue"] = int(issue_match.group(1))
+            info["branch"] = issue_branch(int(issue_match.group(1)))
+        if pr_no is not None:
+            info["pr"] = pr_no
+        slot_status("running", **info)
+        rc = run_agent(prompt)
+        if rc == 124:
+            log(f"{skey}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
         else:
-            log(f"WARNUNG {skey}: weder Commit noch PR-Text auf PR #{pr_no} geändert, "
-                "Nacharbeit nicht erledigt.")
-    return 0
+            log(f"{skey}: {name} beendet (Exit {rc}).")
+        slot_status("idle", message="Takt beendet", project=PROJECT)
+        # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
+        if key.startswith("issue"):
+            check_issue_result(key)
+        if pr_no is not None:
+            view = gh("pr", "view", str(pr_no), "--json", "headRefOid,headRefName,title,body")
+            after = pr_snapshot(view)
+            m = re.match(r"feature/issue-(\d+)", view.get("headRefName", ""))
+            if m:
+                warn_text(skey, pr_no, view.get("body"), int(m.group(1)))
+            if after != before:
+                if after[0] != before[0]:
+                    log(f"{skey}: neuer Commit {after[0][:7]} auf PR #{pr_no}.")
+                else:
+                    log(f"{skey}: PR-Text von #{pr_no} geändert, kein neuer Commit.")
+                state.setdefault(DONE, []).append(skey)
+                save_state(state)
+            else:
+                log(f"WARNUNG {skey}: weder Commit noch PR-Text auf PR #{pr_no} geändert, "
+                    "Nacharbeit nicht erledigt.")
+        return 0
+    except Exception as exc:   # der Timer darf nie mit Traceback enden (Regel 7)
+        alarm(skey, exc)
+        return 0
 
 
 if __name__ == "__main__":

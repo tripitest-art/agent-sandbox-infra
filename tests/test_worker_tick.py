@@ -1129,3 +1129,60 @@ def test_claim_issue_logs_the_stderr_reason_when_gh_fails(monkeypatch):
     assert w.claim_issue(22) is False
     assert any("Claiming von Issue #22 fehlgeschlagen" in l and "HTTP 403: Resource not accessible" in l for l in lines)
     assert not any("mehr" in l for l in lines)   # nur die erste Zeile
+
+
+def test_alarm_hat_feste_form_und_klasse(capsys):
+    """Regel 7: genau eine Zeile „⚠ Stephan: <skey>: <Klasse>: <Text>“."""
+    w.alarm("pr103 @abc", ValueError("kaputt"))
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    assert lines[0].endswith("⚠ Stephan: pr103 @abc: ValueError: kaputt")
+
+    w.alarm("-", "Zustandsdatei fehlt")          # keine Ausnahme: Klasse "Fehler"
+    assert capsys.readouterr().out.strip().endswith("⚠ Stephan: -: Fehler: Zustandsdatei fehlt")
+
+
+def test_alarm_kuerzt_lange_mehrzeilige_meldung(capsys):
+    """Eine lange, mehrzeilige Meldung bleibt eine Zeile und passt in das HA-Log."""
+    w.alarm("issue7", RuntimeError("Anfang\nzweite Zeile " + "x" * 500))
+    out = capsys.readouterr().out
+    line = out.strip()
+    assert out.count("⚠ Stephan:") == 1
+    assert "\n" not in line
+    assert len(line) <= 320
+    assert line.endswith("…")
+
+
+def test_main_meldet_absturz_der_auftragsausfuehrung(monkeypatch, capsys):
+    """Regel 7: der Absturz mitten im Auftrag wird mit dem Schlüssel der Arbeit gemeldet."""
+    def boom():
+        raise RuntimeError("Arbeitsverzeichnis kaputt")
+
+    monkeypatch.setattr(w, "PREFIX", "")          # Schlüssel ohne Projektvorsatz (wie in CI)
+    monkeypatch.setattr(w, "load_state", lambda: {})
+    monkeypatch.setattr(w, "save_state", lambda state: None)
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "prepare_workdir", boom)
+
+    assert w.main() == 0
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: issue7: RuntimeError: Arbeitsverzeichnis kaputt" in out
+    assert "Traceback" not in out
+
+
+def test_main_meldet_fehler_vor_der_auftragswahl(monkeypatch, capsys):
+    """Regel 7: schon ein kaputter Zustand wird gemeldet – Schlüssel „-“, Rückgabe 0."""
+    def boom():
+        raise OSError("Zustandsdatei nicht lesbar")
+
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "load_state", boom)
+
+    assert w.main() == 0
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: -: OSError: Zustandsdatei nicht lesbar" in out
+    assert "Traceback" not in out
