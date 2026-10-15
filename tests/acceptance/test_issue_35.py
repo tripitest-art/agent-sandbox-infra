@@ -32,25 +32,28 @@ def _fake_popen(seen, lines=()):
     return popen
 
 
-def test_agent_env_laesst_geheimnisse_weg():
+def test_agent_env_laesst_geheimnisse_weg():   # bis auf den Modellschlüssel
     agent_env = getattr(w, "agent_env", None)
     assert agent_env is not None, "worker_tick.agent_env fehlt"
     env = agent_env({"PATH": "/usr/bin", "HOME": "/root", "LITELLM_API_KEY": SECRET,
                      "LITELLM_REVIEW_KEY": SECRET, "GITHUB_TOKEN": SECRET})
     assert env.get("PATH") == "/usr/bin" and env.get("HOME") == "/root"
-    assert "LITELLM_API_KEY" not in env and "GITHUB_TOKEN" not in env
-    assert SECRET not in " ".join(env.values())
+    # Der Modellschlüssel muss durch: qwen/opencode lesen ihn aus LITELLM_API_KEY (Korrektur zu #35).
+    assert env.get("LITELLM_API_KEY") == SECRET
+    assert "LITELLM_REVIEW_KEY" not in env and "GITHUB_TOKEN" not in env
 
 
-def test_run_agent_gibt_keine_geheimnisse_mit(monkeypatch):
+def test_run_agent_gibt_nur_den_modellschluessel_mit(monkeypatch):
     seen = {}
     monkeypatch.setenv("LITELLM_API_KEY", SECRET)      # so steht der Schlüssel auf dem Server
     monkeypatch.setitem(w.ENV, "LITELLM_API_KEY", SECRET)
+    monkeypatch.setitem(w.ENV, "GITHUB_TOKEN", SECRET)
+    monkeypatch.setitem(w.ENV, "HA_STATUS_URL", SECRET)
     monkeypatch.setattr(w.subprocess, "Popen", _fake_popen(seen))
     w.run_agent("Auftrag")
     env = seen.get("env") or {}
-    assert "LITELLM_API_KEY" not in env
-    assert SECRET not in " ".join(str(v) for v in env.values())
+    assert env.get("LITELLM_API_KEY") == SECRET        # der Agent braucht ihn für den Modellaufruf
+    assert "GITHUB_TOKEN" not in env and "HA_STATUS_URL" not in env
 
 
 def test_log_stream_line_zeigt_keine_geheimnisse(monkeypatch, capsys):

@@ -34,6 +34,7 @@ def _lauf(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setitem(w.ENV, "PATH", VENV_PFAD)
     monkeypatch.setitem(w.ENV, "LITELLM_API_KEY", SECRET)
+    monkeypatch.setitem(w.ENV, "GITHUB_TOKEN", SECRET)
     monkeypatch.setattr(w.subprocess, "Popen", popen)
     w.run_agent("Auftrag")
     return seen["env"]
@@ -45,6 +46,8 @@ def test_agent_behaelt_den_pfad_aus_env(monkeypatch):
 
 
 def test_agent_bekommt_trotzdem_keine_geheimnisse(monkeypatch):
+    # Korrektur: der Modellschlüssel LITELLM_API_KEY muss durch (qwen/opencode lesen ihn von dort),
+    # alle anderen Geheimnisse bleiben draußen.
     env = _lauf(monkeypatch)
-    assert "LITELLM_API_KEY" not in env
-    assert SECRET not in " ".join(str(v) for v in env.values())
+    assert env.get("LITELLM_API_KEY") == SECRET
+    assert "GITHUB_TOKEN" not in env
