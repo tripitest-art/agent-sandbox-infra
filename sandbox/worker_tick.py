@@ -36,6 +36,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterable, Mapping
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py liegt daneben
@@ -117,6 +118,43 @@ ERROR_RULE = (
     "und aufhören.")
 
 ENV = dict(os.environ, PATH=f"/root/venv/bin:/root/.opencode/bin:{os.environ.get('PATH', '/usr/bin:/bin')}")
+
+# Regel 5: Diese Werte dürfen den Agentenprozess nie erreichen und nie ins Log (#35).
+SECRET_ENV_KEYS = ("LITELLM_API_KEY", "LITELLM_REVIEW_KEY", "LITELLM_WORKER_KEY",
+                   "LITELLM_PLANER_KEY", "GITHUB_TOKEN", "GH_TOKEN",
+                   "HA_STATUS_URL", "HA_WEBHOOK_URL")
+
+# Umgebung des Agentenprozesses: nur diese Schlüssel, soweit gesetzt. Die Liste darf
+# erweitert werden, aber nie um einen Schlüssel aus SECRET_ENV_KEYS. PATH braucht der Agent
+# (Aufruf von qwen/opencode/gh), HOME die gh-Konfiguration und die Modellkonfiguration.
+AGENT_ENV_ALLOW = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR", "SHELL",
+                   "USER", "LOGNAME", "PWD", "PYTHONPATH", "XDG_CONFIG_HOME",
+                   "XDG_DATA_HOME", "XDG_CACHE_HOME")
+
+
+def agent_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Umgebung für den Agentenprozess: nur Schlüssel aus AGENT_ENV_ALLOW, die gesetzt sind.
+
+    `environ is None` liest `os.environ`. Schlüssel aus SECRET_ENV_KEYS kommen nie mit, auch
+    wenn sie in `environ` stehen. Der Agent braucht PATH (Aufruf von qwen/opencode/gh) und
+    HOME (gh-Konfiguration `~/.config/gh/hosts.yml`, Modellkonfiguration)."""
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items()
+            if k in AGENT_ENV_ALLOW and k not in SECRET_ENV_KEYS}
+
+
+def redact(text: str, secrets: Iterable[str] | None = None) -> str:
+    """Ersetzt jeden nicht-leeren Geheimniswert in `text` durch „***“ (Regel 5).
+
+    `secrets is None` nimmt die Werte aller gesetzten SECRET_ENV_KEYS aus `os.environ`.
+    Sehr kurze Werte (< 6 Zeichen) bleiben unangetastet, damit nicht jeder Buchstabe
+    ersetzt wird. Wird auf jede Zeile angewendet, bevor sie ins Log geht."""
+    if secrets is None:
+        secrets = [os.environ.get(k, "") for k in SECRET_ENV_KEYS]
+    for value in secrets:
+        if value and len(value) >= 6:
+            text = text.replace(value, "***")
+    return text
 
 
 def log(msg: str) -> None:
@@ -701,46 +739,54 @@ def _clip(text: str, lines: int = TOOL_OUTPUT_LINES) -> str:
 
 def log_stream_line(line: str) -> None:
     """Eine Zeile stream-json von Qwen Code als lesbares Log: Text, `$ befehl`, Ausgabe."""
+    def say(text: str) -> None:
+        # Regel 5: keine Geheimniswerte aus der Werkzeugausgabe ins Log (#35).
+        print(redact(text), flush=True)
+
     try:
         event = json.loads(line)
     except ValueError:
         if line.strip():
-            print(line.rstrip(), flush=True)
+            say(line.rstrip())
         return
     kind = event.get("type")
     content = (event.get("message") or {}).get("content") or []
     if kind == "assistant":
         for part in content:
             if part.get("type") == "text" and part.get("text", "").strip():
-                print(part["text"].strip(), flush=True)
+                say(part["text"].strip())
             elif part.get("type") == "tool_use":
                 args = part.get("input") or {}
                 if part.get("name") == "run_shell_command":
-                    print(f"$ {args.get('command', '')}", flush=True)
+                    say(f"$ {args.get('command', '')}")
                 else:
                     target = args.get("file_path") or args.get("path") or args.get("pattern") or ""
-                    print(f"→ {part.get('name')} {target}".rstrip(), flush=True)
+                    say(f"→ {part.get('name')} {target}".rstrip())
     elif kind == "user":
         for part in content:
             if part.get("type") == "tool_result":
                 out = part.get("content")
                 out = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
                 mark = "✗ Fehler:\n" if part.get("is_error") else ""
-                print(mark + _clip(out), flush=True)
+                say(mark + _clip(out))
     elif kind == "result":
-        print(f"[Qwen Code: {event.get('subtype')}, {event.get('num_turns')} Züge, "
-              f"{round((event.get('duration_ms') or 0) / 1000)} s]", flush=True)
+        say(f"[Qwen Code: {event.get('subtype')}, {event.get('num_turns')} Züge, "
+            f"{round((event.get('duration_ms') or 0) / 1000)} s]")
 
 
 def run_agent(prompt: str) -> int:
-    """Startet den Agenten; `timeout` beendet ihn hart, falls er selbst nicht aufhört."""
+    """Startet den Agenten; `timeout` beendet ihn hart, falls er selbst nicht aufhört.
+
+    Der Agentenprozess bekommt `agent_env()` statt `ENV`: nur die Allowlist, keine
+    Geheimnisse (#35). Die bei OpenCode ungefiltert gedruckte Ausgabe läuft durch
+    `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home Assistant kommt."""
     cmd = ["timeout", "-k", "30", str(RUN_TIMEOUT + 60), *agent_cmd(prompt)]
-    with subprocess.Popen(cmd, cwd=WORKDIR, env=ENV, stdout=subprocess.PIPE,
+    with subprocess.Popen(cmd, cwd=WORKDIR, env=agent_env(), stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                           errors="replace") as proc:
         for line in proc.stdout:
             if AGENT == "opencode":
-                print(line, end="", flush=True)
+                print(redact(line), end="", flush=True)
             else:
                 log_stream_line(line)
     return proc.returncode

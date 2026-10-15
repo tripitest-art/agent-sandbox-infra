@@ -558,6 +558,62 @@ def test_log_stream_line(capsys):
     assert "kein json" in out
 
 
+# --- Regel 5: keine Geheimnisse im Agentenprozess und im Log (#35) ---
+
+GEHEIM = "sk-nur-ein-test-geheimnis"
+
+
+class _RunResult:
+    def __init__(self, stdout=""):
+        self.stdout = stdout
+
+
+def test_agent_env_allowlist_enthaelt_keinen_geheimnisnamen():
+    assert set(w.AGENT_ENV_ALLOW).isdisjoint(w.SECRET_ENV_KEYS)
+    assert {"PATH", "HOME"} <= set(w.AGENT_ENV_ALLOW)
+
+
+def test_agent_env_liest_os_environ_und_laesst_geheimnisse_weg(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HOME", "/root")
+    monkeypatch.setenv("LITELLM_API_KEY", GEHEIM)
+    monkeypatch.setenv("HA_STATUS_URL", GEHEIM)
+    env = w.agent_env()
+    assert env["PATH"] == "/usr/bin" and env["HOME"] == "/root"
+    assert set(env).isdisjoint(w.SECRET_ENV_KEYS)
+    assert GEHEIM not in " ".join(env.values())
+
+
+def test_redact_ohne_angabe_liest_die_gesetzten_schluessel(monkeypatch):
+    monkeypatch.setenv("LITELLM_API_KEY", GEHEIM)
+    line = w.redact(f"Bearer {GEHEIM}")
+    assert GEHEIM not in line and line == "Bearer ***"
+
+
+def test_redact_laesst_kurze_und_leere_werte_stehen():
+    # Sehr kurze Werte bleiben stehen, sonst würde jeder Buchstabe ersetzt.
+    assert w.redact("bleibt stehen", ["kurz", ""]) == "bleibt stehen"
+
+
+def test_log_stream_line_redigiert_auch_den_befehl(capsys, monkeypatch):
+    monkeypatch.setenv("LITELLM_API_KEY", GEHEIM)
+    line = json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "run_shell_command",
+         "input": {"command": f"env | grep LITELLM_API_KEY={GEHEIM}"}}]}})
+    w.log_stream_line(line)
+    out = capsys.readouterr().out
+    assert GEHEIM not in out and "$ env | grep LITELLM_API_KEY=***" in out
+
+
+def test_gh_behaelt_die_volle_umgebung(monkeypatch):
+    """Die Allowlist gilt nur für den Agenten; gh und die übrigen Kindprozesse behalten ENV."""
+    seen = {}
+    monkeypatch.setitem(w.ENV, "LITELLM_API_KEY", GEHEIM)   # so steht der Schlüssel im Takt
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: seen.update(kw) or _RunResult())
+    w.gh("issue", "view", "35")
+    assert seen["env"] is w.ENV and seen["env"]["LITELLM_API_KEY"] == GEHEIM
+
+
 # --- Nur arbeiten, wenn der Gaming-PC an ist und Chat aktiv (WAKE_PC=0) ---
 
 class NoGH:
