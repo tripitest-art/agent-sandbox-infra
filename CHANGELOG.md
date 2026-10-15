@@ -10,6 +10,9 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ### Geändert
 - Doku-Pflicht: README, ROADMAP und Changelog werden im selben PR wie die Änderung gepflegt;
   ein Test hält die Dateiübersicht aktuell. README und ROADMAP auf den Stand von Stufe 2 gebracht.
+- `install.sh`: Der Status-Bericht `ha_status.py` bekommt Service und Timer `ha-status.timer`
+  (alle 2 Minuten) und wird über `HA_STATUS_URL` in `/etc/ha-status.env` eingerichtet; ohne die
+  URL bleibt der Timer aus, Worker und Review laufen unabhängig (#82).
 
 ## 2026-10-15
 
