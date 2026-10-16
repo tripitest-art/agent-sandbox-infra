@@ -1164,6 +1164,22 @@ def _pid_alive(pid: int | None) -> bool:
     """True, wenn der Prozess noch läuft. Ein fehlendes Recht bedeutet: er lebt (anderer Nutzer)."""
     if not pid or pid <= 0:
         return False
+    if sys.platform == "win32":
+        # os.kill(pid, 0) ist unter Windows kein „nur prüfen“: Signal 0 ist dort CTRL_C_EVENT und
+        # trifft die ganze Konsole samt pytest-Sitzung. Deshalb fragt der Windows-Zweig die
+        # Win32-API, ohne os.kill (#118).
+        import ctypes
+
+        k = ctypes.windll.kernel32
+        handle = k.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return k.GetLastError() == 5             # Zugriff verweigert: der Prozess lebt
+        try:
+            code = ctypes.c_ulong()
+            k.GetExitCodeProcess(handle, ctypes.byref(code))
+        finally:
+            k.CloseHandle(handle)                    # immer schließen, auch bei Fehler
+        return code.value == 259                     # STILL_ACTIVE
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
