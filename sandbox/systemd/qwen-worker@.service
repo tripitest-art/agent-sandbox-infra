@@ -11,6 +11,12 @@ Environment=PYTHONUNBUFFERED=1
 Environment=LANG=C.UTF-8
 Environment=QWEN_CODE_SUPPRESS_YOLO_WARNING=1
 Environment=WORKER_SLOT=%i
+# Ressourcenlimits je Slot: install.sh setzt MemoryMax/TasksMax/CPUQuota aus SLOT_MEMORY_MAX,
+# SLOT_TASKS_MAX und SLOT_CPU_PERCENT (/etc/agent-sandbox.conf; leer oder none = kein Limit).
+# Vorschlag nach Messung für 4 GB und 2 Slots (README):
+#MemoryMax=1500M
+#TasksMax=256
+#CPUQuota=200%
 EnvironmentFile=-/etc/qwen-worker.env
 ExecStart=/usr/bin/flock -n /run/qwen-worker-w%i.lock /usr/bin/python3 /root/worker_tick.py
 StandardOutput=append:/root/worker.log
