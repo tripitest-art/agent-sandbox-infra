@@ -10,6 +10,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ### Hinzugefügt
 - HA: Sensor „Agenten Workflow Status“ und Dashboard-Karten für Projekt-Matrix, wartende PRs und LLM-Budgets (Workflow-Status aus `ha_status.py`) (#92).
 - Dependabot für die GitHub Actions (wöchentlich, höchstens 2 offene PRs) (#93).
+- Doku: Backup und Wiederherstellung der Sandbox (`docs/backup.md`) (#95).
 
 ### Geändert
 - Review-Takt: Pflicht-Checks kommen aus der Projektliste (`required_checks`), Vorgabe `tests` und `acceptance-guard`; sc-digger nennt CodeQL dort selbst (#78).
