@@ -29,7 +29,9 @@ eine **Projektliste**. Das zweite Projekt ist diese Infrastruktur selbst
    "hotspot_label": "berührt-main.py", "review_skill": "skills/sc-digger-review/SKILL.md",
    "auto_merge": true, "required_checks": ["tests", "acceptance-guard", "CodeQL"]},
   {"name": "agent-sandbox-infra", "repo": "tripitest-art/agent-sandbox-infra",
-   "workdir": "/root/work/agent-sandbox-infra", "auto_merge": false}
+   "workdir": "/root/work/agent-sandbox-infra", "auto_merge": false,
+   "manual_paths": ["sandbox/*", ".github/*", "AGENTS.md", "tests/acceptance/*",
+                    "docs/main-schutz.ruleset.json", "skills/*"]}
 ]}
 ```
 
@@ -43,12 +45,14 @@ eine **Projektliste**. Das zweite Projekt ist diese Infrastruktur selbst
 | `hotspot_label` | nein | Issue-Label für den Hotspot; Vorgabe `berührt-main.py` |
 | `review_skill` | nein | Pfad des Review-Skills im Repo; ohne ihn prüft der Reviewer nur nach `AGENTS.md` |
 | `auto_merge` | nein | `false`: Der Review-Takt mergt hier nie; Vorgabe `true` |
+| `manual_paths` | nein | Dateimuster (`fnmatch`, z. B. `sandbox/*`); ein Treffer lässt den Takt nicht selbst mergen, der PR geht an Stephan. Vorgabe: leer (kein solches Muster) |
 | `required_checks` | nein | Checks, die den PR rot machen, wenn sie nicht `SUCCESS` sind; Vorgabe `["tests", "acceptance-guard"]`, sc-digger nennt zusätzlich `CodeQL` |
 
 Die Liste wird streng geprüft: unbekannte Schlüssel, doppelte Namen, Repos oder Ordner, ungültige
 Namen und Pfade sowie eine leere oder nicht aus Strings bestehende `required_checks`-Liste führen zu
-`ProjectConfigError`. Die Takte brechen dann mit Fehlermeldung ab, damit kein Projekt still wegfällt;
-`install.sh` bricht ebenso ab.
+`ProjectConfigError`. Ebenso wird eine `manual_paths`-Angabe abgewiesen, die keine Liste nicht-leerer
+Strings ist: Sonst ließe sich der manuelle Merge still abschalten. Die Takte brechen dann mit
+Fehlermeldung ab, damit kein Projekt still wegfällt; `install.sh` bricht ebenso ab.
 
 ## Wie die Takte mehrere Projekte behandeln
 
@@ -65,6 +69,10 @@ Namen und Pfade sowie eine leere oder nicht aus Strings bestehende `required_che
   jeweiligen Repo.
 - **`auto_merge: false`:** Auch bei „Merge-Modus automatisch“ im Issue mergt der Takt nicht. Der PR
   geht mit Label `braucht-stephan` und Kommentar an Stephan.
+- **`manual_paths`:** Berührt ein freigegebener PR eine Datei, auf die ein Muster passt, mergt der
+  Takt nicht selbst; der PR geht mit Label `braucht-stephan` und Kommentar an Stephan. Geprüft wird
+  kurz vor dem Merge mit frischer Dateiliste; ist sie nicht lesbar, gilt der PR als betroffen.
+  Nur bei „Merge-Modus automatisch“ im Issue kommt es überhaupt so weit.
 - **Test-Befehl und Hotspot** stehen im Auftrag an den Worker bzw. steuern die Konfliktprüfung des
   jeweiligen Projekts.
 

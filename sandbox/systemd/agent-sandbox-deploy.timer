@@ -1,0 +1,9 @@
+[Unit]
+Description=Auto-Deploy der Sandbox-Infrastruktur alle 15 Minuten
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

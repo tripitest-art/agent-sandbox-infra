@@ -34,6 +34,7 @@ class Project:
     review_skill: str | None = None             # Pfad des Review-Skills im Repo, falls vorhanden
     auto_merge: bool = True                     # False: der Review-Takt mergt hier nie, Stephan immer
     required_checks: tuple[str, ...] = ("tests", "acceptance-guard")   # Pflicht-Checks des Review-Takts
+    manual_paths: tuple[str, ...] = ()          # fnmatch-Muster; ein Treffer = Merge immer durch Stephan
 
 
 def default_projects() -> list[Project]:
@@ -51,7 +52,7 @@ def _parse(entry: object, index: int) -> Project:
     if not isinstance(entry, dict):
         raise ProjectConfigError(f"{where}: Objekt erwartet")
     known = {"name", "repo", "workdir", "test_cmd", "hotspot", "hotspot_label", "review_skill",
-             "auto_merge", "required_checks"}
+             "auto_merge", "required_checks", "manual_paths"}
     unknown = set(entry) - known
     if unknown:
         raise ProjectConfigError(f"{where}: unbekannte Schlüssel {', '.join(sorted(unknown))}")
@@ -77,6 +78,13 @@ def _parse(entry: object, index: int) -> Project:
                 or not all(isinstance(c, str) and c for c in checks)):
             raise ProjectConfigError(f"{where}: „required_checks“ muss eine nicht-leere Liste nicht-leerer Strings sein")
         entry = {**entry, "required_checks": tuple(checks)}   # Liste aus JSON -> Tupel wie im Feld
+    if "manual_paths" in entry:
+        paths = entry["manual_paths"]
+        # Andernfalls ließe sich der manuelle Merge still abschalten (leerer String, Zahl, Text):
+        # ein Projekt ohne Muster ist erlaubt, ein Projekt mit unbrauchbarem Muster nicht.
+        if not isinstance(paths, list) or not all(isinstance(p, str) and p for p in paths):
+            raise ProjectConfigError(f"{where}: „manual_paths“ muss eine Liste nicht-leerer Strings sein")
+        entry = {**entry, "manual_paths": tuple(paths)}   # Liste aus JSON -> Tupel wie im Feld
     kwargs = {k: v for k, v in entry.items() if k in known and not (k in ("test_cmd", "hotspot_label") and v is None)}
     return Project(**kwargs)
 

@@ -70,6 +70,13 @@ if ! [[ $DASHBOARD =~ ^[01]$ ]] || ! [[ $DASHBOARD_PORT =~ ^[1-9][0-9]{0,4}$ ]] 
   echo "DASHBOARD muss 0 oder 1 sein, DASHBOARD_PORT eine Portnummer (1-65535). Nichts gemerkt." >&2
   exit 1
 fi
+# Auto-Deploy (autodeploy.py): holt main alle 15 Minuten und führt dieses Skript aus. Aus, bis AUTODEPLOY=1 gesetzt ist.
+AUTODEPLOY=${AUTODEPLOY:-$(conf_get AUTODEPLOY)}
+AUTODEPLOY=${AUTODEPLOY:-0}                     # 1: Timer agent-sandbox-deploy einrichten und starten
+if ! [[ $AUTODEPLOY =~ ^[01]$ ]]; then
+  echo "AUTODEPLOY muss 0 oder 1 sein. Nichts gemerkt." >&2
+  exit 1
+fi
 REVIEW_TAKT=${REVIEW_TAKT:-2min}                # so oft sucht der Review-Takt einen PR (Modellaufruf nur für einen neuen Commit)
 REVIEW_MODEL=${REVIEW_MODEL:-coder-glm}         # LiteLLM-Alias (GLM, andere Familie als der Worker)
 REVIEW_MODEL_BIG=${REVIEW_MODEL_BIG:-longctx-lite}   # für sehr große Diffs
@@ -81,7 +88,7 @@ SLOT_CPU_PERCENT=${SLOT_CPU_PERCENT:-$(conf_get SLOT_CPU_PERCENT)}
 slot_limits_check || { echo "Nichts gemerkt; Einstellung korrigieren oder die Zeile aus $CONF entfernen." >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 # Gleich merken, nicht erst am Ende: Bricht ein späterer Schritt ab, gilt der Wunsch beim nächsten Lauf trotzdem.
-( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS REVIEW_POST REVIEW_AUTO_MERGE SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT DASHBOARD DASHBOARD_PORT ) \
+( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS REVIEW_POST REVIEW_AUTO_MERGE SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT DASHBOARD DASHBOARD_PORT AUTODEPLOY ) \
   && echo "Einstellungen gemerkt ($CONF): MAX_WORKERS=$WORKERS_WANTED REVIEW_POST=$REVIEW_POST REVIEW_AUTO_MERGE=$REVIEW_AUTO_MERGE" \
   || echo "Warnung: Einstellungen konnten nicht gemerkt werden ($CONF)"
 # Alle LiteLLM-Aliase, die der Worker nutzen kann (Hauptmodell zuerst, ohne Doppelte)
@@ -468,6 +475,20 @@ if [ "$DASHBOARD" = 1 ]; then
 else
   systemctl disable --now agent-dashboard.service >/dev/null 2>&1 || true
   echo "agent-dashboard: aus (mit DASHBOARD=1 einschalten)"
+fi
+
+echo "== Auto-Deploy"
+# autodeploy.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py). Nur den Timer starten, nie
+# den Dienst: Dieses Skript kann vom Dienst selbst laufen, und ein Neustart würde ihn mittendrin beenden.
+install -m 644 "$SCRIPT_DIR/systemd/agent-sandbox-deploy.service" "$UNIT_DIR/agent-sandbox-deploy.service"
+install -m 644 "$SCRIPT_DIR/systemd/agent-sandbox-deploy.timer" "$UNIT_DIR/agent-sandbox-deploy.timer"
+systemctl daemon-reload
+if [ "$AUTODEPLOY" = 1 ]; then
+  systemctl enable agent-sandbox-deploy.timer >/dev/null; systemctl restart agent-sandbox-deploy.timer
+  echo "agent-sandbox-deploy: $(systemctl is-active agent-sandbox-deploy.timer) (alle 15 Minuten, siehe docs/autodeploy.md)"
+else
+  systemctl disable --now agent-sandbox-deploy.timer >/dev/null 2>&1 || true
+  echo "agent-sandbox-deploy: aus (mit AUTODEPLOY=1 einschalten)"
 fi
 
 echo "== Infra-Repo: Deploy-Key (nur lesen)"
