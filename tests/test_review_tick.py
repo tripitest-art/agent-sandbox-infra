@@ -33,12 +33,13 @@ def _pr(number=7, **kw):
 def _env(monkeypatch, tmp_path):
     # Serverprojektliste /etc/agent-projects.json (bzw. AGENT_PROJECTS) nennt zwei Projekte; run_once()
     # liefe sonst über beide und riefe das Modell zweimal. Die Tests rechnen mit dem Vorgabeprojekt
-    # („keine Datei“) — auch die daraus abgeleiteten Globalen (Repo, Skill, Merge-Erlaubnis).
+    # („keine Datei“) — auch die daraus abgeleiteten Globalen (Repo, Skill, Merge-Erlaubnis, Dateimuster).
     p = r.projects.default_projects()[0]
     monkeypatch.setattr(r, "PROJECTS", [p])
     monkeypatch.setattr(r, "REPO", p.repo)
     monkeypatch.setattr(r, "REVIEW_SKILL", p.review_skill)
     monkeypatch.setattr(r, "PROJECT_AUTO_MERGE", p.auto_merge)
+    monkeypatch.setattr(r, "PROJECT_MANUAL_PATHS", p.manual_paths)
     # BASE_* mitpatchen: use_project() leitet STATE/DRAFT_DIR daraus ab, sobald die Projektliste
     # (/etc/agent-projects.json) mehr als ein Projekt nennt. Ohne diese zwei Zeilen schreiben die
     # Tests dann in die Zustandsdateien des Servers, statt in tmp_path.
@@ -167,6 +168,17 @@ def test_use_project_uebernimmt_die_pflicht_checks(monkeypatch):
     assert r.REQUIRED_CHECKS == ("tests", "acceptance-guard", "CodeQL")
     r.use_project(_projekt_mit_pflicht_checks("tests"), first=True)
     assert r.REQUIRED_CHECKS == ("tests",)
+
+
+def test_use_project_uebernimmt_die_manual_paths(monkeypatch):
+    """Die Dateimuster für den manuellen Merge kommen je Projekt aus der Liste (Issue #122)."""
+    monkeypatch.setattr(r, "PROJECT_MANUAL_PATHS", r.PROJECT_MANUAL_PATHS)   # Modulzustand wiederherstellen
+    p = r.projects.Project(name="sc-digger", repo="tripitest-art/sc-digger", workdir="/root/sc-digger",
+                           manual_paths=("sandbox/*", "AGENTS.md"))
+    r.use_project(p, first=True)
+    assert r.PROJECT_MANUAL_PATHS == ("sandbox/*", "AGENTS.md")
+    r.use_project(_projekt_mit_pflicht_checks("tests"), first=True)
+    assert r.PROJECT_MANUAL_PATHS == ()
 
 
 def test_pflicht_check_aus_der_projektliste_macht_rot(monkeypatch):
@@ -731,6 +743,73 @@ def _github_with_merge(monkeypatch, merge_mode="automatisch", merge_ok=True, pr_
     monkeypatch.setattr(r, "gh_json", gh_json)
     monkeypatch.setattr(r, "gh_text", gh_text)
     return calls
+
+
+def _github_mit_manual_paths(monkeypatch, manual_paths, files):
+    """GitHub-Fake für die Merge-Entscheidung nach Dateimustern (Issue #122).
+
+    `manual_paths` ist das Muster des Projekts, `files` die Dateiliste des PRs. Gezählt wird jede
+    Abfrage der Dateiliste (`pr view --json files`): einmal der Review, einmal die Merge-Entscheidung.
+    """
+    calls = _fake_github(monkeypatch, [_pr()])
+    calls.update(merged=[], edits=[], comments=[], dateiliste=[])
+    base_json = r.gh_json
+
+    def gh_json(*args):
+        if args[:2] == ("issue", "list"):
+            return []
+        if args[:2] == ("issue", "view") and "labels" not in args:
+            return {"number": 5, "title": "T", "body": "### Merge-Modus\nautomatisch"}
+        if args[:2] == ("pr", "view"):
+            calls["dateiliste"].append(args)
+            return {"files": [{"path": f, "additions": 1, "deletions": 0} for f in files]}
+        return base_json(*args)
+
+    def gh_text(*args, **kw):
+        if args[:2] == ("pr", "merge"):
+            calls["merged"].append(args[2])
+            return ""
+        if args[:2] == ("pr", "edit"):
+            calls["edits"].append(args[2:])
+            return ""
+        if args[:2] == ("pr", "comment"):
+            calls["comments"].append(args[2])
+            return ""
+        if args[:2] == ("label", "create") or args[0] == "api":
+            return ""
+        if args[:2] == ("pr", "diff"):
+            return "diff --git a/a.py b/a.py\n+x\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(r, "gh_json", gh_json)
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    monkeypatch.setattr(r, "POST", True)
+    monkeypatch.setattr(r, "AUTO_MERGE", True)
+    monkeypatch.setattr(r, "PROJECT_MANUAL_PATHS", manual_paths)
+    r.run_once()
+    return calls
+
+
+def test_projekt_ohne_manual_paths_fragt_die_dateiliste_nicht_noch_einmal_ab(monkeypatch):
+    """Ohne Muster bleibt der Merge-Zweig wie bisher: keine zweite Dateiliste, sofort mergen."""
+    calls = _github_mit_manual_paths(monkeypatch, (), ["sandbox/worker_tick.py"])
+    assert calls["merged"] == ["7"]
+    assert len(calls["dateiliste"]) == 1              # nur der Review hat die Liste gelesen
+
+
+def test_manual_paths_ohne_treffer_mergt_der_takt_selbst(monkeypatch):
+    """Ein Muster, das auf keine Datei des PRs passt, ändert nichts: Merge durch den Takt."""
+    calls = _github_mit_manual_paths(monkeypatch, ("sandbox/*", "AGENTS.md"), ["docs/a.md", "CHANGELOG.md"])
+    assert calls["merged"] == ["7"]
+    assert len(calls["dateiliste"]) == 2              # frische Liste kurz vor dem Merge
+
+
+def test_manual_paths_mit_treffer_geht_an_stephan(monkeypatch):
+    """Ein Treffer sperrt den automatischen Merge; der PR bekommt Label und Kommentar für Stephan."""
+    calls = _github_mit_manual_paths(monkeypatch, ("sandbox/*", "AGENTS.md"), ["docs/a.md", "sandbox/worker_tick.py"])
+    assert calls["merged"] == []
+    assert calls["edits"] == [("7", "--add-label", r.STEPHAN_LABEL)]
+    assert calls["comments"] == ["7"]
 
 
 def test_draft_from_dry_run_is_posted_later_without_new_model_call(monkeypatch, tmp_path, capsys):
