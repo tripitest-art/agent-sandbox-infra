@@ -12,6 +12,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - `review_tick`: Kurz vor dem Merge prüft der Takt die frische Dateiliste des freigegebenen PRs gegen die Dateimuster `manual_paths` des Projekts (z. B. `sandbox/*`, `AGENTS.md`); ein Treffer oder eine nicht lesbare Liste geht mit Label `braucht-stephan` an Stephan, ohne Muster bleibt es wie bisher (#126).
 
 ### Hinzugefügt
+- Dashboard: Push-Meldungen über ntfy (`dashboard_notify.py`) bei `⚠ Stephan`-Zeilen, totem Slot, Budget ab 90 %, veralteten Daten; `NTFY_URL` in `/etc/agent-dashboard.env`, Test mit `--notify-test` (#114).
 - Dashboard: LiteLLM-Budget-Limits (`max_budget`) lassen sich im Browser ändern, geschützt durch einen Schreib-Token und den Master-Key aus `/etc/agent-dashboard.env` (Dienst `agent-dashboard`, `install.sh` fragt beides ab) (#111).
 - Auto-Deploy: `sandbox/autodeploy.py` und Timer `agent-sandbox-deploy` holen alle 15 Minuten `origin/main`, testen mit pytest, rollen per `install.sh` aus und setzen bei Fehlern zurück; Einschalten mit `AUTODEPLOY=1 bash sandbox/install.sh` (Betrieb: `docs/autodeploy.md`) (#15).
 - `install.sh`: `SKIP_TESTS=1` überspringt den Testlauf von sc-digger am Ende (nur Anzeige, rund 5 Minuten) (#125).

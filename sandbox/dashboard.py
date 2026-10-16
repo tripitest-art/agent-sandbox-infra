@@ -9,6 +9,8 @@ von `/root/worker.log`. Die Seite holt den Stand über Server-Sent-Events (`/eve
 Endpunkte: `/` (Seite), `/api/state` (JSON), `/events` (SSE), `/healthz` und
 `POST /api/budget` (Limit eines LiteLLM-Keys ändern, nur mit Schreib-Token).
 
+Push-Meldungen über ntfy (`NTFY_URL`): siehe `dashboard_notify.py`.
+
 Einzige Ausnahme vom „nur lesend“: das Budget-Limit. Dafür braucht der Dienst
 `LITELLM_MASTER_KEY` und `DASHBOARD_WRITE_TOKEN` (beide nur in `/etc/agent-dashboard.env`, Modus 600).
 Fehlt eines, ist das Ändern aus und die Seite zeigt keinen Knopf. Geändert wird nur `max_budget`.
@@ -39,6 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # Module liegen nebenan
+import dashboard_notify  # noqa: E402
 import ha_status  # noqa: E402
 import projects  # noqa: E402
 import qwen_webhook  # noqa: E402
@@ -48,6 +51,7 @@ SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
 BIND: str = os.environ.get("DASHBOARD_BIND", "0.0.0.0")
 PORT: int = int(os.environ.get("DASHBOARD_PORT", "8099"))
 STATUS_TTL: float = float(os.environ.get("DASHBOARD_STATUS_TTL", "90"))
+NOTIFY_INTERVAL: float = float(os.environ.get("NOTIFY_INTERVAL", "30"))   # Sekunden zwischen zwei Push-Prüfungen
 LOG_LINES = 400            # so viele Zeilen hält der Dienst vor
 LOG_PRELOAD_BYTES = 64 * 1024
 SSE_INTERVAL = 2.0         # Sekunden zwischen zwei Prüfungen je Verbindung
@@ -502,12 +506,19 @@ def serve(bind: str = BIND, port: int = PORT) -> ThreadingHTTPServer:
     dash = Dashboard(StatusCache(default_builder), LogBuffer(), writer=BudgetWriter())
     server = ThreadingHTTPServer((bind, port), make_handler(dash))
     server.daemon_threads = True
+    notifier = dashboard_notify.Notifier()
+    server.push = notifier.enabled
+    if notifier.enabled:
+        loop = dashboard_notify.NotifyLoop(dash, notifier)
+        threading.Thread(target=loop.run, args=(NOTIFY_INTERVAL,), daemon=True).start()
     return server
 
 
 def main() -> None:
+    if "--notify-test" in sys.argv[1:]:
+        sys.exit(dashboard_notify.send_test(dashboard_notify.Notifier()))
     server = serve()
-    print(f"Dashboard läuft auf {BIND}:{server.server_address[1]}", flush=True)
+    print(f"Dashboard läuft auf {BIND}:{server.server_address[1]}, Push {'an' if server.push else 'aus'}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
