@@ -21,6 +21,9 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - `install.sh`: Der Status-Bericht `ha_status.py` bekommt Service und Timer `ha-status.timer`
   (alle 2 Minuten) und wird über `HA_STATUS_URL` in `/etc/ha-status.env` eingerichtet; ohne die
   URL bleibt der Timer aus, Worker und Review laufen unabhängig (#82).
+- `worker_tick`: Nacharbeit und PR-Text-Korrektur werden über ein gemeinsames Verzeichnis für alle
+  Slots belegt (`CLAIM_DIR`, Vorgabe `/var/lib/worker-claims`); ein belegter Auftrag verbraucht
+  keinen Versuch, und eine angekommene Nacharbeit zählt für alle Slots (#94).
 
 ### Behoben
 - `worker_tick`: der Agentenprozess bekommt `LITELLM_API_KEY` wieder; #71 hatte ihn mit entfernt, und jeder Agentenlauf endete nach 0 Sekunden mit `error_during_execution`. Alle anderen Geheimnisse bleiben draußen, das Log bleibt redigiert (#91).
