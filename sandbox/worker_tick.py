@@ -786,6 +786,30 @@ def _clip(text: str, lines: int = TOOL_OUTPUT_LINES) -> str:
     return "\n".join(f"    {r}" for r in rows[:lines]) + more
 
 
+def format_usage(usage: object) -> str:
+    """Token-Angabe für die Schlusszeile, z. B. ', Token: 1200 ein/340 aus/9800 Cache'.
+
+    Liest input_tokens, output_tokens und cache_read_input_tokens (je optional, nur ganze
+    Zahlen >= 0 zählen). Gibt '' zurück, wenn usage kein dict ist oder keiner der drei Werte
+    brauchbar vorkommt. Fehlende Einzelwerte erscheinen als 0. Wirft nie eine Ausnahme.
+    """
+    try:
+        if not isinstance(usage, dict):
+            return ""
+        # bool ausschließen: True/False sind in Python ganze Zahlen und wären sonst „1“/„0“.
+        zahlen = [v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+                  for v in (usage.get(k) for k in
+                            ("input_tokens", "output_tokens", "cache_read_input_tokens"))]
+    except Exception:
+        # Vertrag: „wirft nie eine Ausnahme“ — die Zeile entsteht im Logpfad des Laufs und darf
+        # ihn nicht abbrechen, auch nicht bei einem usage mit eigenwilligem get().
+        return ""
+    if all(v is None for v in zahlen):
+        return ""
+    ein, aus, cache = (0 if v is None else v for v in zahlen)
+    return f", Token: {ein} ein/{aus} aus/{cache} Cache"
+
+
 def log_stream_line(line: str) -> None:
     """Eine Zeile stream-json von Qwen Code als lesbares Log: Text, `$ befehl`, Ausgabe."""
     def say(text: str) -> None:
@@ -820,7 +844,7 @@ def log_stream_line(line: str) -> None:
                 say(mark + _clip(out))
     elif kind == "result":
         say(f"[Qwen Code: {event.get('subtype')}, {event.get('num_turns')} Züge, "
-            f"{round((event.get('duration_ms') or 0) / 1000)} s]")
+            f"{round((event.get('duration_ms') or 0) / 1000)} s{format_usage(event.get('usage'))}]")
 
 
 def run_agent(prompt: str) -> int:

@@ -26,6 +26,9 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - `worker_tick`: Nacharbeit und PR-Text-Korrektur werden über ein gemeinsames Verzeichnis für alle
   Slots belegt (`CLAIM_DIR`, Vorgabe `/var/lib/worker-claims`); ein belegter Auftrag verbraucht
   keinen Versuch, und eine angekommene Nacharbeit zählt für alle Slots (#94).
+- `worker_tick`: die Schlusszeile eines Qwen-Code-Laufs nennt den Token-Verbrauch aus dem
+  `result`-Ereignis (`input_tokens`, `output_tokens`, `cache_read_input_tokens`); fehlt die Angabe,
+  bleibt die Zeile wie bisher (#99).
 
 ### Behoben
 - `worker_tick`: der Agentenprozess bekommt `LITELLM_API_KEY` wieder; #71 hatte ihn mit entfernt, und jeder Agentenlauf endete nach 0 Sekunden mit `error_during_execution`. Alle anderen Geheimnisse bleiben draußen, das Log bleibt redigiert (#91).
