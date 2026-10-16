@@ -9,6 +9,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 
 ### Geändert
 - AGENTS.md Regel 4: Merge-Modus „manuell“ bleibt Standard, „automatisch“ nur für PRs ohne Dateien aus `manual_paths` (braucht `freigabe-geschützt`, wirkt mit #122 und Serverkonfiguration) (#123).
+- `review_tick`: Kurz vor dem Merge prüft der Takt die frische Dateiliste des freigegebenen PRs gegen die Dateimuster `manual_paths` des Projekts (z. B. `sandbox/*`, `AGENTS.md`); ein Treffer oder eine nicht lesbare Liste geht mit Label `braucht-stephan` an Stephan, ohne Muster bleibt es wie bisher (#126).
 
 ### Hinzugefügt
 - `LICENSE` (MIT, Copyright (c) 2026 Stephan Voigt) und `SECURITY.md` mit dem vertraulichen Meldeweg für Sicherheitslücken (GitHub „Private vulnerability reporting“); dazu der README-Abschnitt „Lizenz und Sicherheit“ (#110).
