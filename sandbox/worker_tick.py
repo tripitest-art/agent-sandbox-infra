@@ -1007,13 +1007,52 @@ def litellm_ready() -> str | None:
     """BACKEND=litellm: None, wenn der LiteLLM-Proxy antwortet, sonst der Grund.
 
     /health/liveliness braucht keinen Key und kostet nichts. Budget und Modellrechte prüft
-    LiteLLM erst beim Auftrag; ein 429 (Budget aufgebraucht) sieht man dann im Log des Laufs.
+    LiteLLM erst beim Auftrag; ein leeres Tagesbudget erkennt der Takt davor (budget_problem).
     """
     try:
         with urllib.request.urlopen(f"{LITELLM}/health/liveliness", timeout=10):
             return None
     except Exception:
         return "LiteLLM nicht erreichbar"
+
+
+def key_info() -> dict | None:
+    """Verbrauch und Limit des eigenen Worker-Keys aus GET {LITELLM}/key/info.
+
+    None bei jedem Fehler (HTTP, Netz, Timeout, kein JSON, Feld „info“ fehlt): Der Takt hält
+    eine unklare Lage bewusst nicht an, ein defektes /key/info darf die Pipeline nicht
+    stilllegen. Der Schlüssel steht nur im Header und kommt nie ins Log (Regel 5).
+    """
+    req = urllib.request.Request(
+        f"{LITELLM}/key/info",
+        headers={"Authorization": f"Bearer {os.environ.get('LITELLM_API_KEY', '')}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.load(r)
+    except Exception:
+        return None
+    info = data.get("info") if isinstance(data, dict) else None
+    return info if isinstance(info, dict) else None
+
+
+def budget_problem(info: dict | None) -> str | None:
+    """Meldung, wenn das Tagesbudget des Worker-Keys aufgebraucht ist, sonst None.
+
+    Ist es leer, antwortet LiteLLM jeder Anfrage mit 429 – auch den Ausweichmodellen; ein
+    Lauf würde also nur einen Versuch verbrauchen (#90). „Spend >= max_budget“ ist der Beleg.
+    Eine unklare Lage (keine Antwort, kein Limit, keine Zahlen) gibt None: Der Takt läuft
+    weiter (anders als bei Regel 8). Die Meldung nennt keine Budgetwerte (Regel 5), nur den
+    Reset-Zeitpunkt aus `budget_reset_at`.
+    """
+    if not isinstance(info, Mapping):
+        return None
+    spend, max_budget = info.get("spend"), info.get("max_budget")
+    if not isinstance(spend, (int, float)) or not isinstance(max_budget, (int, float)):
+        return None
+    if spend < max_budget:
+        return None
+    reset = info.get("budget_reset_at")
+    return f"LiteLLM-Tagesbudget aufgebraucht (Reset {str(reset)[:16] if reset else 'unbekannt'})"
 
 
 def probe_model(model: str) -> str | None:
@@ -1435,6 +1474,19 @@ def main() -> int:
                 status, say=lambda m: log_on_change(state, LAST_WORK, f"{skey} belegt", m)):
             return 0
         if BACKEND == "litellm":
+            # #90: Zuerst das Tagesbudget des eigenen Keys. Ein leerer Key beantwortet auch die
+            # Ausweichmodelle mit 429; ohne diese Prüfung verbrauchte der Lauf einen Versuch und
+            # der Auftrag stünde nach MAX_TRIES bei Stephan. Ohne Arbeit kostet die Abfrage
+            # nichts, und ohne Versuch läuft der Auftrag nach dem Reset von selbst weiter.
+            info = key_info()
+            problem = budget_problem(info)
+            if problem:
+                reset = str((info or {}).get("budget_reset_at") or "unbekannt")[:16]
+                log_on_change(state, "_budget", reset,
+                              f"⚠ Stephan: {problem}, warte. Versuch zählt nicht.")
+                return 0
+            if state.pop("_budget", None) is not None:
+                save_state(state)   # Budget wieder frei: die nächste Knappheit wird erneut gemeldet
             # Erst hier prüfen: ohne Arbeit kostet der Takt keine Anfrage. Vor dem Zähler, damit ein
             # gestörter Anbieter keine Versuche verbraucht.
             model, failed = choose_model()
