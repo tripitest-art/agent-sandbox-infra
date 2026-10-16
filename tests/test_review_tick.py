@@ -31,6 +31,14 @@ def _pr(number=7, **kw):
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path):
+    # Serverprojektliste /etc/agent-projects.json (bzw. AGENT_PROJECTS) nennt zwei Projekte; run_once()
+    # liefe sonst über beide und riefe das Modell zweimal. Die Tests rechnen mit dem Vorgabeprojekt
+    # („keine Datei“) — auch die daraus abgeleiteten Globalen (Repo, Skill, Merge-Erlaubnis).
+    p = r.projects.default_projects()[0]
+    monkeypatch.setattr(r, "PROJECTS", [p])
+    monkeypatch.setattr(r, "REPO", p.repo)
+    monkeypatch.setattr(r, "REVIEW_SKILL", p.review_skill)
+    monkeypatch.setattr(r, "PROJECT_AUTO_MERGE", p.auto_merge)
     # BASE_* mitpatchen: use_project() leitet STATE/DRAFT_DIR daraus ab, sobald die Projektliste
     # (/etc/agent-projects.json) mehr als ein Projekt nennt. Ohne diese zwei Zeilen schreiben die
     # Tests dann in die Zustandsdateien des Servers, statt in tmp_path.
@@ -39,11 +47,15 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setattr(r, "STATE", str(tmp_path / "state.json"))
     monkeypatch.setattr(r, "DRAFT_DIR", str(tmp_path / "reviews"))
     monkeypatch.setattr(r, "REVIEW_KEY", "test-key")
+    # Servereinstellungen REVIEWER_NAME/REVIEW_MODEL/REVIEW_MODEL_BIG: feste Familie, unabhängig von
+    # der Umgebung — sonst sperrt reviewer_config_problem() jeden Review (⚠ Stephan:) und kein Test
+    # kommt zum Modellaufruf.
     monkeypatch.setattr(r, "REVIEWER_NAME", "GLM")
-    # Vollständige Reviewer-Konfiguration in einer Familie, unabhängig von der Umgebung: sonst sperrt
-    # reviewer_config_problem() jeden Review (⚠ Stephan:) und kein Test kommt zum Modellaufruf.
+    monkeypatch.setattr(r, "REVIEW_MODEL", "coder-glm")
     monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "coder-glm")
+    # Servereinstellung REVIEW_POST=1/REVIEW_AUTO_MERGE=1: Vorgabe ist der Entwurfslauf ohne Merge.
     monkeypatch.setattr(r, "POST", False)
+    monkeypatch.setattr(r, "AUTO_MERGE", True)
 
     def no_network(*a, **k):
         raise urllib.error.URLError("kein Netz im Test")
