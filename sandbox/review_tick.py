@@ -357,6 +357,17 @@ def assemble(model_text: str, worker: str, checks: list[tuple[str, str]], review
     return "\n".join(head + rest).strip() + "\n"
 
 
+_REVIEWER_RE = re.compile(r", Reviewer: (\S+) \(andere Modellfamilie\)")
+NO_MODEL = "ohne-Modell"   # Label in der Logzeile, wenn rote Checks ohne Modellaufruf zum Review führten
+
+
+def reviewer_in_text(text: str) -> str:
+    """Reviewer-Alias aus der Zeile „…, Reviewer: <Alias> (andere Modellfamilie).“ eines Reviews,
+    sonst „unbekannt“. So kennt auch ein später gepostetes Entwurf-Review sein Modell."""
+    m = _REVIEWER_RE.search(text)
+    return m.group(1) if m else "unbekannt"
+
+
 def red_check_review(red: list[str], worker: str, checks: list[tuple[str, str]], reviewer: str) -> str:
     items = "\n".join(f"{i}. Check `{n}` ist nicht grün. Ursache im Log des Checks lesen und beheben." for i, n in enumerate(red, 1))
     return assemble(f"{VERDICTS[1]}\n\n### Muss\n{items}\n\n### Kann\n- keine\n", worker, checks, reviewer)
@@ -697,6 +708,7 @@ def _run_pr_review() -> int:
         return 0
 
     issue: dict | None = None
+    no_model = False   # True: rote Checks, das Review kam ohne Modellaufruf zustande
     draft = pending_draft(pr) if POST else None
     if draft:   # schon geprüft (REVIEW_POST=0), jetzt nur noch posten; die Runde ist bereits gezählt
         text, count_round = draft, False
@@ -711,6 +723,7 @@ def _run_pr_review() -> int:
             return 0
         if red:
             # Ohne Modellaufruf; REVIEWER_NAME steht hier nur in der Zeile, geprüft wird nichts.
+            no_model = True
             text = red_check_review(red, worker, checks, REVIEWER_NAME)
             meta = f"PR #{n} {pr['headRefOid'][:7]} Reviewer {REVIEWER_NAME} (ohne Modell: rote Checks)"
         else:
@@ -774,7 +787,9 @@ def _run_pr_review() -> int:
         post_review_status(pr["headRefOid"], verdict)
         state.setdefault("gepostet", []).append(key)
         del state["gepostet"][:-500]
-        log(f"PR #{n}: {verdict.strip('*')}, {muss} Muss / {kann} Kann, als Kommentar-Review gepostet ({path}).")
+        reviewer = NO_MODEL if no_model else reviewer_in_text(text)   # die Dashboard-Statistik zählt danach
+        log(f"PR #{n}: {verdict.strip('*')}, {muss} Muss / {kann} Kann, als Kommentar-Review gepostet, "
+            f"Reviewer {reviewer} ({path}).")
     else:
         log(f"PR #{n}: Entwurf {verdict.strip('*')}, {muss} Muss / {kann} Kann ({path}); REVIEW_POST=0, nicht gepostet.")
     state.setdefault("erledigt", []).append(key)
