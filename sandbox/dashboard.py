@@ -377,7 +377,8 @@ function renderStat(st){const t=$("statistik");t.replaceChildren();if(!st)return
  const row=(name,c)=>{const r=el("tr");r.append(el("td",null,name));
   [c.freigegeben,c.aenderungen,c.quote==null?"–":c.quote+" %",c.gemergt,c.merge_fehler,c.an_stephan,c.worker_fehler].forEach(x=>r.append(el("td",null,x)));t.append(r)};
  row("24 Stunden",st["24h"]);row("7 Tage",st["7d"]);
- Object.entries(st.projekte).forEach(([n,c])=>row("7 Tage · "+n,c))}
+ Object.entries(st.projekte).forEach(([n,c])=>row("7 Tage · "+n,c));
+ Object.entries(st.modelle).forEach(([n,c])=>row("7 Tage · Reviewer "+n,c))}
 async function setBudget(alias,cur){
  const v=prompt("Neues Limit für "+alias+" in USD (jetzt "+cur+"):",cur);if(v===null)return;
  const num=Number(v.replace(",","."));if(!isFinite(num)||v.trim()===""){alert("Keine Zahl");return}

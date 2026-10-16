@@ -41,7 +41,7 @@ MERGE = "PR #7: erfolgreich gemergt (--squash)."
     ("\x1b[31m" + _review(H, MERGE) + "\x1b[0m\r", "gemergt", "-"),
 ])
 def test_classify_erkennt_die_zeilen(line, kind, project):
-    ts, k, p = st.classify(line)
+    ts, k, p, _ = st.classify(line)
     assert (k, p) == (kind, project) and ts == NOW - H
 
 
@@ -114,6 +114,54 @@ def test_ereignisse_sind_begrenzt():
     for _ in range(st.MAX_EVENTS + 50):
         stats.feed(_review(H, MERGE))
     assert len(stats.events) == st.MAX_EVENTS
+
+
+# --- Reviewer je Modell --------------------------------------------------------------------------
+
+def _frei(model=None):
+    suffix = f", Reviewer {model}" if model else ""
+    return f"PR #7: Freigegeben, 0 Muss / 2 Kann, als Kommentar-Review gepostet{suffix} (/root/reviews/pr7-abc.md)."
+
+
+def _aend(model=None):
+    suffix = f", Reviewer {model}" if model else ""
+    return f"PR #8: Änderungen nötig, 2 Muss / 1 Kann, als Kommentar-Review gepostet{suffix} (/root/reviews/pr8-abc.md)."
+
+
+@pytest.mark.parametrize("msg,model", [
+    (_frei("coder-glm"), "coder-glm"),
+    (_aend("glm-4.6-longctx"), "glm-4.6-longctx"),
+    (_aend("ohne-Modell"), "ohne-Modell"),
+    (_frei(), "unbekannt"),            # Zeile aus der Zeit vor der Änderung in review_tick.py
+])
+def test_classify_liest_den_reviewer_aus_der_zeile(msg, model):
+    assert st.classify(_review(H, msg))[3] == model
+
+
+def test_classify_setzt_bei_anderen_arten_keinen_reviewer():
+    for line in (_review(H, MERGE), _review(H, "PR #9: ⚠ Stephan: bitte prüfen"),
+                 f"{_ts(H)} [w1] ⚠ Stephan: issue1: Fehler"):
+        assert st.classify(line)[3] == "-"
+
+
+def test_snapshot_zaehlt_reviews_je_modell_ueber_sieben_tage():
+    stats = st.ReviewStats()
+    for line in (
+        _review(2 * H, _frei("coder-glm")), _review(3 * H, _frei("coder-glm")), _review(4 * H, _aend("coder-glm")),
+        _review(30 * H, _aend("ohne-Modell")), _review(30 * H, _frei()),
+        _review(8 * 24 * H, _frei("alt-modell")),                      # zu alt
+        _review(H, MERGE),                                              # kein Review: zählt nicht je Modell
+    ):
+        stats.feed(line)
+    modelle = stats.snapshot(NOW)["modelle"]
+    assert list(modelle) == ["coder-glm", "ohne-Modell", "unbekannt"]
+    assert (modelle["coder-glm"]["freigegeben"], modelle["coder-glm"]["aenderungen"], modelle["coder-glm"]["quote"]) == (2, 1, 67)
+    assert modelle["ohne-Modell"]["quote"] == 0 and modelle["unbekannt"]["quote"] == 100
+    assert modelle["coder-glm"]["gemergt"] == 0
+
+
+def test_snapshot_ohne_reviews_hat_keine_modelle():
+    assert st.ReviewStats().snapshot(NOW)["modelle"] == {}
 
 
 # --- Anbindung an dashboard.py ------------------------------------------------------------------
