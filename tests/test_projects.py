@@ -122,8 +122,9 @@ def test_example_file_is_valid():
     assert [p.name for p in ps] == ["sc-digger", "agent-sandbox-infra"]
     assert ps[0].required_checks == ("tests", "acceptance-guard", "CodeQL")   # sc-digger verlangt CodeQL
     assert ps[1].required_checks == ("tests", "acceptance-guard")             # dieses Repo: Vorgabe
-    # Das Beispiel zeigt die Dateimuster für den manuellen Merge (Issue #122).
-    assert "sandbox/*" in ps[1].manual_paths and "AGENTS.md" in ps[1].manual_paths
+    # Das Beispiel zeigt die Aufsichtsdateien mit manuellem Merge (Issue #122); Skripte unter sandbox/ mergt der Takt.
+    assert ps[1].auto_merge is True
+    assert "AGENTS.md" in ps[1].manual_paths and "sandbox/*" not in ps[1].manual_paths
 
 
 # ---- Ausgabe ----

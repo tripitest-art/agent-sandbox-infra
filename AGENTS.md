@@ -22,7 +22,7 @@ eingeschlossen. Aufbau und Einrichtung: `README.md`, Ausbaustufen: `ROADMAP.md`.
 3. **Tests müssen grün sein.** `python -m pytest -q` vor jedem Push. Neue Logik bekommt
    Tests; behobene Fehler bekommen einen Test, der den Fehler reproduziert. Tests laufen ohne
    Netzwerk, ohne `gh` und ohne Server.
-4. **Hier deployt kein Agent, Betriebsdateien merged nur Stephan.** Die Skripte steuern die Agenten
+4. **Hier deployt kein Agent, Aufsichtsdateien merged nur Stephan.** Die Skripte steuern die Agenten
    selbst; ein Fehler darin legt Worker und Review lahm. Der Merge-Modus ist „manuell durch Stephan“,
    außer das Issue sagt „automatisch“ und der PR berührt keine Datei aus `manual_paths` der
    Projektliste. `install.sh` führt nur Stephan aus. Kein Agent ruft `systemctl`, `install.sh` oder

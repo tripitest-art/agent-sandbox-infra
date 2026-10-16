@@ -13,6 +13,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 
 ### Geändert
 - review_tick: Token-Limit der Reviewer-Antwort 16000 statt 6000, einstellbar mit `REVIEW_MAX_TOKENS` (GLM zählt Denk-Tokens mit) (#135).
+- Merge-Modus: „automatisch“ ist der Standard für Worker-Issues, manuell nur für Aufsichtsdateien (`manual_paths`); braucht `freigabe-geschützt`, wirkt nach Serverkonfiguration (#133).
 
 ### Hinzugefügt
 - Auto-Deploy: `sandbox/autodeploy.py` und Timer `agent-sandbox-deploy` holen alle 15 Minuten `origin/main`, testen mit pytest, rollen per `install.sh` aus und setzen bei Fehlern zurück; Einschalten mit `AUTODEPLOY=1 bash sandbox/install.sh` (Betrieb: `docs/autodeploy.md`) (#15).
