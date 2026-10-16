@@ -31,6 +31,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - install.sh: Ressourcenlimits je Worker-Slot (`SLOT_MEMORY_MAX`, `SLOT_TASKS_MAX`, `SLOT_CPU_PERCENT` → `MemoryMax`, `TasksMax`, `CPUQuota`), gemerkt in `/etc/agent-sandbox.conf`; ohne Angabe kein Limit, Vorschlag aus Messung im README (#103, nach #100 und dem Revert #101).
 
 ### Geändert
+- `review_tick`: die Logzeile eines geposteten Reviews nennt den Reviewer („…, als Kommentar-Review gepostet, Reviewer coder-glm (Pfad).“, bei roten Checks ohne Modellaufruf „ohne-Modell“), damit das Dashboard Urteile je Modell zählen kann (#119).
 - `review_tick`: Ein PR wird auch dann geprüft, wenn sein Branch nicht `feature/issue-<N>` heißt – dafür setzt jemand mit Schreibrecht das Label `review-anfordern` (z. B. an `feature/dashboard-*` von Claude/Antigravity); ohne Worker-Issue prüft der Takt gegen PR-Text und Regeln und merged nie, der PR liegt nach dem Review bei Stephan (#121).
 - `review_tick`: Scheitert das Setzen des Commit-Status `review`, nennt die Warnzeile zusätzlich den HTTP-Statuscode aus dem gh-Fehler (z. B. 403 oder 404), damit ein Rechteproblem von einem Netzfehler unterscheidbar ist; der Fehlertext von gh bleibt weiterhin tabu (#117).
 - Review-Takt: Pflicht-Checks kommen aus der Projektliste (`required_checks`), Vorgabe `tests` und `acceptance-guard`; sc-digger nennt CodeQL dort selbst (#78).

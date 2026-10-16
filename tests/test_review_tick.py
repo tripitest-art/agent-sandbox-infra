@@ -1021,6 +1021,41 @@ def test_multiline_gh_error_lands_single_line_in_the_log(monkeypatch, capsys):
     assert "⚠" not in line and "Stephan" not in line and "\t" not in line
 
 
+# --- Reviewer in der Logzeile des geposteten Reviews --------------------------------------------
+
+def test_reviewer_in_text_liest_den_alias_und_kennt_den_fehlerfall():
+    text = ("**Freigegeben**\n\nReview nach AGENTS.md → Reviewer. Worker: DeepSeek (LiteLLM coder-fast), "
+            "Reviewer: coder-glm (andere Modellfamilie).\n")
+    assert r.reviewer_in_text(text) == "coder-glm"
+    assert r.reviewer_in_text("**Freigegeben**\n\nnichts") == "unbekannt"
+
+
+def test_gepostetes_review_nennt_das_modell_in_der_logzeile(monkeypatch, capsys):
+    monkeypatch.setattr(r, "POST", True)
+    _fake_github(monkeypatch, [_pr()])
+    r.run_once()
+    assert "als Kommentar-Review gepostet, Reviewer coder-glm (" in capsys.readouterr().out
+
+
+def test_rote_checks_stehen_als_ohne_modell_in_der_logzeile(monkeypatch, capsys):
+    monkeypatch.setattr(r, "POST", True)
+    red = [dict(GOOD_CHECKS[0], conclusion="FAILURE")] + GOOD_CHECKS[1:]
+    calls = _fake_github(monkeypatch, [_pr(statusCheckRollup=red)])
+    r.run_once()
+    assert "llm" not in calls
+    assert "Änderungen nötig, 1 Muss / 0 Kann, als Kommentar-Review gepostet, Reviewer ohne-Modell (" in capsys.readouterr().out
+
+
+def test_spaeter_gepostetes_draft_nennt_das_modell_aus_dem_text(monkeypatch, capsys):
+    calls = _github_with_merge(monkeypatch)
+    r.run_once()                                   # REVIEW_POST=0: nur Entwurf
+    capsys.readouterr()
+    monkeypatch.setattr(r, "POST", True)
+    r.run_once()
+    assert calls["llm"] == 1
+    assert "gepostet, Reviewer coder-glm (" in capsys.readouterr().out
+
+
 # --- Issue #121: PRs mit Label `review-anfordern` auch ohne Worker-Issue prüfen ---
 
 def _label_pr(**kw):
