@@ -654,6 +654,46 @@ def test_log_stream_line(capsys):
     assert "kein json" in out
 
 
+# --- Token-Verbrauch je Lauf in der Schlusszeile (#67) ---
+
+def test_format_usage_alle_werte_und_fehlende():
+    assert w.format_usage({"input_tokens": 1200, "output_tokens": 340,
+                           "cache_read_input_tokens": 9800}) == ", Token: 1200 ein/340 aus/9800 Cache"
+    # Fehlende Einzelwerte erscheinen als 0; eine 0 selbst ist ein Wert, keine Lücke.
+    assert w.format_usage({"output_tokens": 5}) == ", Token: 0 ein/5 aus/0 Cache"
+    assert w.format_usage({"input_tokens": 0}) == ", Token: 0 ein/0 aus/0 Cache"
+    assert w.format_usage({"cache_read_input_tokens": 90}) == ", Token: 0 ein/0 aus/90 Cache"
+
+
+def test_format_usage_ohne_brauchbaren_wert_ist_leer():
+    unbrauchbar = [None, "x", 7, [], {}, object(),
+                   {"input_tokens": -1}, {"input_tokens": "7"}, {"output_tokens": True},
+                   {"cache_read_input_tokens": 1.5}, {"output_tokens": None, "input_tokens": -3}]
+    for bad in unbrauchbar:
+        assert w.format_usage(bad) == "", bad
+
+
+def test_format_usage_wirft_auch_bei_eigenwilligem_dict_nicht():
+    class Bockig(dict):
+        def get(self, *args, **kwargs):
+            raise RuntimeError("usage.get() kaputt")
+
+    # Der Vertrag sagt „wirft nie eine Ausnahme“: die Zeile darf den Lauflog nicht abbrechen.
+    assert w.format_usage(Bockig(input_tokens=5)) == ""
+
+
+def test_result_zeile_haengt_nur_brauchbare_tokens_an(capsys):
+    base = {"type": "result", "subtype": "success", "num_turns": 1, "duration_ms": 2000}
+    w.log_stream_line(json.dumps(dict(base, usage={"output_tokens": 7})))
+    w.log_stream_line(json.dumps(dict(base, usage={})))
+    w.log_stream_line(json.dumps(dict(base, usage="kaputt")))
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "[Qwen Code: success, 1 Züge, 2 s, Token: 0 ein/7 aus/0 Cache]"
+    # Unbrauchbare Angaben ändern die Zeile nicht (Vertrag: byte-gleich wie heute).
+    assert lines[1] == "[Qwen Code: success, 1 Züge, 2 s]"
+    assert lines[2] == "[Qwen Code: success, 1 Züge, 2 s]"
+
+
 # --- Regel 5: keine Geheimnisse im Agentenprozess und im Log (#35) ---
 
 GEHEIM = "sk-nur-ein-test-geheimnis"
