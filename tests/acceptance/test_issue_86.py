@@ -13,7 +13,7 @@ def test_security_md_meldeweg():
     t = _read("SECURITY.md")
     assert "security/advisories" in t or "Private vulnerability reporting" in t
     assert "Zugangsdaten" in t
-    assert " @" not in t, "keine E-Mail-Adresse im öffentlichen Repo"
+    assert "@" not in t, "keine E-Mail-Adresse im öffentlichen Repo"
 
 
 def test_license_ist_mit():
