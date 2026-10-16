@@ -60,6 +60,15 @@ REVIEW_POST=${REVIEW_POST:-${prev_post:-0}}     # 1: Review posten, mergen, entb
 REVIEW_LABELS=${REVIEW_LABELS:-agent-qwen,agent-antigravity,agent-claude}   # diese Worker-PRs prüft der Takt
 REVIEW_AUTO_MERGE=${REVIEW_AUTO_MERGE:-$(conf_get REVIEW_AUTO_MERGE)}
 REVIEW_AUTO_MERGE=${REVIEW_AUTO_MERGE:-1}       # 1: Freigegebene PRs mit Modus automatisch squashen
+# Web-Dashboard (dashboard.py): nur lesend, ohne Login, gehört ins LAN. Aus, bis DASHBOARD=1 gesetzt ist.
+DASHBOARD=${DASHBOARD:-$(conf_get DASHBOARD)}
+DASHBOARD=${DASHBOARD:-0}                       # 1: Dienst agent-dashboard einrichten und starten
+DASHBOARD_PORT=${DASHBOARD_PORT:-$(conf_get DASHBOARD_PORT)}
+DASHBOARD_PORT=${DASHBOARD_PORT:-8099}
+if ! [[ $DASHBOARD =~ ^[01]$ ]] || ! [[ $DASHBOARD_PORT =~ ^[1-9][0-9]{0,4}$ ]] || [ "$DASHBOARD_PORT" -gt 65535 ]; then
+  echo "DASHBOARD muss 0 oder 1 sein, DASHBOARD_PORT eine Portnummer (1-65535). Nichts gemerkt." >&2
+  exit 1
+fi
 REVIEW_TAKT=${REVIEW_TAKT:-10min}               # so oft sucht der Review-Takt einen PR
 REVIEW_MODEL=${REVIEW_MODEL:-coder-glm}         # LiteLLM-Alias (GLM, andere Familie als der Worker)
 REVIEW_MODEL_BIG=${REVIEW_MODEL_BIG:-longctx-lite}   # für sehr große Diffs
@@ -71,7 +80,7 @@ SLOT_CPU_PERCENT=${SLOT_CPU_PERCENT:-$(conf_get SLOT_CPU_PERCENT)}
 slot_limits_check || { echo "Nichts gemerkt; Einstellung korrigieren oder die Zeile aus $CONF entfernen." >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 # Gleich merken, nicht erst am Ende: Bricht ein späterer Schritt ab, gilt der Wunsch beim nächsten Lauf trotzdem.
-( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS REVIEW_POST REVIEW_AUTO_MERGE SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT ) \
+( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS REVIEW_POST REVIEW_AUTO_MERGE SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT DASHBOARD DASHBOARD_PORT ) \
   && echo "Einstellungen gemerkt ($CONF): MAX_WORKERS=$WORKERS_WANTED REVIEW_POST=$REVIEW_POST REVIEW_AUTO_MERGE=$REVIEW_AUTO_MERGE" \
   || echo "Warnung: Einstellungen konnten nicht gemerkt werden ($CONF)"
 # Alle LiteLLM-Aliase, die der Worker nutzen kann (Hauptmodell zuerst, ohne Doppelte)
@@ -415,6 +424,40 @@ if [ -f /etc/ha-status.env ] && grep -q '^HA_STATUS_URL=.' /etc/ha-status.env; t
 else
   systemctl disable --now ha-status.timer >/dev/null 2>&1 || true
   echo "ha-status: aus (HA_STATUS_URL fehlt in /etc/ha-status.env)"
+fi
+
+echo "== Web-Dashboard"
+# dashboard.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py). Der Dienst liest nur (Slots,
+# worker.log, gh, LiteLLM) und hat keinen Login: nie hinter eine Portfreigabe stellen.
+cat > /etc/systemd/system/agent-dashboard.service <<UNIT
+[Unit]
+Description=Web-Dashboard der Agenten-Sandbox (sandbox/dashboard.py)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+Environment=DASHBOARD_PORT=$DASHBOARD_PORT
+Environment=LITELLM=$LITELLM
+# Budget-Keys wie bei ha-status (LITELLM_WORKER_KEY/LITELLM_PLANER_KEY von Hand in /etc/ha-status.env);
+# fehlt eine Datei, entfällt nur das jeweilige Budget.
+EnvironmentFile=-/etc/ha-status.env
+EnvironmentFile=-/etc/qwen-reviewer.env
+NoNewPrivileges=yes
+ExecStart=/usr/bin/python3 /root/dashboard.py
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+if [ "$DASHBOARD" = 1 ]; then
+  systemctl enable agent-dashboard.service >/dev/null; systemctl restart agent-dashboard.service
+  echo "agent-dashboard: $(systemctl is-active agent-dashboard.service) (Port $DASHBOARD_PORT, nur im LAN)"
+else
+  systemctl disable --now agent-dashboard.service >/dev/null 2>&1 || true
+  echo "agent-dashboard: aus (mit DASHBOARD=1 einschalten)"
 fi
 
 echo "== Infra-Repo: Deploy-Key (nur lesen)"
