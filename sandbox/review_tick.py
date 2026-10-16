@@ -295,11 +295,39 @@ def worker_from_body(body: str | None) -> str | None:
     return m.group(1).strip() if m else None
 
 
+def _neuerer_lauf(neu: dict, alt: dict) -> bool:
+    """True, wenn `neu` der neuere Lauf desselben Check-Namens ist.
+
+    Verglichen wird `startedAt` als ISO-8601-Text (lexikografisch = chronologisch). Ein Eintrag
+    ohne `startedAt` gilt als älter als jeder mit. Bei Gleichstand oder ohne Zeitstempel gewinnt
+    der spätere Eintrag der Liste — deshalb kommt hier `neu` aus dem späteren Eintrag und gewinnt
+    ein Gleichstand. Reine Funktion, kein Netz."""
+    t_neu, t_alt = neu.get("startedAt"), alt.get("startedAt")
+    if t_neu and t_alt:
+        return t_neu >= t_alt
+    return bool(t_neu) or not t_alt
+
+
 def checks_summary(rollup: list[dict]) -> tuple[bool, list[tuple[str, str]], list[str]]:
-    """(alle fertig, [(Name, Ergebnis)], Namen roter Pflicht-Checks)."""
-    rows, done, red = [], True, []
+    """(alle fertig, [(Name, Ergebnis)], Namen roter Pflicht-Checks).
+
+    Je Check-Name (`name`, bei Statuseinträgen `context`) zählt nur der neueste Lauf: Ein
+    abgebrochener Lauf bleibt neben dem neueren im Rollup stehen (acceptance-guard bricht mit
+    `cancel-in-progress` den älteren ab), sonst gälte ein PR als rot, obwohl der neue Lauf grün
+    war, und der Takt verbrauchte eine Review-Runde ohne Grund. `rows` hat genau einen Eintrag je
+    Name, in der Reihenfolge des ersten Vorkommens."""
+    gewaehlt: dict[str, dict] = {}
+    order: list[str] = []
     for c in rollup or []:
         name = c.get("name") or c.get("context") or "?"
+        if name not in gewaehlt:
+            order.append(name)
+            gewaehlt[name] = c
+        elif _neuerer_lauf(c, gewaehlt[name]):
+            gewaehlt[name] = c
+    rows, done, red = [], True, []
+    for name in order:
+        c = gewaehlt[name]
         status = (c.get("status") or ("COMPLETED" if c.get("state") else "")).upper()
         result = (c.get("conclusion") or c.get("state") or "").upper()
         if status != "COMPLETED":
@@ -334,14 +362,18 @@ def pending_draft(pr: dict) -> str | None:
     return text
 
 
-def pick_pr(prs: list[dict], state: dict, labels_of) -> dict | None:
+def pick_pr(prs: list[dict], state: dict, labels_of, skip: frozenset[int] = frozenset()) -> dict | None:
     """Ältester offener PR ohne Review für den aktuellen Commit. `labels_of(issue_no)` -> Labelnamen.
     Mit REVIEW_POST=1 zählen auch schon geprüfte PRs, deren Entwurf noch nicht gepostet ist.
     Ein PR zählt auch dann, wenn er das Label REVIEW_REQUEST_LABEL trägt, egal wie der Branch heißt
     (dann ist `issue_no` None); für einen solchen PR wird `labels_of` nicht aufgerufen.
     Draft-PRs werden übersprungen: Laut AGENTS.md (Worker 6) ist das genau der PR, bei dem der
-    Worker aufgegeben hat; GitHub lehnt den Merge ab, ein Review wäre also vergebens."""
+    Worker aufgegeben hat; GitHub lehnt den Merge ab, ein Review wäre also vergebens.
+    `skip` nennt PR-Nummern, die dieser Takt schon erfolglos betrachtet hat (etwa weil die Checks
+    noch laufen); sie werden ignoriert, damit ein nicht prüfbarer PR die jüngeren nicht blockiert."""
     for pr in sorted(prs, key=lambda p: p["number"]):
+        if pr["number"] in skip:
+            continue
         m = re.match(r"feature/issue-(\d+)", pr["headRefName"])
         requested = REVIEW_REQUEST_LABEL in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]
         if not (m or requested) or pr.get("isCrossRepository") or not pr.get("commits"):
@@ -776,14 +808,31 @@ def _run_pr_review() -> int:
             gemeldet.append(config_key)
             save_state(state)
         return 0
-    done, checks, red = checks_summary(pr.get("statusCheckRollup") or [])
-    if not done or not checks:
-        log(f"PR #{n}: Checks laufen noch, warte.")
-        return 0
-    worker = worker_from_body(pr.get("body"))
-    if not worker:
-        log(f"PR #{n}: Zeile „Worker: …“ fehlt im PR-Text, kein Review (Worker-Takt trägt sie nach).")
-        return 0
+    # Ein PR, der jetzt nicht prüfbar ist (Checks laufen noch oder die Worker-Zeile fehlt), kommt in
+    # `skip`; der Takt nimmt den nächsten Kandidaten, statt den jüngeren PRs den Takt zu sperren.
+    skip = frozenset()
+    while True:
+        done, checks, red = checks_summary(pr.get("statusCheckRollup") or [])
+        if not done or not checks:
+            log(f"PR #{n}: Checks laufen noch, warte.")
+        else:
+            worker = worker_from_body(pr.get("body"))
+            if worker:
+                break
+            # Bei einem PR ohne Worker-Issue gibt es keinen Takt, der die Zeile nachtragen könnte.
+            hinweis = ("bitte im PR-Text ergänzen" if pr["issue_no"] is None
+                       else "Worker-Takt trägt sie nach")
+            ohne_worker = state.setdefault("ohne_worker", [])
+            if key not in ohne_worker:
+                log(f"PR #{n}: Zeile „Worker: …“ fehlt im PR-Text, kein Review ({hinweis}).")
+                ohne_worker.append(key)
+                del ohne_worker[:-200]
+                save_state(state)
+        skip = skip | {n}
+        pr = pick_pr(prs or [], state, labels_of, skip=skip)
+        if not pr:
+            return 0
+        n, key = pr["number"], f"pr{pr['number']}@{pr['headRefOid']}"
 
     issue: dict | None = None
     no_model = False   # True: rote Checks, das Review kam ohne Modellaufruf zustande

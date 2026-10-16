@@ -167,6 +167,31 @@ def test_checks_summary_pending_and_red():
     assert r.checks_summary(ctx)[2] == []
 
 
+def test_checks_summary_status_eintraege_zaehlen_je_context():
+    """Statuseinträge eines Commits (`context`/`state` statt `name`/`status`) zählen je Name wie
+    Check-Runs; der Vergleich über `startedAt` greift auch dort (Issue #130)."""
+    rollup = [{"context": "review", "state": "FAILURE"},
+              {"name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"},
+              {"name": "acceptance-guard", "status": "COMPLETED", "conclusion": "SUCCESS"},
+              {"context": "github-advanced-security", "state": "FAILURE"}]
+    done, rows, red = r.checks_summary(rollup)
+    assert done is True and red == []                 # `review` ist kein Pflicht-Check
+    assert sorted(rows) == [("acceptance-guard", "SUCCESS"), ("github-advanced-security", "FAILURE"),
+                            ("review", "FAILURE"), ("tests", "SUCCESS")]
+    # Statuseinträge ohne Zeitstempel: der spätere Eintrag der Liste gewinnt
+    assert r.checks_summary([{"context": "review", "state": "FAILURE"},
+                             {"context": "review", "state": "SUCCESS"}])[1] == [("review", "SUCCESS")]
+
+
+def test_checks_summary_ein_eintrag_je_name_wie_bisher():
+    """Ohne Wiederholungen bleibt alles wie bisher: ein Eintrag je Name zählt einzeln."""
+    rollup = [{"name": "tests", "status": "COMPLETED", "conclusion": "FAILURE", "startedAt": "2026-10-16T10:00:00Z"},
+              {"name": "acceptance-guard", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-10-16T10:00:01Z"}]
+    done, rows, red = r.checks_summary(rollup)
+    assert done is True and red == ["tests"]
+    assert rows == [("tests", "FAILURE"), ("acceptance-guard", "SUCCESS")]
+
+
 def _projekt_mit_pflicht_checks(*checks):
     return r.projects.Project(name="sc-digger", repo="tripitest-art/sc-digger",
                               workdir="/root/sc-digger", required_checks=tuple(checks))
@@ -376,10 +401,36 @@ def test_red_check_needs_no_model_and_counts_a_round(monkeypatch, tmp_path):
 
 
 def test_pending_checks_and_missing_worker_line_wait(monkeypatch):
+    # Seit Issue #130 hängt der Takt nicht mehr am ältesten PR: er überspringt ihn (Checks laufen
+    # noch, zweiter PR ohne Worker-Zeile) und endet ohne Modellaufruf, statt zu warten.
     pending = GOOD_CHECKS + [{"name": "Analyze (python)", "status": "IN_PROGRESS", "conclusion": ""}]
     calls = _fake_github(monkeypatch, [_pr(statusCheckRollup=pending), _pr(8, headRefName="feature/issue-8", body="Closes #8")])
     r.run_once()
     assert "llm" not in calls
+
+
+def test_fehlende_worker_zeile_nennt_beim_worker_pr_den_nachtrag(monkeypatch, capsys, tmp_path):
+    """Bei einem PR mit Worker-Issue nennt die Logzeile weiter „(Worker-Takt trägt sie nach)“ und
+    der Merker hält den Stand fest, damit dieselbe Zeile nicht jeden Takt neu kommt (Issue #130)."""
+    calls = _fake_github(monkeypatch, [_pr(body="Closes #5\n\nWas und warum\n")])
+    assert r.run_once() == 0
+    out = capsys.readouterr().out
+    assert "llm" not in calls
+    assert "PR #7: Zeile „Worker: …“ fehlt im PR-Text, kein Review (Worker-Takt trägt sie nach)." in out
+    assert json.loads((tmp_path / "state.json").read_text())["ohne_worker"] == [f"pr7@{SHA}"]
+    # Zweiter Takt auf demselben Commit: der Merker verhindert die Wiederholung.
+    assert r.run_once() == 0
+    assert "Zeile „Worker: …“ fehlt" not in capsys.readouterr().out
+
+
+def test_ohne_worker_merker_bleibt_begrenzt(monkeypatch, tmp_path):
+    """Der Merker wächst nicht unbegrenzt: höchstens 200 Einträge, der neue steht darin (Issue #130)."""
+    alt = [f"pr9{i}@{SHA}" for i in range(200)]
+    (tmp_path / "state.json").write_text(json.dumps({"ohne_worker": alt}), encoding="utf-8")
+    _fake_github(monkeypatch, [_pr(body="Closes #5\n\nkein Worker-Hinweis\n")])
+    assert r.run_once() == 0
+    merker = json.loads((tmp_path / "state.json").read_text())["ohne_worker"]
+    assert len(merker) == 200 and f"pr7@{SHA}" in merker and f"pr90@{SHA}" not in merker
 
 
 def test_same_family_is_skipped(monkeypatch, capsys):
