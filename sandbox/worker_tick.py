@@ -105,10 +105,20 @@ WAKE_PC = os.environ.get("WAKE_PC", "0") == "1"
 # Schlüssel in STATE: letzter Zustand von PC und Arbeit (Meldung nur beim Wechsel)
 LAST_PC, LAST_WORK = "_pc", "_arbeit"
 
+# Verzeichnis der gemeinsamen Auftrags-Belegung (#59): Zustand und Versuchszähler bleiben je Slot
+# (`/root/worker-state-w<N>.json`), nur die Belegung gehört allen zusammen. Ohne sie nahmen beide
+# Slots denselben Nacharbeits-Auftrag an (15.10.: sc-digger pr287 um 10:36 in w1 und w2).
+CLAIM_DIR = os.environ.get("CLAIM_DIR", "/var/lib/worker-claims")
+# Verzeichnisse, für die claim_job schon eine „⚠ Stephan:“-Zeile geschrieben hat. Eigener Merker,
+# weil claim_job keinen Zustand bekommt; der Takt ist ein kurzer Prozess je Auftrag.
+_CLAIM_WARNED: set[str] = set()
+
 # Wie .github/scripts/acceptance_guard.py: Kommentare der Vorlage zählen nicht.
 _LINK_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b", re.I)
 _WORKER_LINE_RE = re.compile(r"^[\s>*_-]*Worker[*_]*\s*:[\s*_]*\w", re.I | re.M)
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+# Belegungsdateien werden nach dem Auftragsschlüssel benannt: alles außer A-Z a-z 0-9 . @ - wird „_“.
+_CLAIM_UNSAFE_RE = re.compile(r"[^A-Za-z0-9.@-]")
 
 # In beiden Aufträgen: Qwen hielt „GraphQL: …“ von gh für Erfolg (#103).
 ERROR_RULE = (
@@ -955,13 +965,128 @@ def parked_job(state: dict) -> str | None:
     return None
 
 
+def _claim_name(skey: str) -> str:
+    """Dateiname zu einem Auftragsschlüssel (mit Projektvorsatz): unerlaubte Zeichen werden „_“."""
+    return _CLAIM_UNSAFE_RE.sub("_", skey)
+
+
+def claim_path(skey: str) -> str:
+    """Pfad der Belegungsdatei CLAIM_DIR/<Name>.claim; legt nichts an."""
+    return os.path.join(CLAIM_DIR, _claim_name(skey) + ".claim")
+
+
+def _claim_done_path(skey: str) -> str:
+    """Pfad der „erledigt“-Marke CLAIM_DIR/<Name>.done; legt nichts an."""
+    return os.path.join(CLAIM_DIR, _claim_name(skey) + ".done")
+
+
+def _claim_owner(path: str) -> int | None:
+    """PID aus einer Belegungsdatei; None, wenn sie fehlt oder unlesbar ist."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_alive(pid: int | None) -> bool:
+    """True, wenn der Prozess noch läuft. Ein fehlendes Recht bedeutet: er lebt (anderer Nutzer)."""
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def claimed_elsewhere(skey: str) -> bool:
+    """True, wenn ein anderer lebender Prozess den Auftrag belegt hat (#59).
+
+    Ein beendeter Slot blockiert nicht: claim_job() übernimmt dessen Belegung.
+    """
+    owner = _claim_owner(claim_path(skey))
+    return owner is not None and owner != os.getpid() and _pid_alive(owner)
+
+
+def claim_job(skey: str) -> bool:
+    """Belegt den Auftrag atomar für diesen Prozess (Datei mit der PID) und meldet Erfolg.
+
+    True: neu angelegt, schon dem eigenen Prozess gehörend oder von einem beendeten Prozess
+    übernommen. False: ein anderer lebender Slot hält ihn. Ohne die Belegung nahmen beide Slots
+    denselben Nacharbeits-Auftrag an (#59) – das kostet Modellläufe und MAX_TRIES, und zwei
+    Commits auf demselben Branch drohen zu konkurrieren.
+
+    Ist CLAIM_DIR nicht nutzbar, wird einmal eine „⚠ Stephan:“-Zeile geschrieben (Regel 7) und
+    True geliefert, damit der Takt nicht stillsteht. Dann ist die Doppelbearbeitung wieder
+    möglich – sichtbar, aber nicht verhindert.
+    """
+    path = claim_path(skey)
+    try:
+        os.makedirs(CLAIM_DIR, exist_ok=True)
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            if claimed_elsewhere(skey):
+                return False
+            # Eigene oder verwaiste Belegung (abgebrochener Takt): übernehmen.
+            fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+        return True
+    except OSError as exc:
+        if CLAIM_DIR not in _CLAIM_WARNED:
+            _CLAIM_WARNED.add(CLAIM_DIR)
+            log(f"⚠ Stephan: Auftrags-Belegung {CLAIM_DIR} nicht nutzbar "
+                f"({type(exc).__name__}: {exc}) – Doppelbearbeitung wieder möglich.")
+        return True
+
+
+def release_job(skey: str) -> None:
+    """Löscht die Belegung, aber nur wenn sie dem eigenen Prozess gehört; fehlt sie, kein Fehler.
+
+    Die Eigentumsprüfung verhindert, dass ein Slot die Belegung eines anderen wieder freigibt.
+    """
+    path = claim_path(skey)
+    if _claim_owner(path) != os.getpid():
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass            # schon weg oder nicht lesbar: die Belegung ist fort
+
+
+def mark_job_done(skey: str) -> None:
+    """Merkt die angekommene Nacharbeit für alle Slots (#59): Datei CLAIM_DIR/<Name>.done.
+
+    Die Liste DONE in der Zustandsdatei bleibt je Slot; sie allein sah den anderen Slot nicht,
+    und dieselbe Nacharbeit lief danach erneut an.
+    """
+    try:
+        os.makedirs(CLAIM_DIR, exist_ok=True)
+        with open(_claim_done_path(skey), "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+    except OSError as exc:
+        log(f"Warnung: „erledigt“ für {skey} nicht merkbar ({type(exc).__name__}: {exc}).")
+
+
+def job_done_anywhere(skey: str) -> bool:
+    """True, wenn irgendein Slot diese Nacharbeit schon angekommen gemeldet hat (#59)."""
+    return os.path.exists(_claim_done_path(skey))
+
+
 def find_job(state: dict):
-    """Erster Auftrag, dessen Schlüssel nicht geparkt ist, oder None.
+    """Erster Auftrag, dessen Schlüssel weder geparkt noch von einem anderen Slot belegt oder
+    erledigt ist, oder None.
 
     Ein liegengebliebener Auftrag darf den Takt und die weiteren Projekte nicht blockieren.
+    Die Belegung gehört allen Slots zusammen (#59), sonst nahmen beide denselben Auftrag an.
     """
     def skip(key: str) -> bool:
-        return job_parked(state, key)
+        skey = PREFIX + key
+        return job_parked(state, key) or claimed_elsewhere(skey) or job_done_anywhere(skey)
 
     return rework_job(project_done(state), skip) or text_fix_job(skip) or issue_job(skip)
 
@@ -1129,6 +1254,11 @@ def main() -> int:
                     return 0
                 key, task, pr_no, before = job
                 skey = PREFIX + key
+        if not claim_job(skey):
+            # #59: Der andere Slot hält den Auftrag. Eine Zeile je Wechsel, kein Versuch verbraucht.
+            log_on_change(state, LAST_WORK, f"{skey} belegt",
+                          f"{skey}: von einem anderen Slot belegt, warte.")
+            return 0
         state[LAST_WORK] = skey
 
         state[skey] = state.get(skey, 0) + 1
@@ -1180,6 +1310,7 @@ def main() -> int:
                     log(f"{skey}: PR-Text von #{pr_no} geändert, kein neuer Commit.")
                 state.setdefault(DONE, []).append(skey)
                 save_state(state)
+                mark_job_done(skey)   # #59: die Nacharbeit ist in allen Slots erledigt
             else:
                 log(f"WARNUNG {skey}: weder Commit noch PR-Text auf PR #{pr_no} geändert, "
                     "Nacharbeit nicht erledigt.")
@@ -1189,6 +1320,10 @@ def main() -> int:
         # Ausnahme; die Kurzbeschreibung bleibt damit einzeilig.
         alarm(skey, first_line(exc))
         return 0
+    finally:
+        # #59: Die Belegung endet mit dem Lauf, auch wenn er geworfen hat. Ohne eigene Belegung
+        # (keine Arbeit, fremde Belegung) ist das ein Nullaufruf.
+        release_job(skey)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,8 @@
 import importlib.util
 import io
 import json
+import os
+import subprocess
 import sys
 import urllib.error
 from pathlib import Path
@@ -28,6 +30,8 @@ def _repo_workdir(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "STATE", str(tmp_path / "state-default.json"))
     # Slot-Telemetrie nie ins echte /run/worker-slots schreiben (#14).
     monkeypatch.setattr(w, "SLOT_DIR", str(tmp_path / "slots"))
+    # Die gemeinsame Auftrags-Belegung (#59) nie nach /var/lib/worker-claims schreiben.
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
     # use_model() ändert diese Globalen; nach jedem Test zurück auf die Vorgabe.
     monkeypatch.setattr(w, "WORKER", w.WORKER)
     monkeypatch.setattr(w, "ACTIVE_MODEL", w.LITELLM_MODEL)
@@ -1355,3 +1359,140 @@ def test_main_meldet_fehler_vor_der_auftragswahl(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "⚠ Stephan: -: Fehler: Zustandsdatei nicht lesbar" in out
     assert "Traceback" not in out
+
+
+# --- Gemeinsame Belegung der Nacharbeit (#59) ---
+
+def test_claim_path_ersetzt_projektvorsatz_und_doppelpunkt(monkeypatch, tmp_path):
+    """Ein Schlüssel mit „/“ und „:“ wird ein Dateiname im CLAIM_DIR, kein Pfad darunter."""
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    path = w.claim_path("agent-sandbox-infra/pr12@2026-10-15T10:35:45Z")
+    assert os.path.dirname(path) == str(tmp_path / "claims")
+    assert os.path.basename(path) == "agent-sandbox-infra_pr12@2026-10-15T10_35_45Z.claim"
+
+
+def test_pid_alive_erkennt_beendeten_prozess():
+    """Ein abgebrochener Takt darf die Belegung nicht für immer halten."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    assert w._pid_alive(proc.pid) is False
+    assert w._pid_alive(os.getpid()) is True
+    assert w._pid_alive(None) is False
+
+
+def test_claim_job_schreibt_die_eigene_pid_und_gibt_frei(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    assert w.claim_job("issue59") is True
+    assert open(w.claim_path("issue59"), encoding="utf-8").read().strip() == str(os.getpid())
+    w.release_job("issue59")
+    assert not os.path.exists(w.claim_path("issue59"))
+
+
+def test_release_job_ist_ohne_belegung_kein_fehler(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    w.release_job("issue59")   # nichts zu löschen
+
+
+def test_claim_job_uebernimmt_nur_beendete_fremde_prozesse(monkeypatch, tmp_path):
+    """Fremd und lebend: nicht übernehmen. Fremd und beendet: übernehmen (#59)."""
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    os.makedirs(w.CLAIM_DIR, exist_ok=True)
+    with open(w.claim_path("issue59"), "w", encoding="utf-8") as fh:
+        fh.write("4242")
+    monkeypatch.setattr(w, "_pid_alive", lambda pid: pid == 4242)
+    assert w.claimed_elsewhere("issue59") is True
+    assert w.claim_job("issue59") is False
+    assert open(w.claim_path("issue59"), encoding="utf-8").read().strip() == "4242"
+    monkeypatch.setattr(w, "_pid_alive", lambda pid: False)
+    assert w.claimed_elsewhere("issue59") is False
+    assert w.claim_job("issue59") is True
+    assert open(w.claim_path("issue59"), encoding="utf-8").read().strip() == str(os.getpid())
+
+
+def test_release_job_gibt_fremde_belegung_nicht_frei(monkeypatch, tmp_path):
+    """Ein Slot darf die Belegung des anderen nicht löschen."""
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    os.makedirs(w.CLAIM_DIR, exist_ok=True)
+    with open(w.claim_path("issue59"), "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid() + 1000))
+    w.release_job("issue59")
+    assert os.path.exists(w.claim_path("issue59"))
+
+
+def test_find_job_ueberspringt_belegte_und_erledigte_auftraege(monkeypatch, tmp_path):
+    """`find_job` respektiert die gemeinsame Belegung und die „erledigt“-Marke (#59)."""
+    monkeypatch.setattr(w, "PREFIX", "")
+    key = "issue59"
+
+    def rework(done=frozenset(), skip=None):
+        if (skip and skip(key)) or key in done:
+            return None
+        return (key, "Aufgabe", None, None)
+
+    monkeypatch.setattr(w, "rework_job", rework)
+    monkeypatch.setattr(w, "text_fix_job", lambda skip=None: None)
+    monkeypatch.setattr(w, "issue_job", lambda skip=None: None)
+    assert w.find_job({})[0] == key              # frei: der Auftrag kommt dran
+    os.makedirs(w.CLAIM_DIR, exist_ok=True)
+    with open(w.claim_path(key), "w", encoding="utf-8") as fh:
+        fh.write("4242")
+    monkeypatch.setattr(w, "_pid_alive", lambda pid: True)
+    assert w.find_job({}) is None                # der andere lebende Slot hält ihn
+    os.remove(w.claim_path(key))
+    assert w.find_job({})[0] == key
+    w.mark_job_done(key)
+    assert w.find_job({}) is None                # im anderen Slot schon angekommen
+
+
+def test_main_belegt_vor_dem_lauf_und_gibt_frei(monkeypatch, tmp_path):
+    """#59: Die Belegung entsteht vor dem Agenten und ist danach weg – auch nach einem Fehler."""
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "load_state", lambda: {})
+    monkeypatch.setattr(w, "save_state", lambda state: None)
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue59", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "prepare_workdir", lambda: None)
+    gesehen = {}
+
+    def run(prompt):
+        gesehen["belegt"] = os.path.exists(w.claim_path("issue59"))
+        raise RuntimeError("Agent kaputt")
+
+    monkeypatch.setattr(w, "run_agent", run)
+    assert w.main() == 0
+    assert gesehen["belegt"] is True
+    assert not os.path.exists(w.claim_path("issue59"))
+
+
+def test_main_belegter_auftrag_verbraucht_keinen_versuch(monkeypatch, tmp_path, capsys):
+    """Hält der andere Slot den Auftrag, gibt es keinen Versuch und keinen Agentenlauf (#59)."""
+    state = tmp_path / "state.json"
+    monkeypatch.setattr(w, "STATE", str(state))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue59", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_job", lambda skey: False)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: pytest.fail("kein Lauf ohne Belegung"))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: pytest.fail("kein Agent ohne Belegung"))
+    assert w.main() == 0
+    assert "issue59: von einem anderen Slot belegt, warte." in capsys.readouterr().out
+    assert "issue59" not in json.loads(state.read_text(encoding="utf-8"))
+
+
+def test_claim_job_meldet_nicht_nutzbares_verzeichnis_einmal(monkeypatch, tmp_path, capsys):
+    """Regel 7: ohne Belegung einmal „⚠ Stephan:“, der Takt läuft weiter (True)."""
+    datei = tmp_path / "claims"
+    datei.write_text("kein Verzeichnis", encoding="utf-8")   # makedirs scheitert auch als root
+    monkeypatch.setattr(w, "CLAIM_DIR", str(datei))
+    monkeypatch.setattr(w, "_CLAIM_WARNED", set())
+    assert w.claim_job("issue59") is True
+    out = capsys.readouterr().out
+    assert out.count("⚠ Stephan:") == 1 and "nicht nutzbar" in out
+    assert w.claim_job("issue59") is True
+    assert capsys.readouterr().out == ""
