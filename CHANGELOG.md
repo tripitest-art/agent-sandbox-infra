@@ -29,6 +29,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - Dependabot für die GitHub Actions (wöchentlich, höchstens 2 offene PRs) (#93).
 - Doku: Backup und Wiederherstellung der Sandbox (`docs/backup.md`) (#95).
 - install.sh: Ressourcenlimits je Worker-Slot (`SLOT_MEMORY_MAX`, `SLOT_TASKS_MAX`, `SLOT_CPU_PERCENT` → `MemoryMax`, `TasksMax`, `CPUQuota`), gemerkt in `/etc/agent-sandbox.conf`; ohne Angabe kein Limit, Vorschlag aus Messung im README (#103, nach #100 und dem Revert #101).
+- GitHub-Action `.github/workflows/wake.yml`: Weckruf („wake“) an einen ntfy-Strom bei Label `bereit`, PR-Ereignissen und fertigen Checks, damit der Dienst `agent-wake` die Takte sofort startet (Teil 2 von #128, braucht das Secret `WAKE_PUBLISH_URL`) (#129).
 
 ### Geändert
 - `review_tick`: die Logzeile eines geposteten Reviews nennt den Reviewer („…, als Kommentar-Review gepostet, Reviewer coder-glm (Pfad).“, bei roten Checks ohne Modellaufruf „ohne-Modell“), damit das Dashboard Urteile je Modell zählen kann (#119).
