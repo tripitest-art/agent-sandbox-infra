@@ -8,7 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Hinzugefügt
-- Dashboard: Abschnitt „Reviews und Merges“ (Freigabequote, Merges, Übergaben an Stephan, 24 h und 7 Tage, je Projekt) aus `worker.log` (`dashboard_stats.py`).
+- Dashboard: Abschnitt „Reviews und Merges“ (Freigabequote, Merges, Übergaben an Stephan, 24 h und 7 Tage, je Projekt) aus `worker.log` (`dashboard_stats.py`) (#115).
 - Dashboard: Push-Meldungen über ntfy (`dashboard_notify.py`) bei `⚠ Stephan`-Zeilen, totem Slot, Budget ab 90 %, veralteten Daten; `NTFY_URL` in `/etc/agent-dashboard.env`, Test mit `--notify-test` (#114).
 - Dashboard: LiteLLM-Budget-Limits (`max_budget`) lassen sich im Browser ändern, geschützt durch einen Schreib-Token und den Master-Key aus `/etc/agent-dashboard.env` (Dienst `agent-dashboard`, `install.sh` fragt beides ab) (#111).
 - `LICENSE` (MIT, Copyright (c) 2026 Stephan Voigt) und `SECURITY.md` mit dem vertraulichen Meldeweg für Sicherheitslücken (GitHub „Private vulnerability reporting“); dazu der README-Abschnitt „Lizenz und Sicherheit“ (#110).
