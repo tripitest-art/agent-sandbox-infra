@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import urllib.error
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,9 @@ def _repo_workdir(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "SLOT_DIR", str(tmp_path / "slots"))
     # Die gemeinsame Auftrags-Belegung (#59) nie nach /var/lib/worker-claims schreiben.
     monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    # Das Audit-Log (#85) nie nach /root/audit.jsonl schreiben; Tests, die es prüfen, setzen
+    # AUDIT_LOG selbst auf eine tmp_path-Datei.
+    monkeypatch.setattr(w, "AUDIT_LOG", str(tmp_path / "audit-default.jsonl"))
     # use_model() ändert diese Globalen; nach jedem Test zurück auf die Vorgabe.
     monkeypatch.setattr(w, "WORKER", w.WORKER)
     monkeypatch.setattr(w, "ACTIVE_MODEL", w.LITELLM_MODEL)
@@ -1694,6 +1698,108 @@ def test_claim_issue_logs_the_stderr_reason_when_gh_fails(monkeypatch):
     assert w.claim_issue(22) is False
     assert any("Claiming von Issue #22 fehlgeschlagen" in l and "HTTP 403: Resource not accessible" in l for l in lines)
     assert not any("mehr" in l for l in lines)   # nur die erste Zeile
+
+
+# ---- audit(): eine JSON-Zeile je Ereignis in AUDIT_LOG (#85) ----
+
+def _audit_zeilen(p: Path) -> list[dict]:
+    return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()]
+
+
+def test_audit_schreibt_ereignis_mit_utc_zeit(tmp_path, monkeypatch):
+    """ts ist ISO 8601 in UTC (Offset 0), dazu event, slot und model dieses Laufs."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(w, "AUDIT_LOG", str(f))
+    monkeypatch.setattr(w, "WORKER_SLOT", "2")
+    monkeypatch.setattr(w, "MODEL", "test-modell")
+    w.audit("ereignis", issue=5)
+    z = _audit_zeilen(f)[0]
+    assert z["event"] == "ereignis" and z["issue"] == 5
+    assert z["slot"] == "2" and z["model"] == "test-modell"
+    assert datetime.fromisoformat(z["ts"]).utcoffset() == timedelta(0)
+
+
+def test_audit_maskiert_nur_die_geheimnamen(tmp_path, monkeypatch):
+    """password, secret, api_key, authorization und token werden „***“ (auch groß geschrieben),
+    andere Felder bleiben unverändert — sonst wären Schwellen wie input_tokens unbrauchbar."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(w, "AUDIT_LOG", str(f))
+    w.audit("x", password="GEHEIM-pw", secret="GEHEIM-se", api_key="GEHEIM-k",
+            authorization="GEHEIM-a", token="GEHEIM-t", Api_Key="GEHEIM-gross",
+            input_tokens=3, password_hint="sichtbar")
+    text = f.read_text(encoding="utf-8")
+    assert "GEHEIM" not in text                      # kein Geheimwert im Klartext
+    z = _audit_zeilen(f)[0]
+    assert z["input_tokens"] == 3 and z["password_hint"] == "sichtbar"
+    assert all(z[n] == "***" for n in ("password", "secret", "api_key", "authorization", "token", "Api_Key"))
+
+
+def test_audit_haengt_an_und_liest_den_pfad_je_aufruf(tmp_path, monkeypatch):
+    """audit() öffnet zum Anhängen und nimmt AUDIT_LOG bei jedem Aufruf neu aus dem Modulglobal."""
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    monkeypatch.setattr(w, "AUDIT_LOG", str(a))
+    w.audit("eins")
+    w.audit("zwei")
+    monkeypatch.setattr(w, "AUDIT_LOG", str(b))
+    w.audit("drei")
+    assert [z["event"] for z in _audit_zeilen(a)] == ["eins", "zwei"]
+    assert [z["event"] for z in _audit_zeilen(b)] == ["drei"]
+
+
+def test_audit_schreibt_nicht_serialisierbare_werte_als_str(tmp_path, monkeypatch):
+    """Nicht serialisierbare Werte (z. B. Path) gehen per str() hinein; None bleibt null."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(w, "AUDIT_LOG", str(f))
+    w.audit("x", pfad=Path("unter/datei"), nichts=None, zahl=7)
+    z = _audit_zeilen(f)[0]
+    assert z["pfad"] == "unter/datei" and z["nichts"] is None and z["zahl"] == 7
+
+
+def test_audit_meldet_schreibfehler_ohne_zeileninhalt(tmp_path, monkeypatch, capsys):
+    """Scheitert das Schreiben, kommt genau eine Logzeile mit der Fehlerklasse — ohne die
+    Zeilenfelder, damit kein Geheimwert über die Meldung entweicht."""
+    monkeypatch.setattr(w, "AUDIT_LOG", str(tmp_path / "gibt" / "es" / "nicht" / "a.jsonl"))
+    w.audit("x", geheim_im_wert="GEHEIM")
+    out = capsys.readouterr().out
+    assert "Audit-Log nicht schreibbar: FileNotFoundError" in out
+    assert "GEHEIM" not in out and '"event"' not in out   # kein Rest der Zeile
+
+
+def test_audit_faengt_auch_serialisierungsfehler(tmp_path, monkeypatch, capsys):
+    """Auch ein Fehler beim Serialisieren (Nicht-String-Schlüssel) verlässt audit() nicht;
+    die Datei bleibt leer statt halb geschrieben."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(w, "AUDIT_LOG", str(f))
+    w.audit("x", daten={("t",): 1})       # json kennt nur str/int/float/bool/None als Schlüssel
+    assert "Audit-Log nicht schreibbar: TypeError" in capsys.readouterr().out
+    assert not f.exists() or f.read_text(encoding="utf-8") == ""
+
+
+def test_claim_issue_protokolliert_den_auftrag(tmp_path, monkeypatch):
+    """Nach dem erfolgreichen Claiming steht genau ein issue_claimed-Ereignis mit Slot und Modell."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(w, "AUDIT_LOG", str(f))
+    monkeypatch.setattr(w, "WORKER_SLOT", "3")
+    monkeypatch.setattr(w, "MODEL", "test-modell")
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: _Done("https://github.com/o/r/issues/12\n"))
+    assert w.claim_issue(12) is True
+    z = _audit_zeilen(f)
+    assert len(z) == 1
+    assert z[0]["event"] == "issue_claimed" and z[0]["issue"] == 12
+    assert z[0]["slot"] == "3" and z[0]["model"] == "test-modell"
+
+
+def test_claim_issue_scheitert_ohne_audit_eintrag(tmp_path, monkeypatch):
+    """Bleibt das Issue unverändert, weil gh scheitert, gibt es auch keine Audit-Zeile."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(w, "AUDIT_LOG", str(f))
+
+    def boom(cmd, **kw):
+        raise w.subprocess.CalledProcessError(1, cmd, stderr="HTTP 403\n")
+
+    monkeypatch.setattr(w.subprocess, "run", boom)
+    assert w.claim_issue(12) is False
+    assert not f.exists()
 
 
 def test_alarm_hat_feste_form_und_klasse(capsys):
