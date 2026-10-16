@@ -78,9 +78,10 @@ class LogBuffer:
                 text = fh.read().decode("utf-8", errors="replace")
         except OSError:
             return []
-        lines = text.split("\n")
-        return [ln for ln in lines[1:] if ln.strip()] if len(text) >= LOG_PRELOAD_BYTES \
-            else [ln for ln in lines if ln.strip()]
+        lines = [ln.rstrip("\r") for ln in text.split("\n")]
+        if len(text) >= LOG_PRELOAD_BYTES:
+            lines = lines[1:]   # erste Zeile ist angeschnitten
+        return [ln for ln in lines if ln.strip()]
 
     def _add(self, new: list[str]) -> None:
         with self._lock:
