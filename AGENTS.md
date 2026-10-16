@@ -22,10 +22,10 @@ eingeschlossen. Aufbau und Einrichtung: `README.md`, Ausbaustufen: `ROADMAP.md`.
 3. **Tests müssen grün sein.** `python -m pytest -q` vor jedem Push. Neue Logik bekommt
    Tests; behobene Fehler bekommen einen Test, der den Fehler reproduziert. Tests laufen ohne
    Netzwerk, ohne `gh` und ohne Server.
-4. **Hier mergt und deployt kein Agent.** Die Skripte laufen auf dem Server und steuern die
-   Agenten selbst; ein Fehler darin legt Worker und Review lahm. Deshalb ist der Merge-Modus
-   in diesem Projekt immer „manuell durch Stephan“ (`auto_merge: false` in der Projektliste),
-   und `install.sh` führt nur Stephan aus. Kein Agent ruft `systemctl`, `install.sh` oder
+4. **Hier deployt kein Agent, Betriebsdateien merged nur Stephan.** Die Skripte steuern die Agenten
+   selbst; ein Fehler darin legt Worker und Review lahm. Der Merge-Modus ist „manuell durch Stephan“,
+   außer das Issue sagt „automatisch“ und der PR berührt keine Datei aus `manual_paths` der
+   Projektliste. `install.sh` führt nur Stephan aus. Kein Agent ruft `systemctl`, `install.sh` oder
    Befehle auf dem Server auf.
 5. **Zugangsdaten nie in Repo, Logs, Fehlermeldungen oder Chat.** Das Repo ist öffentlich:
    keine Schlüssel, Tokens, Webhook-IDs, IP-Adressen mit Zugangsdaten oder `.env`-Inhalte,

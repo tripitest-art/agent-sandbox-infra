@@ -7,6 +7,9 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 
 ## Unreleased
 
+### Geändert
+- AGENTS.md Regel 4: Merge-Modus „manuell“ bleibt Standard, „automatisch“ nur für PRs ohne Dateien aus `manual_paths` (braucht `freigabe-geschützt`, wirkt mit #122 und Serverkonfiguration) (#123).
+
 ### Hinzugefügt
 - `LICENSE` (MIT, Copyright (c) 2026 Stephan Voigt) und `SECURITY.md` mit dem vertraulichen Meldeweg für Sicherheitslücken (GitHub „Private vulnerability reporting“); dazu der README-Abschnitt „Lizenz und Sicherheit“ (#110).
 - Web-Dashboard `sandbox/dashboard.py` (nur lesend, SSE) als Ersatz fürs HA-Dashboard (#104).
@@ -20,6 +23,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 
 ### Geändert
 - `review_tick`: die Logzeile eines geposteten Reviews nennt den Reviewer („…, als Kommentar-Review gepostet, Reviewer coder-glm (Pfad).“, bei roten Checks ohne Modellaufruf „ohne-Modell“), damit das Dashboard Urteile je Modell zählen kann (#119).
+- `review_tick`: Ein PR wird auch dann geprüft, wenn sein Branch nicht `feature/issue-<N>` heißt – dafür setzt jemand mit Schreibrecht das Label `review-anfordern` (z. B. an `feature/dashboard-*` von Claude/Antigravity); ohne Worker-Issue prüft der Takt gegen PR-Text und Regeln und merged nie, der PR liegt nach dem Review bei Stephan (#121).
 - `review_tick`: Scheitert das Setzen des Commit-Status `review`, nennt die Warnzeile zusätzlich den HTTP-Statuscode aus dem gh-Fehler (z. B. 403 oder 404), damit ein Rechteproblem von einem Netzfehler unterscheidbar ist; der Fehlertext von gh bleibt weiterhin tabu (#117).
 - Review-Takt: Pflicht-Checks kommen aus der Projektliste (`required_checks`), Vorgabe `tests` und `acceptance-guard`; sc-digger nennt CodeQL dort selbst (#78).
 - `worker_tick`: Geheimnisse gehen nicht mehr an den Agentenprozess und nicht ins Log, der Agent bekommt nur eine Allowlist der Umgebung (#71).
@@ -39,6 +43,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
   bleibt die Zeile wie bisher (#99).
 
 ### Behoben
+- `worker_tick`/`qwen_webhook`: Die Lebendprüfung eines Prozesses nutzt unter Windows die Win32-API (`OpenProcess`/`GetExitCodeProcess`/`CloseHandle`) statt `os.kill(pid, 0)`, das dort `CTRL_C_EVENT` an die ganze Konsole schickt und die pytest-Sitzung auf einem Windows-Rechner abbricht; unter Linux bleibt der Code unverändert (#120).
 - `worker_tick`: Ist das Tagesbudget des Worker-Keys aufgebraucht (`spend >= max_budget` aus `/key/info`), wartet der Takt bis zum Reset und verbraucht dabei keinen Versuch; gemeldet wird das einmal je Reset-Zeitraum, ohne Budgetwerte und ohne Entparken (`key_info`, `budget_problem`) (#113).
 - `worker_tick`: Scheitert ein Agentenlauf schon am Anbieter (LiteLLM 429/401/5xx), verbraucht er keinen Versuch mehr; der Grund steht gekürzt und ohne Schlüsselteile im Log, und es gibt genau einen „⚠ Stephan“-Alarm je Schlüssel und Fehlertext (`short_api_error`, `LAST_AGENT_ERROR`) (#106).
 - `worker_tick`: Regel 8 zählt Dateien aus einem Ausschlusssatz der Sektion „Betroffene Dateien“ („… bleibt unberührt“, „Keine andere Datei …“) nicht mehr als belegt; fremde Issues, die solche Dateien wirklich ändern, werden nicht mehr als Kollision übersprungen (#108).

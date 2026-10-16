@@ -1791,6 +1791,21 @@ def test_pid_alive_erkennt_beendeten_prozess():
     assert w._pid_alive(None) is False
 
 
+def test_pid_alive_linux_nutzt_weiter_os_kill_mit_signal_null(monkeypatch):
+    """Der Linux-Zweig bleibt unverändert: os.kill(pid, 0) entscheidet (#118)."""
+    aufrufe: list[tuple[int, int]] = []
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(w.os, "kill", lambda pid, sig: aufrufe.append((pid, sig)))
+    assert w._pid_alive(4242) is True
+    assert aufrufe == [(4242, 0)]
+
+    def kein_prozess(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(w.os, "kill", kein_prozess)
+    assert w._pid_alive(4242) is False
+
+
 def test_claim_job_schreibt_die_eigene_pid_und_gibt_frei(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
     assert w.claim_job("issue59") is True

@@ -69,4 +69,4 @@ Reihenfolge, wenn der Container verloren ist:
    `error_during_execution` stehen. Das Dashboard „KI Cloud“ in Home Assistant zeigt den Slot-Status
    wieder an.
 
-Hier mergt und deployt kein Agent: Die Schritte 2 bis 4 führt nur Stephan aus (AGENTS.md, Regel 4).
+Hier deployt kein Agent: Die Schritte 2 bis 4 führt nur Stephan aus (AGENTS.md, Regel 4).
