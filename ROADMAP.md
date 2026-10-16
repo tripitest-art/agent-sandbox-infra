@@ -87,7 +87,7 @@ Bisher sendete `qwen_webhook.py` rohe Textzeilen aus `worker.log` an Home Assist
 
 ---
 
-### 🔵 Stufe 3: Continuous Deployment (Zero-Touch zum Server)
+### ✅ Stufe 3: Continuous Deployment (Abgeschlossen)
 
 Nach dem Merge in `main` muss derzeit auf dem Musik-Server manuell `/root/sc-digger && ./update.sh` ausgeführt werden. Ziel ist die vollständige Schließung der Bereitstellungskette.
 
@@ -135,7 +135,7 @@ Die meiste manuelle Vorbereitungszeit fließt in das Ausformulieren präziser Sc
 |---|---|---|:---:|
 | **Stufe 1** | Auto-Merge & `Wartet auf:` Auto-Unblock | ⭐⭐⭐⭐⭐ | ✅ **Gemergt (#11, #12)** |
 | **Stufe 2** | Strukturierte Slot-Telemetrie in Home Assistant | ⭐⭐⭐⭐ | ✅ **Gemergt (#48)** |
-| **Stufe 3** | Continuous Deployment (`./update.sh` zum Server) | ⭐⭐⭐⭐ | 🔵 **Geplant** |
+| **Stufe 3** | Continuous Deployment (`autodeploy.py`, Pull-Timer auf CT 112) | ⭐⭐⭐⭐ | ✅ **Gemergt (#15)** |
 | **Stufe 4** | Prime-Time- & Budget-Scheduling | ⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🔵 **Geplant** |
 | **Baustein** | Web-Dashboard als Ersatz fürs HA-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | ✅ **Gemergt (#104, #105)**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |

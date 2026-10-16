@@ -1,0 +1,16 @@
+[Unit]
+Description=Auto-Deploy der Sandbox-Infrastruktur (sandbox/autodeploy.py)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/agent-sandbox-infra
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=C.UTF-8
+# Nie zwei Läufe gleichzeitig; ein Lauf kann wegen install.sh Minuten dauern.
+ExecStart=/usr/bin/flock -n /run/agent-sandbox-deploy.lock /usr/bin/python3 /root/autodeploy.py
+StandardOutput=append:/root/worker.log
+StandardError=append:/root/worker.log
