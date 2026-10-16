@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Hinzugefügt
+- worker_tick: `pre-push`-Hook im Klon des Slots lehnt den Push bei roten Tests ab; `--no-verify` nur für die Eskalation mit Draft-PR (`ensure_pre_push_hook`, `PUSH_RULE`) (#107).
 - HA: Sensor „Agenten Workflow Status“ und Dashboard-Karten für Projekt-Matrix, wartende PRs und LLM-Budgets (Workflow-Status aus `ha_status.py`) (#92).
 - Dependabot für die GitHub Actions (wöchentlich, höchstens 2 offene PRs) (#93).
 - Doku: Backup und Wiederherstellung der Sandbox (`docs/backup.md`) (#95).
