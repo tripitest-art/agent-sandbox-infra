@@ -19,7 +19,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - install.sh: Ressourcenlimits je Worker-Slot (`SLOT_MEMORY_MAX`, `SLOT_TASKS_MAX`, `SLOT_CPU_PERCENT` → `MemoryMax`, `TasksMax`, `CPUQuota`), gemerkt in `/etc/agent-sandbox.conf`; ohne Angabe kein Limit, Vorschlag aus Messung im README (#103, nach #100 und dem Revert #101).
 
 ### Geändert
-- `review_tick`: Scheitert das Setzen des Commit-Status `review`, nennt die Warnzeile zusätzlich den HTTP-Statuscode aus dem gh-Fehler (z. B. 403 oder 404), damit ein Rechteproblem von einem Netzfehler unterscheidbar ist; der Fehlertext von gh bleibt weiterhin tabu (#116).
+- `review_tick`: Scheitert das Setzen des Commit-Status `review`, nennt die Warnzeile zusätzlich den HTTP-Statuscode aus dem gh-Fehler (z. B. 403 oder 404), damit ein Rechteproblem von einem Netzfehler unterscheidbar ist; der Fehlertext von gh bleibt weiterhin tabu (#117).
 - Review-Takt: Pflicht-Checks kommen aus der Projektliste (`required_checks`), Vorgabe `tests` und `acceptance-guard`; sc-digger nennt CodeQL dort selbst (#78).
 - `worker_tick`: Geheimnisse gehen nicht mehr an den Agentenprozess und nicht ins Log, der Agent bekommt nur eine Allowlist der Umgebung (#71).
 - `worker_tick`: die PR-Vorlage kommt aus `origin/main` statt aus dem Arbeitsbaum (#74).
