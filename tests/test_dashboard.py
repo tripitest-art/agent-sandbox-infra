@@ -364,3 +364,28 @@ def test_antworten_und_state_enthalten_keine_geheimnisse(served):
     for text in texte:
         for geheim in (TOKEN, "sk-master-geheim", "sk-worker-geheim", "sk-review-geheim"):
             assert geheim not in text
+
+
+# --- Push (dashboard_notify) --------------------------------------------------------------------
+
+def test_main_notify_test_ohne_url_endet_mit_2(monkeypatch, capsys):
+    monkeypatch.delenv("NTFY_URL", raising=False)
+    monkeypatch.setattr(sys, "argv", ["dashboard.py", "--notify-test"])
+    with pytest.raises(SystemExit) as exit_info:
+        d.main()
+    assert exit_info.value.code == 2
+    assert "NTFY_URL" in capsys.readouterr().err
+
+
+def test_serve_startet_den_push_faden_nur_mit_url(monkeypatch, tmp_path):
+    started = []
+    monkeypatch.setattr(d.threading, "Thread", lambda target, args, daemon: type(
+        "T", (), {"start": lambda self: started.append(args)})())
+    monkeypatch.delenv("NTFY_URL", raising=False)
+    server = d.serve("127.0.0.1", 0)
+    assert server.push is False and started == []
+    server.server_close()
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.example/topic-abc")
+    server = d.serve("127.0.0.1", 0)
+    assert server.push is True and started == [(d.NOTIFY_INTERVAL,)]
+    server.server_close()

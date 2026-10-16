@@ -434,6 +434,8 @@ echo "== Web-Dashboard"
 if [ "$DASHBOARD" = 1 ]; then
   ask_secret /etc/agent-dashboard.env LITELLM_MASTER_KEY "LiteLLM-Master-Key (leer = Budgets nur lesen)" || true
   ask_secret /etc/agent-dashboard.env DASHBOARD_WRITE_TOKEN "Schreib-Token fürs Dashboard (mind. 16 Zeichen, leer = nur lesen)" || true
+  # Push-Meldungen über ntfy: die volle URL samt Topic ist das Geheimnis. Leer = keine Push-Meldungen.
+  ask_secret /etc/agent-dashboard.env NTFY_URL "ntfy-URL samt Topic, z. B. https://ntfy.sh/<geheimes-Topic> (leer = keine Push-Meldungen)" || true
 fi
 # dashboard.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py). Der Dienst liest nur (Slots,
 # worker.log, gh, LiteLLM) und hat keinen Login: nie hinter eine Portfreigabe stellen.
@@ -452,7 +454,7 @@ Environment=LITELLM=$LITELLM
 # fehlt eine Datei, entfällt nur das jeweilige Budget.
 EnvironmentFile=-/etc/ha-status.env
 EnvironmentFile=-/etc/qwen-reviewer.env
-# Optional: LITELLM_MASTER_KEY und DASHBOARD_WRITE_TOKEN, nur für das Ändern der Budget-Limits.
+# Optional: LITELLM_MASTER_KEY und DASHBOARD_WRITE_TOKEN (Budget-Limits ändern), NTFY_URL und NTFY_TOKEN (Push).
 EnvironmentFile=-/etc/agent-dashboard.env
 NoNewPrivileges=yes
 ExecStart=/usr/bin/python3 /root/dashboard.py

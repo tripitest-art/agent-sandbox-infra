@@ -11,6 +11,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - AGENTS.md Regel 4: Merge-Modus „manuell“ bleibt Standard, „automatisch“ nur für PRs ohne Dateien aus `manual_paths` (braucht `freigabe-geschützt`, wirkt mit #122 und Serverkonfiguration) (#123).
 
 ### Hinzugefügt
+- Dashboard: Push-Meldungen über ntfy (`dashboard_notify.py`) bei `⚠ Stephan`-Zeilen, totem Slot, Budget ab 90 %, veralteten Daten; `NTFY_URL` in `/etc/agent-dashboard.env`, Test mit `--notify-test` (#114).
 - Dashboard: LiteLLM-Budget-Limits (`max_budget`) lassen sich im Browser ändern, geschützt durch einen Schreib-Token und den Master-Key aus `/etc/agent-dashboard.env` (Dienst `agent-dashboard`, `install.sh` fragt beides ab) (#111).
 - `install.sh`: `SKIP_TESTS=1` überspringt den Testlauf von sc-digger am Ende (nur Anzeige, rund 5 Minuten) (#125).
 - `LICENSE` (MIT, Copyright (c) 2026 Stephan Voigt) und `SECURITY.md` mit dem vertraulichen Meldeweg für Sicherheitslücken (GitHub „Private vulnerability reporting“); dazu der README-Abschnitt „Lizenz und Sicherheit“ (#110).
