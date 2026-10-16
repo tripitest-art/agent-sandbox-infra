@@ -348,3 +348,16 @@ def test_install_sh_puts_slot_limits_into_worker_template_unit():
     assert "$(slot_limit_lines)" in unit
     assert "slot_limits_check" in text
     assert "SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT" in text   # wird gemerkt
+
+
+def test_unit_kopie_unter_systemd_nennt_die_slot_limits():
+    # Die Kopie unter sandbox/systemd/ ist die Vorlage zum Nachlesen; sie darf nicht hinter
+    # install.sh zurückbleiben (#88): Direktiven stehen als Vorschlag (auskommentiert) darin.
+    unit = (SANDBOX / "systemd" / "qwen-worker@.service").read_text(encoding="utf-8")
+    for direktive in ("MemoryMax=", "TasksMax=", "CPUQuota="):
+        assert direktive in unit, direktive
+    for einstellung in ("SLOT_MEMORY_MAX", "SLOT_TASKS_MAX", "SLOT_CPU_PERCENT"):
+        assert einstellung in unit, einstellung
+    # Auskommentiert: ohne Einstellung gilt weiter kein Limit.
+    zeilen = [z for z in unit.splitlines() if z.startswith(("MemoryMax=", "TasksMax=", "CPUQuota="))]
+    assert zeilen == []

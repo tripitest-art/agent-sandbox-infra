@@ -9,10 +9,11 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 
 ### Hinzugefügt
 - Web-Dashboard `sandbox/dashboard.py` (nur lesend, SSE) als Ersatz fürs HA-Dashboard; Dienst und Einrichtung folgen (#104).
+- worker_tick: `pre-push`-Hook im Klon des Slots lehnt den Push bei roten Tests ab; `--no-verify` nur für die Eskalation mit Draft-PR (`ensure_pre_push_hook`, `PUSH_RULE`) (#107).
 - HA: Sensor „Agenten Workflow Status“ und Dashboard-Karten für Projekt-Matrix, wartende PRs und LLM-Budgets (Workflow-Status aus `ha_status.py`) (#92).
 - Dependabot für die GitHub Actions (wöchentlich, höchstens 2 offene PRs) (#93).
 - Doku: Backup und Wiederherstellung der Sandbox (`docs/backup.md`) (#95).
-- install.sh: Ressourcenlimits je Worker-Slot (`SLOT_MEMORY_MAX`, `SLOT_TASKS_MAX`, `SLOT_CPU_PERCENT` → `MemoryMax`, `TasksMax`, `CPUQuota`), gemerkt in `/etc/agent-sandbox.conf`; ohne Angabe kein Limit (#100).
+- install.sh: Ressourcenlimits je Worker-Slot (`SLOT_MEMORY_MAX`, `SLOT_TASKS_MAX`, `SLOT_CPU_PERCENT` → `MemoryMax`, `TasksMax`, `CPUQuota`), gemerkt in `/etc/agent-sandbox.conf`; ohne Angabe kein Limit, Vorschlag aus Messung im README (#103, nach #100 und dem Revert #101).
 
 ### Geändert
 - Review-Takt: Pflicht-Checks kommen aus der Projektliste (`required_checks`), Vorgabe `tests` und `acceptance-guard`; sc-digger nennt CodeQL dort selbst (#78).
