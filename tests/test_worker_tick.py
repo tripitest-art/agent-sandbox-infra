@@ -701,6 +701,51 @@ def test_result_zeile_haengt_nur_brauchbare_tokens_an(capsys):
     assert lines[2] == "[Qwen Code: success, 1 Züge, 2 s]"
 
 
+# --- Anbieterfehler im Agentenlauf zählt keinen Versuch (#106) ---
+
+def test_short_api_error_ohne_statuscode_und_mehrzeilig():
+    # Mehrzeiler ohne Statuscode: endet vor „ Key“, wird eine Zeile, Vorsatz „API: “.
+    assert w.short_api_error(
+        "[API Error: Budget has been exceeded!\nKey=worker (sk-...abcd)]") == \
+        "API: Budget has been exceeded!"
+    # Ganz ohne Vorsatz und ohne Klammerrest bleibt die Meldung als „API: …“ stehen.
+    assert w.short_api_error("Kein Vorsatz, kein Klammerrest") == "API: Kein Vorsatz, kein Klammerrest"
+
+
+def test_short_api_error_kuerzt_auf_hoechstens_160_zeichen():
+    lang = w.short_api_error("[API Error: 503 " + "y" * 500 + "]")
+    assert lang.startswith("API 503: ") and len(lang) == 160 and lang.endswith("…")
+
+
+def test_main_apierr_eintrag_verschwindet_nach_gewoehnlichem_lauf(monkeypatch, tmp_path):
+    _litellm(monkeypatch, tmp_path)
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"issue102": 0, "_apierr:issue102": "API 429: alt"}), encoding="utf-8")
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 1)   # Fehlschlag ohne Anbieterfehler
+    assert w.main() == 0
+    assert "_apierr:issue102" not in json.loads(state.read_text(encoding="utf-8"))
+
+
+def test_main_anbieterfehler_zaehler_faellt_nicht_unter_null(monkeypatch, tmp_path):
+    _litellm(monkeypatch, tmp_path)
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"issue102": -3}), encoding="utf-8")
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+
+    def run(prompt):
+        w.log_stream_line(json.dumps({
+            "type": "result", "subtype": "error_during_execution", "is_error": True,
+            "error": {"message": "[API Error: 429 Budget has been exceeded! Key=worker (sk-...x)]"}}))
+        return 1
+
+    monkeypatch.setattr(w, "run_agent", run)
+    assert w.main() == 0
+    assert json.loads(state.read_text(encoding="utf-8"))["issue102"] == 0
+
+
 # --- Regel 5: keine Geheimnisse im Agentenprozess und im Log (#35) ---
 
 GEHEIM = "sk-nur-ein-test-geheimnis"
