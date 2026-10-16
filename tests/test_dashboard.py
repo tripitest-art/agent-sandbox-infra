@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 import threading
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -191,3 +192,200 @@ def test_http_endpunkte(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# --- Budget ändern -----------------------------------------------------------------------------
+
+TOKEN = "ein-langer-schreib-token"
+ENV = {"DASHBOARD_WRITE_TOKEN": TOKEN, "LITELLM_MASTER_KEY": "sk-master-geheim",
+       "LITELLM_WORKER_KEY": "sk-worker-geheim", "LITELLM_REVIEW_KEY": "sk-review-geheim"}
+
+
+def _writer(calls, env=None):
+    w = d.BudgetWriter(env=ENV if env is None else env, update=lambda key, v: calls.append((key, v)))
+    w.fail_delay = 0
+    return w
+
+
+def test_writer_ist_ohne_master_key_oder_kurzen_token_aus():
+    assert _writer([]).enabled
+    assert not _writer([], {**ENV, "LITELLM_MASTER_KEY": ""}).enabled
+    assert not _writer([], {**ENV, "DASHBOARD_WRITE_TOKEN": "kurz"}).enabled
+    assert not _writer([], {}).enabled
+    assert not _writer([], {**ENV, "DASHBOARD_WRITE_TOKEN": "kurz"}).token_ok("kurz")
+
+
+@pytest.mark.parametrize("value", [True, "5", None, float("nan"), float("inf"), 0, -3, 10001, [5]])
+def test_writer_lehnt_ungueltige_limits_ab(value):
+    calls = []
+    with pytest.raises(d.BudgetError):
+        _writer(calls).set_budget("worker", value)
+    assert calls == []
+
+
+def test_writer_lehnt_unbekannten_key_ab_und_rundet():
+    calls = []
+    w = _writer(calls)
+    for alias in ("planer", "gibts-nicht", None, 3):
+        with pytest.raises(d.BudgetError):
+            w.set_budget(alias, 5)          # planer: kein Key in der Umgebung
+    assert w.set_budget("worker", 12.3456) == 12.35
+    assert calls == [("sk-worker-geheim", 12.35)]
+
+
+def test_litellm_update_sendet_master_key_und_meldet_fehler_ohne_geheimnisse(monkeypatch):
+    sent = []
+
+    class Resp:
+        def close(self):
+            pass
+
+    def ok(req, timeout):
+        sent.append((req.full_url, req.headers["Authorization"], json.loads(req.data)))
+        return Resp()
+
+    w = d.BudgetWriter(env={**ENV, "LITELLM": "http://llm.test:4000/"})
+    monkeypatch.setattr(d.urllib.request, "urlopen", ok)
+    w._litellm_update("sk-worker-geheim", 7.5)
+    assert sent == [("http://llm.test:4000/key/update", "Bearer sk-master-geheim",
+                     {"key": "sk-worker-geheim", "max_budget": 7.5})]
+
+    def http_fehler(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 401, "sk-master-geheim", {}, None)
+
+    monkeypatch.setattr(d.urllib.request, "urlopen", http_fehler)
+    with pytest.raises(d.BudgetError) as err:
+        w._litellm_update("sk-worker-geheim", 7.5)
+    assert "401" in str(err.value) and "sk-" not in str(err.value) and "llm.test" not in str(err.value)
+
+    def netz(req, timeout):
+        raise OSError("sk-master-geheim llm.test")
+
+    monkeypatch.setattr(d.urllib.request, "urlopen", netz)
+    with pytest.raises(d.BudgetError) as err:
+        w._litellm_update("sk-worker-geheim", 7.5)
+    assert str(err.value) == "LiteLLM nicht erreichbar (OSError)"
+
+
+def test_set_budget_laedt_den_status_neu(tmp_path):
+    loads = []
+    dash = _dash(tmp_path, builder=lambda: loads.append(1) or STATUS)
+    dash.writer = _writer([])
+    dash.state()
+    dash.state()
+    assert len(loads) == 1
+    dash.set_budget("worker", 20)
+    dash.state()
+    assert len(loads) == 2
+
+
+def test_state_meldet_ob_aendern_moeglich_ist(tmp_path):
+    dash = _dash(tmp_path)
+    assert dash.state()["schreiben"] is False
+    dash.writer = _writer([])
+    assert dash.state()["schreiben"] is True
+
+
+def _post(base, payload, token=TOKEN, raw=None):
+    data = raw if raw is not None else json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["X-Dashboard-Token"] = token
+    req = urllib.request.Request(base + "/api/budget", data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, json.load(e)
+
+
+@pytest.fixture
+def served(tmp_path):
+    calls = []
+    dash = _dash(tmp_path)
+    dash.writer = _writer(calls)
+    server = d.ThreadingHTTPServer(("127.0.0.1", 0), d.make_handler(dash, interval=0.01))
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", calls, dash
+    server.shutdown()
+    server.server_close()
+
+
+def test_post_budget_mit_richtigem_token(served):
+    base, calls, _ = served
+    status, body = _post(base, {"alias": "worker", "max_budget": 15})
+    assert status == 200 and body == {"ok": True, "alias": "worker", "max_budget": 15.0}
+    assert calls == [("sk-worker-geheim", 15.0)]
+
+
+def test_post_budget_ohne_oder_mit_falschem_token_aendert_nichts(served):
+    base, calls, _ = served
+    for token in (None, "", "falsch", TOKEN[:-1]):
+        status, body = _post(base, {"alias": "worker", "max_budget": 15}, token=token)
+        assert status == 403 and body == {"fehler": "Token falsch"}
+    assert calls == []
+
+
+def test_post_budget_ohne_einrichtung_ist_gesperrt(served):
+    base, calls, dash = served
+    dash.writer = d.BudgetWriter(env={})
+    status, body = _post(base, {"alias": "worker", "max_budget": 15})
+    assert status == 403 and "nicht eingerichtet" in body["fehler"]
+    assert calls == []
+
+
+def test_post_budget_fehlerfaelle(served):
+    base, calls, _ = served
+    assert _post(base, None, raw=b"kein json")[0] == 400
+    assert _post(base, None, raw=b"[1]")[0] == 400
+    assert _post(base, None, raw=b"")[0] == 400
+    assert _post(base, None, raw=b"x" * 2000)[0] == 400
+    assert _post(base, {"alias": "worker", "max_budget": -1})[0] == 400
+    assert _post(base, {"alias": "worker", "max_budget": "9"})[0] == 400
+    status, body = _post(base, {"alias": "planer", "max_budget": 5})
+    assert status == 400 and body == {"fehler": "Unbekannter Key"}
+    assert calls == []
+
+
+def test_post_auf_anderen_pfad_ist_404(served):
+    base = served[0]
+    req = urllib.request.Request(base + "/api/state", data=b"{}", method="POST")
+    with pytest.raises(urllib.error.HTTPError) as err:
+        urllib.request.urlopen(req, timeout=5)
+    assert err.value.code == 404
+
+
+def test_antworten_und_state_enthalten_keine_geheimnisse(served):
+    base, _, dash = served
+    texte = [json.dumps(dash.state()), json.dumps(_post(base, {"alias": "x", "max_budget": 1})[1]),
+             json.dumps(_post(base, {"alias": "worker", "max_budget": 1}, token="falsch")[1]),
+             urllib.request.urlopen(base + "/", timeout=5).read().decode()]
+    for text in texte:
+        for geheim in (TOKEN, "sk-master-geheim", "sk-worker-geheim", "sk-review-geheim"):
+            assert geheim not in text
+
+
+# --- Push (dashboard_notify) --------------------------------------------------------------------
+
+def test_main_notify_test_ohne_url_endet_mit_2(monkeypatch, capsys):
+    monkeypatch.delenv("NTFY_URL", raising=False)
+    monkeypatch.setattr(sys, "argv", ["dashboard.py", "--notify-test"])
+    with pytest.raises(SystemExit) as exit_info:
+        d.main()
+    assert exit_info.value.code == 2
+    assert "NTFY_URL" in capsys.readouterr().err
+
+
+def test_serve_startet_den_push_faden_nur_mit_url(monkeypatch, tmp_path):
+    started = []
+    monkeypatch.setattr(d.threading, "Thread", lambda target, args, daemon: type(
+        "T", (), {"start": lambda self: started.append(args)})())
+    monkeypatch.delenv("NTFY_URL", raising=False)
+    server = d.serve("127.0.0.1", 0)
+    assert server.push is False and started == []
+    server.server_close()
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.example/topic-abc")
+    server = d.serve("127.0.0.1", 0)
+    assert server.push is True and started == [(d.NOTIFY_INTERVAL,)]
+    server.server_close()

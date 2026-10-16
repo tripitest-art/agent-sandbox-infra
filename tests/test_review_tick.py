@@ -63,6 +63,17 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setattr(r.urllib.request, "urlopen", no_network)
 
 
+def test_max_tokens_vorgabe_und_einstellung(monkeypatch):
+    """GLM zählt Denk-Tokens zur Antwort: Die Vorgabe liegt bei 16000, REVIEW_MAX_TOKENS stellt sie ein."""
+    monkeypatch.delenv("REVIEW_MAX_TOKENS", raising=False)
+    assert r._max_tokens() == 16000
+    monkeypatch.setenv("REVIEW_MAX_TOKENS", "9000")
+    assert r._max_tokens() == 9000
+    for falsch in ("viel", "", "0", "999", "-5"):
+        monkeypatch.setenv("REVIEW_MAX_TOKENS", falsch)
+        assert r._max_tokens() == 16000
+
+
 def test_extract_section_by_heading_level():
     md = "# T\n## A\na1\n### A.1\na2\n## B\nb1\n"
     assert r.extract_section(md, "## A") == "## A\na1\n### A.1\na2"

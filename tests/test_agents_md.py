@@ -30,7 +30,7 @@ def test_under_antigravity_limit():
 
 
 def test_no_agent_deploys_here():
-    assert "Hier deployt kein Agent, Betriebsdateien merged nur Stephan" in TEXT
+    assert "Hier deployt kein Agent, Aufsichtsdateien merged nur Stephan" in TEXT
     assert "manual_paths" in TEXT
 
 
