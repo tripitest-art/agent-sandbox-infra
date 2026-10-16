@@ -8,7 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Hinzugefügt
-- Dependabot für die GitHub Actions (wöchentlich, höchstens 2 offene PRs) (#PR).
+- Dependabot für die GitHub Actions (wöchentlich, höchstens 2 offene PRs) (#93).
 
 ### Geändert
 - Review-Takt: Pflicht-Checks kommen aus der Projektliste (`required_checks`), Vorgabe `tests` und `acceptance-guard`; sc-digger nennt CodeQL dort selbst (#78).
