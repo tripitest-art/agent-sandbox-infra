@@ -30,7 +30,7 @@ LITELLM_FALLBACKS=${LITELLM_FALLBACKS:-coder-or,coder-free}
 OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
 AGENT=${AGENT:-qwen-code}                       # oder opencode
-TAKT=${TAKT:-5min}                              # so oft sucht der Worker Arbeit
+TAKT=${TAKT:-2min}                              # so oft sucht der Worker Arbeit (ohne Arbeit kostet ein Takt nur GitHub-Abfragen, kein Modell)
 # Wo die Unit-Dateien und die aktivierten Timer liegen. Nur für Tests überschreibbar (dort zeigen
 # beide auf ein Ersatzverzeichnis, damit kein Lauf auf /etc/systemd/system zugreift; Regel 4).
 UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
@@ -69,7 +69,7 @@ if ! [[ $DASHBOARD =~ ^[01]$ ]] || ! [[ $DASHBOARD_PORT =~ ^[1-9][0-9]{0,4}$ ]] 
   echo "DASHBOARD muss 0 oder 1 sein, DASHBOARD_PORT eine Portnummer (1-65535). Nichts gemerkt." >&2
   exit 1
 fi
-REVIEW_TAKT=${REVIEW_TAKT:-10min}               # so oft sucht der Review-Takt einen PR
+REVIEW_TAKT=${REVIEW_TAKT:-2min}                # so oft sucht der Review-Takt einen PR (Modellaufruf nur für einen neuen Commit)
 REVIEW_MODEL=${REVIEW_MODEL:-coder-glm}         # LiteLLM-Alias (GLM, andere Familie als der Worker)
 REVIEW_MODEL_BIG=${REVIEW_MODEL_BIG:-longctx-lite}   # für sehr große Diffs
 REVIEWER_NAME=${REVIEWER_NAME:-GLM}             # steht als „Reviewer: …“ im Review

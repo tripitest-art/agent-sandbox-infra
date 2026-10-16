@@ -70,7 +70,7 @@ Namen und Pfade sowie eine leere oder nicht aus Strings bestehende `required_che
 
 ## Takt-Frequenz
 
-Worker: alle `TAKT` (Vorgabe 5 min) je Slot. Review: alle `REVIEW_TAKT` (Vorgabe 10 min). Ein Review
+Worker: alle `TAKT` (Vorgabe 2 min) je Slot. Review: alle `REVIEW_TAKT` (Vorgabe 2 min). Ein Review
 erscheint also etwa 10 Minuten nach grünen Checks, die Nacharbeit läuft binnen 5 Minuten an.
 
 ## Einrichten auf dem Server (CT 112)
