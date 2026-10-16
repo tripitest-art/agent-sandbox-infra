@@ -25,6 +25,26 @@ BAD_BODY = "## Was und warum\r\n\r\nCloses #\r\n"   # Vorlage nicht ausgefüllt 
 
 @pytest.fixture(autouse=True)
 def _repo_workdir(monkeypatch, tmp_path):
+    # Servereinstellung BACKEND=litellm: die Tests rechnen mit dem Vorgabepfad ollama (PC-Prüfung,
+    # ollama_free), sonst läuft jede `test_main_*` am LiteLLM-Pfad.
+    monkeypatch.setattr(w, "BACKEND", "ollama")
+    # Servereinstellung WORKER_SLOT=1: Vorgabe ist ein Slot; das ändert WORKDIR, STATE und die
+    # Slot-Beschränkung für das lokale Backend.
+    monkeypatch.setattr(w, "WORKER_SLOT", "")
+    # Servereinstellung WAKE_PC=1: die Tests rechnen mit WAKE_PC=0 (PC wird nie geweckt).
+    monkeypatch.setattr(w, "WAKE_PC", False)
+    # Serverprojektliste /etc/agent-projects.json (bzw. AGENT_PROJECTS) nennt zwei Projekte und kann
+    # Hotspot und Testbefehl anders belegen; die Tests rechnen mit dem Vorgabeprojekt („keine Datei“).
+    # Nie die Liste des Servers lesen — auch die daraus abgeleiteten Globalen nicht.
+    p = w.projects.default_projects()[0]
+    monkeypatch.setattr(w, "PROJECTS", [p])
+    monkeypatch.setattr(w, "REPO", p.repo)
+    monkeypatch.setattr(w, "PROJECT", p.name)
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "TEST_CMD", p.test_cmd)
+    monkeypatch.setattr(w, "HOTSPOT", p.hotspot)
+    monkeypatch.setattr(w, "HOTSPOT_LABEL", p.hotspot_label)
+    monkeypatch.setattr(w, "BASE_WORKDIR", p.workdir)
     # Die PR-Vorlage liest der Taktgeber aus WORKDIR; in Tests ist das dieses Repo.
     monkeypatch.setattr(w, "WORKDIR", str(REPO_ROOT))
     monkeypatch.setattr(w, "STATE", str(tmp_path / "state-default.json"))
