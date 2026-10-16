@@ -16,7 +16,7 @@ flowchart TD
         subgraph CT112["Debian 12 LXC (CT 112: agent-sandbox)"]
             W1["Worker Slot 1 (w1)<br>worker_tick.py"]
             W2["Worker Slot 2 (w2)<br>worker_tick.py"]
-            REV["Review-Takt (alle 10 min)<br>review_tick.py (GLM via LiteLLM)"]
+            REV["Review-Takt (alle 2 min)<br>review_tick.py (GLM via LiteLLM)"]
             WH["qwen-webhook Service<br>(Live-Log & Slot-Telemetrie)"]
             HS["ha-status Timer (alle 2 min)<br>(Projekt-Matrix & LiteLLM-Budgets)"]
         end
@@ -98,7 +98,7 @@ Details und Verträge: [`ROADMAP.md`](ROADMAP.md).
 - **Push-Sperre (`pre-push`-Hook):** Vor jedem Agentenlauf schreibt `worker_tick.py` einen `pre-push`-Hook in den Klon des Slots (`ensure_pre_push_hook`, Ordner von `git rev-parse --git-path hooks`). Er führt `TEST_CMD` aus und lehnt den Push bei roten Tests ab. Nur die Eskalation mit Draft-PR darf `git push --no-verify` nutzen; der Auftrag sagt das ausdrücklich. Scheitert das Setzen des Hooks, startet der Lauf nicht (Meldung `⚠ Stephan:`).
 
 ### 2. Autonomer Review-Takt & Auto-Merge
-- `review_tick.py` läuft alle 10 Minuten als unabhängiger systemd-Timer.
+- `review_tick.py` läuft alle 2 Minuten als unabhängiger systemd-Timer (`REVIEW_TAKT`); ein Modellaufruf entsteht nur für einen neuen Commit.
 - **Unabhängiges Modell:** Reviews werden mit `coder-glm` (GLM 5.3 Flash) oder bei großen Diffs mit `longctx-lite` (Gemini 3.5 Flash-Lite) durchgeführt – strikt getrennt von der Worker-Modellfamilie.
 - **Automatischer Merge:** Bei Urteil `**Freigegeben**`, bestandenen Pflicht-Checks (`tests`, `acceptance-guard`, `CodeQL`) und `### Merge-Modus: automatisch` führt das Skript den Squash-Merge eigenständig durch.
 - **Automatisches Entblocken:** Nach jedem Merge prüft das Skript alle blockierten Issues. Sind alle Bedingungen in `Wartet auf: #X, #Y` erfüllt, wird das Issue automatisch auf `bereit` umgestellt.
