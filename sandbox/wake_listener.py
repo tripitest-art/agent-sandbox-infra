@@ -123,7 +123,7 @@ def run_once(url: str, waker: Waker, opener=urllib.request.urlopen) -> None:
         return
 
 
-def main(sleeper: Callable[[float], None] = time.sleep) -> None:
+def main() -> None:
     """WAKE_URL aus der Umgebung (stream_url; ungültig: sys.exit mit Hinweis, ohne den Wert zu nennen),
     WAKE_UNITS (Leerzeichen getrennt, Pflicht), WAKE_MIN_GAP (Sekunden, Vorgabe 30). Schleife:
     run_once, waker.poll(), 5 s warten."""
@@ -149,7 +149,7 @@ def main(sleeper: Callable[[float], None] = time.sleep) -> None:
     while True:
         run_once(url, waker)
         waker.poll()
-        sleeper(5)
+        time.sleep(5)
 
 
 if __name__ == "__main__":

@@ -282,8 +282,9 @@ def test_main_schleifenlauf(monkeypatch):
         if len(sleep_calls) >= 2:
             raise StopIteration("Schleife beenden")
 
+    monkeypatch.setattr(wl.time, "sleep", fake_sleeper)   # main() hat laut Issue keine Parameter
     with pytest.raises(StopIteration):
-        wl.main(sleeper=fake_sleeper)
+        wl.main()
 
     assert runs == [1, 2]
     assert sleep_calls == [5, 5]
