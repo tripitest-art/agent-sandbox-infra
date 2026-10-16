@@ -427,6 +427,13 @@ else
 fi
 
 echo "== Web-Dashboard"
+# Budget-Limits im Dashboard ändern ist optional: braucht LITELLM_MASTER_KEY und einen Schreib-Token
+# (mind. 16 Zeichen, frei gewählt). Beides nur in /etc/agent-dashboard.env (600), das nur dieser Dienst liest.
+# Leer lassen heißt: Budgets bleiben nur lesbar.
+if [ "$DASHBOARD" = 1 ]; then
+  ask_secret /etc/agent-dashboard.env LITELLM_MASTER_KEY "LiteLLM-Master-Key (leer = Budgets nur lesen)" || true
+  ask_secret /etc/agent-dashboard.env DASHBOARD_WRITE_TOKEN "Schreib-Token fürs Dashboard (mind. 16 Zeichen, leer = nur lesen)" || true
+fi
 # dashboard.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py). Der Dienst liest nur (Slots,
 # worker.log, gh, LiteLLM) und hat keinen Login: nie hinter eine Portfreigabe stellen.
 cat > /etc/systemd/system/agent-dashboard.service <<UNIT
@@ -444,6 +451,8 @@ Environment=LITELLM=$LITELLM
 # fehlt eine Datei, entfällt nur das jeweilige Budget.
 EnvironmentFile=-/etc/ha-status.env
 EnvironmentFile=-/etc/qwen-reviewer.env
+# Optional: LITELLM_MASTER_KEY und DASHBOARD_WRITE_TOKEN, nur für das Ändern der Budget-Limits.
+EnvironmentFile=-/etc/agent-dashboard.env
 NoNewPrivileges=yes
 ExecStart=/usr/bin/python3 /root/dashboard.py
 Restart=always

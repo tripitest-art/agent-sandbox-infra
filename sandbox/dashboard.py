@@ -6,7 +6,12 @@ Slot-Status (`/run/worker-slots/slot-<n>.json`, gelesen wie in `qwen_webhook.py`
 Issues, PRs, „braucht-stephan“ und LiteLLM-Budgets (`ha_status.build_status`) und den Schwanz
 von `/root/worker.log`. Die Seite holt den Stand über Server-Sent-Events (`/events`).
 
-Endpunkte: `/` (Seite), `/api/state` (JSON), `/events` (SSE), `/healthz`.
+Endpunkte: `/` (Seite), `/api/state` (JSON), `/events` (SSE), `/healthz` und
+`POST /api/budget` (Limit eines LiteLLM-Keys ändern, nur mit Schreib-Token).
+
+Einzige Ausnahme vom „nur lesend“: das Budget-Limit. Dafür braucht der Dienst
+`LITELLM_MASTER_KEY` und `DASHBOARD_WRITE_TOKEN` (beide nur in `/etc/agent-dashboard.env`, Modus 600).
+Fehlt eines, ist das Ändern aus und die Seite zeigt keinen Knopf. Geändert wird nur `max_budget`.
 
 Kein Login: Der Dienst gehört ins LAN und nie hinter eine Portfreigabe. Deshalb liefert er
 nur aufbereitete Felder; Fehler erscheinen als Name der Exception-Klasse, Log-Zeilen laufen
@@ -18,12 +23,16 @@ WORKER_LOG, SLOT_DIR, LITELLM sowie die Budget-Keys aus `ha_status.py`.
 """
 from __future__ import annotations
 
+import hmac
 import json
+import math
 import os
 import re
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +52,9 @@ LOG_LINES = 400            # so viele Zeilen hält der Dienst vor
 LOG_PRELOAD_BYTES = 64 * 1024
 SSE_INTERVAL = 2.0         # Sekunden zwischen zwei Prüfungen je Verbindung
 STEPHAN_MARK = "⚠ Stephan"
+MIN_TOKEN_LEN = 16         # kürzere Schreib-Token gelten als nicht eingerichtet
+MAX_BUDGET_LIMIT = 10000   # Obergrenze gegen Tippfehler (USD)
+FAIL_DELAY = 1.0           # Sekunden Wartezeit nach falschem Token (bremst Raten)
 DEAD_MESSAGE = "Prozess beendet"   # setzt qwen_webhook.read_slots für einen verwaisten Lauf
 
 # Umgebungsvariablen, deren Werte nie im Dashboard erscheinen dürfen.
@@ -118,6 +130,11 @@ class StatusCache:
         self.veraltet = False
         self._lock = threading.Lock()
 
+    def invalidate(self) -> None:
+        """Beim nächsten `get` neu laden (z. B. nach einer Budget-Änderung)."""
+        with self._lock:
+            self.loaded_at = float("-inf")
+
     def get(self) -> tuple[dict | None, bool]:
         with self._lock:
             if self.value is None or self.clock() - self.loaded_at >= self.ttl:
@@ -127,6 +144,62 @@ class StatusCache:
                     self.veraltet = True
                 self.loaded_at = self.clock()
             return self.value, self.veraltet
+
+
+class BudgetError(Exception):
+    """Fehler beim Ändern eines Budgets; die Meldung ist für die Anzeige gedacht (nie Geheimnisse)."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+class BudgetWriter:
+    """Setzt `max_budget` eines LiteLLM-Keys über `POST /key/update` mit dem Master-Key.
+
+    Ohne Master-Key und ausreichend langen Schreib-Token ist `enabled` falsch und nichts
+    lässt sich ändern. Fehlertexte nennen nur Status und Art, nie Keys, Token oder URLs.
+    """
+
+    def __init__(self, env: dict | None = None, update: Callable[[str, float], None] | None = None):
+        env = dict(os.environ if env is None else env)
+        self.token = env.get("DASHBOARD_WRITE_TOKEN", "")
+        self.master = env.get("LITELLM_MASTER_KEY", "")
+        self.base = env.get("LITELLM") or ha_status.DEFAULT_LITELLM
+        self.keys = {alias: env[var] for var, alias in ha_status.BUDGET_KEYS if env.get(var)}
+        self.update = update or self._litellm_update
+        self.fail_delay = FAIL_DELAY
+
+    @property
+    def enabled(self) -> bool:
+        return len(self.token) >= MIN_TOKEN_LEN and bool(self.master)
+
+    def token_ok(self, supplied: str) -> bool:
+        return self.enabled and hmac.compare_digest(supplied.encode("utf-8"), self.token.encode("utf-8"))
+
+    def _litellm_update(self, key: str, max_budget: float) -> None:
+        body = json.dumps({"key": key, "max_budget": max_budget}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base.rstrip('/')}/key/update", data=body, method="POST",
+            headers={"Authorization": f"Bearer {self.master}", "Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(request, timeout=10).close()
+        except urllib.error.HTTPError as exc:
+            raise BudgetError(f"LiteLLM lehnt die Änderung ab (HTTP {exc.code})", 502) from None
+        except Exception as exc:   # noqa: BLE001 — nur die Art des Fehlers, nie der Text (URL, Key)
+            raise BudgetError(f"LiteLLM nicht erreichbar ({type(exc).__name__})", 502) from None
+
+    def set_budget(self, alias: object, value: object) -> float:
+        """Prüft Eingaben und setzt das Limit; Rückgabe ist der gesetzte Wert."""
+        if not isinstance(alias, str) or alias not in self.keys:
+            raise BudgetError("Unbekannter Key")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise BudgetError("Limit muss eine Zahl sein")
+        if not 0 < value <= MAX_BUDGET_LIMIT:
+            raise BudgetError(f"Limit muss größer 0 und höchstens {MAX_BUDGET_LIMIT} sein")
+        value = round(float(value), 2)
+        self.update(self.keys[alias], value)
+        return value
 
 
 def default_builder(env: dict | None = None) -> dict:
@@ -199,14 +272,23 @@ class Dashboard:
 
     def __init__(self, cache: StatusCache, logbuf: LogBuffer, slot_dir: str = SLOT_DIR,
                  is_pid_alive=qwen_webhook.pid_is_active,
-                 clock: Callable[[], datetime] = lambda: datetime.now()):
+                 clock: Callable[[], datetime] = lambda: datetime.now(),
+                 writer: BudgetWriter | None = None):
         self.cache, self.logbuf, self.slot_dir = cache, logbuf, slot_dir
         self.is_pid_alive, self.clock = is_pid_alive, clock
+        self.writer = writer or BudgetWriter(env={})   # ohne Angabe: Ändern aus
+
+    def set_budget(self, alias: object, value: object) -> float:
+        new = self.writer.set_budget(alias, value)
+        self.cache.invalidate()   # die Anzeige holt den neuen Stand sofort
+        return new
 
     def state(self) -> dict:
         status, veraltet = self.cache.get()
         slots = qwen_webhook.read_slots(self.slot_dir, self.is_pid_alive)
-        return build_state(slots, status, veraltet, self.logbuf.stephan(), self.clock())
+        state = build_state(slots, status, veraltet, self.logbuf.stephan(), self.clock())
+        state["schreiben"] = self.writer.enabled   # zeigt den „Limit ändern“-Knopf
+        return state
 
     def frames(self, last_seq: int, last_state_json: str | None):
         """Neue SSE-Rahmen seit dem letzten Stand: (Rahmen, last_seq, last_state_json)."""
@@ -258,6 +340,8 @@ pre{background:var(--card);border:1px solid var(--line);border-radius:8px;paddin
 overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0}
 .st{color:var(--red);font-weight:600}a{color:var(--blue)}
 .table-wrap{overflow-x:auto}
+button{font:inherit;font-size:12px;padding:1px 8px;border:1px solid var(--line);border-radius:6px;
+background:var(--card);color:var(--fg);cursor:pointer}
 </style></head><body>
 <h1>Agenten-Sandbox <span id="conn" class="mut"></span></h1>
 <div id="alerts"></div><div id="veraltet"></div>
@@ -273,6 +357,17 @@ const $=id=>document.getElementById(id);
 const el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
 const fmt=s=>s==null?"":(s>=3600?Math.floor(s/3600)+" h ":"")+Math.floor(s%3600/60)+" min";
 let logLines=[];
+async function setBudget(alias,cur){
+ const v=prompt("Neues Limit für "+alias+" in USD (jetzt "+cur+"):",cur);if(v===null)return;
+ const num=Number(v.replace(",","."));if(!isFinite(num)||v.trim()===""){alert("Keine Zahl");return}
+ let tok="";try{tok=sessionStorage.getItem("wt")||""}catch(e){}
+ if(!tok){tok=prompt("Schreib-Token:")||"";if(!tok)return}
+ const r=await fetch("api/budget",{method:"POST",headers:{"Content-Type":"application/json","X-Dashboard-Token":tok},
+  body:JSON.stringify({alias:alias,max_budget:num})});
+ const j=await r.json().catch(()=>({}));
+ if(r.ok){try{sessionStorage.setItem("wt",tok)}catch(e){}alert("Limit von "+alias+" auf $"+j.max_budget+" gesetzt")}
+ else{if(r.status===403){try{sessionStorage.removeItem("wt")}catch(e){}}alert(j.fehler||"Fehler "+r.status)}
+}
 function renderLog(){const l=$("log"),nur=$("nur").checked,
  stick=l.scrollTop+l.clientHeight>=l.scrollHeight-20;
  l.textContent=logLines.filter(x=>!nur||x.includes("⚠ Stephan")).join("\n");
@@ -302,6 +397,7 @@ function render(s){
   t.append(r)});
  $("budgets").replaceChildren(...Object.entries(s.budgets).map(([k,b])=>{const d=el("div","card");
   d.append(el("b",null,k));
+  if(s.schreiben&&b.max!=null){const bt=el("button",null,"Limit ändern");bt.onclick=()=>setBudget(k,b.max);d.append(" ",bt)}
   if(b.fehler)d.append(el("div","mut",b.fehler));else{
    d.append(el("div","mut","$"+b.spend+(b.max?" / $"+b.max:"")+(b.prozent!=null?" ("+b.prozent+" %)":"")));
    const bar=el("div","bar"),i=el("i",b.prozent>=90?"hi":"");i.style.width=Math.min(b.prozent||0,100)+"%";bar.append(i);d.append(bar)}
@@ -342,6 +438,44 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
             else:
                 self._send(404, b"nicht gefunden", "text/plain; charset=utf-8")
 
+        def _json(self, code: int, data: dict) -> None:
+            self._send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8")
+
+        def do_POST(self):   # noqa: N802
+            if self.path.split("?", 1)[0] != "/api/budget":
+                self._send(404, b"nicht gefunden", "text/plain; charset=utf-8")
+                return
+            writer = dash.writer
+            # Der Header X-Dashboard-Token löst bei fremden Seiten einen Preflight aus, den dieser
+            # Dienst nie beantwortet (kein CORS): Fremde Webseiten können nichts absenden.
+            if not writer.enabled:
+                self._json(403, {"fehler": "Budget ändern ist nicht eingerichtet"})
+                return
+            if not writer.token_ok(self.headers.get("X-Dashboard-Token", "")):
+                time.sleep(writer.fail_delay)
+                print("dashboard: Budget ändern mit falschem Token abgelehnt", file=sys.stderr, flush=True)
+                self._json(403, {"fehler": "Token falsch"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 1024:
+                    raise ValueError
+                data = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError
+            except (ValueError, UnicodeDecodeError):
+                self._json(400, {"fehler": "Ungültige Anfrage"})
+                return
+            try:
+                value = dash.set_budget(data.get("alias"), data.get("max_budget"))
+            except BudgetError as exc:
+                print(f"dashboard: Budget ändern fehlgeschlagen: {exc}", file=sys.stderr, flush=True)
+                self._json(exc.status, {"fehler": str(exc)})
+                return
+            print(f"dashboard: Budget-Limit {data['alias']} auf {value} gesetzt", flush=True)
+            self._json(200, {"ok": True, "alias": data["alias"], "max_budget": value})
+
         def _events(self) -> None:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -365,7 +499,7 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
 
 
 def serve(bind: str = BIND, port: int = PORT) -> ThreadingHTTPServer:
-    dash = Dashboard(StatusCache(default_builder), LogBuffer())
+    dash = Dashboard(StatusCache(default_builder), LogBuffer(), writer=BudgetWriter())
     server = ThreadingHTTPServer((bind, port), make_handler(dash))
     server.daemon_threads = True
     return server
