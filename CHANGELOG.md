@@ -8,7 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Hinzugefügt
-- `install.sh`: Dienst `agent-dashboard` für das Web-Dashboard, mit `DASHBOARD=1` einschalten, `DASHBOARD_PORT` einstellbar und gemerkt (Teil 2 von #104).
+- `install.sh`: Dienst `agent-dashboard` für das Web-Dashboard, mit `DASHBOARD=1` einschalten, `DASHBOARD_PORT` einstellbar und gemerkt (#105, Teil 2 von #104).
 - HA: Sensor „Agenten Workflow Status“ und Dashboard-Karten für Projekt-Matrix, wartende PRs und LLM-Budgets (Workflow-Status aus `ha_status.py`) (#92).
 - Dependabot für die GitHub Actions (wöchentlich, höchstens 2 offene PRs) (#93).
 - Doku: Backup und Wiederherstellung der Sandbox (`docs/backup.md`) (#95).
