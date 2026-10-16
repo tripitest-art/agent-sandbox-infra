@@ -77,6 +77,42 @@ cards:
         tap_action:
           action: more-info
 
+  # Workflow-Status aus sensor.agenten_workflow_status (sandbox/ha_status.py per Webhook)
+  - type: markdown
+    title: 📋 Projekt-Matrix
+    content: |-
+      {% set projekte = state_attr('sensor.agenten_workflow_status', 'projekte') or [] %}
+      | Projekt | bereit | in-arbeit | blockiert | PRs offen | rot | laufend |
+      |---|---|---|---|---|---|---|
+      {% for p in projekte -%}
+      {% if p.fehler is defined -%}
+      | {{ p.name }} | fehler: {{ p.fehler }} | | | | | |
+      {% else -%}
+      | {{ p.name }} | {{ p.issues['bereit'] }} | {{ p.issues['in-arbeit'] }} | {{ p.issues['blockiert'] }} | {{ p.prs.offen }} | {{ p.prs.rot }} | {{ p.prs.laufend }} |
+      {% endif -%}
+      {% endfor %}
+
+  - type: custom:mushroom-template-card
+    entity: sensor.agenten_workflow_status
+    primary: "Braucht Stephan: {{ states('sensor.agenten_workflow_status') }}"
+    secondary: >-
+      {% set projekte = state_attr('sensor.agenten_workflow_status', 'projekte') or [] %}
+      {% for p in projekte if p.prs is defined %}{% for pr in p.prs.wartet_auf_stephan %}#{{ pr.number }} {{ pr.title }}; {% endfor %}{% endfor %}
+    icon: mdi:account-alert
+    icon_color: >-
+      {% if states('sensor.agenten_workflow_status') | int(0) > 0 %}red{% else %}green{% endif %}
+    tap_action:
+      action: more-info
+
+  - type: markdown
+    title: 💶 LLM-Budgets
+    content: |-
+      {% set budgets = state_attr('sensor.agenten_workflow_status', 'budgets') or {} %}
+      {% for alias, b in budgets.items() -%}
+      - {{ alias }}: {% if b.fehler is defined %}nicht erreichbar ({{ b.fehler }}){% else %}{{ b.spend }} von {{ b.max }} ({{ b.prozent }} %){% endif %}
+      {% endfor %}
+      Stand: {{ state_attr('sensor.agenten_workflow_status', 'zeit') }}
+
   # Steuerungs-Buttons
   - type: horizontal-stack
     cards:
