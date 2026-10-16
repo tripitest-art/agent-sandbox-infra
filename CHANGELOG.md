@@ -38,6 +38,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
   bleibt die Zeile wie bisher (#99).
 
 ### Behoben
+- `worker_tick`/`qwen_webhook`: Die Lebendprüfung eines Prozesses nutzt unter Windows die Win32-API (`OpenProcess`/`GetExitCodeProcess`/`CloseHandle`) statt `os.kill(pid, 0)`, das dort `CTRL_C_EVENT` an die ganze Konsole schickt und die pytest-Sitzung auf einem Windows-Rechner abbricht; unter Linux bleibt der Code unverändert (#118).
 - `worker_tick`: Ist das Tagesbudget des Worker-Keys aufgebraucht (`spend >= max_budget` aus `/key/info`), wartet der Takt bis zum Reset und verbraucht dabei keinen Versuch; gemeldet wird das einmal je Reset-Zeitraum, ohne Budgetwerte und ohne Entparken (`key_info`, `budget_problem`) (#113).
 - `worker_tick`: Scheitert ein Agentenlauf schon am Anbieter (LiteLLM 429/401/5xx), verbraucht er keinen Versuch mehr; der Grund steht gekürzt und ohne Schlüsselteile im Log, und es gibt genau einen „⚠ Stephan“-Alarm je Schlüssel und Fehlertext (`short_api_error`, `LAST_AGENT_ERROR`) (#106).
 - `worker_tick`: Regel 8 zählt Dateien aus einem Ausschlusssatz der Sektion „Betroffene Dateien“ („… bleibt unberührt“, „Keine andere Datei …“) nicht mehr als belegt; fremde Issues, die solche Dateien wirklich ändern, werden nicht mehr als Kollision übersprungen (#108).
