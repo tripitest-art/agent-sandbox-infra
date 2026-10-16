@@ -42,6 +42,22 @@ template:
             {% set current = state_attr('sensor.qwen_worker_log', 'slots') | default({}, true) %}
             {{ dict(current, **(trigger.json.slots | default({}, true))) }}
 
+  # 2c. Workflow-Status: Projekt-Matrix und Budgets aus sandbox/ha_status.py (alle 2 Minuten).
+  #     Webhook-ID nur in secrets.yaml: ha_status_webhook_id: "<zufällig, openssl rand -hex 24>"
+  - triggers:
+      - trigger: webhook
+        webhook_id: !secret ha_status_webhook_id
+        allowed_methods: [POST]
+        local_only: true
+    sensor:
+      - name: "Agenten Workflow Status"
+        unique_id: agenten_workflow_status
+        state: "{{ trigger.json.braucht_stephan | default(0) }}"
+        attributes:
+          zeit: "{{ trigger.json.zeit | default('') }}"
+          projekte: "{{ trigger.json.projekte | default([], true) }}"
+          budgets: "{{ trigger.json.budgets | default({}, true) }}"
+
   # 2b. Slot-Telemetrie: je Arbeitsslot ein Sensor, gespeist aus dem Attribut `slots`
   #     des Webhook-Sensors oben (geschrieben von sandbox/worker_tick.py).
   - sensor:

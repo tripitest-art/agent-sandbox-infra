@@ -7,6 +7,9 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 
 ## Unreleased
 
+### Hinzugefügt
+- HA: Sensor „Agenten Workflow Status“ und Dashboard-Karten für Projekt-Matrix, wartende PRs und LLM-Budgets (Workflow-Status aus `ha_status.py`) (#PR).
+
 ### Geändert
 - Review-Takt: Pflicht-Checks kommen aus der Projektliste (`required_checks`), Vorgabe `tests` und `acceptance-guard`; sc-digger nennt CodeQL dort selbst (#78).
 - `worker_tick`: Geheimnisse gehen nicht mehr an den Agentenprozess und nicht ins Log, der Agent bekommt nur eine Allowlist der Umgebung (#71).

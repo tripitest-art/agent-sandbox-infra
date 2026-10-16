@@ -50,3 +50,20 @@ Modellantworten, Diff zu groß). Mit `REVIEW_POST=1` bekommt der PR zusätzlich 
 [`automation_stephan.yaml`](automation_stephan.yaml) schickt daraus eine Push-Nachricht mit Link auf
 die Liste dieser PRs. Notify-Dienst darin anpassen, dann unter Einstellungen → Automationen →
 „YAML bearbeiten“ einfügen.
+
+---
+
+## 5. Workflow-Status (Projekt-Matrix, Budgets)
+
+`sandbox/ha_status.py` schickt den Stand der Projekte alle 2 Minuten als JSON an einen zweiten Webhook
+(Timer `ha-status`, `install.sh`).
+
+1. Webhook-ID erzeugen (`openssl rand -hex 24`) und in `secrets.yaml` eintragen, nie ins Repo:
+   `ha_status_webhook_id: "<wert>"`.
+2. Den Sensor „Agenten Workflow Status“ aus [`configuration_sensors.yaml`](configuration_sensors.yaml)
+   (Abschnitt 2c) übernehmen, dann `template.reload`.
+3. Die Karten „Projekt-Matrix“, „Braucht Stephan“ und „LLM-Budgets“ aus
+   [`dashboard_card.yaml`](dashboard_card.yaml) ins Dashboard einfügen.
+4. Die volle URL `http://<HA-IP>:8123/api/webhook/<wert>` bei `install.sh` als `HA_STATUS_URL` angeben.
+   Der Sensor liest nur dieses JSON; der Zustand ist die Zahl der PRs mit Label `braucht-stephan`.
+
