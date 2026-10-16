@@ -868,8 +868,52 @@ def format_usage(usage: object) -> str:
     return f", Token: {ein} ein/{aus} aus/{cache} Cache"
 
 
+# Kurztext des Anbieterfehlers im letzten Agentenlauf, sonst None. Nur log_stream_line setzt ihn;
+# main() liest ihn nach run_agent() und nimmt dann den Versuch zurück (#106).
+LAST_AGENT_ERROR: str | None = None
+
+_API_ERROR_PREFIX = "[API Error:"
+# Bei LiteLLM folgt auf ein Leerzeichen „Key“ (bzw. „Received“) der Schlüsselteil samt Key-Hash;
+# alles ab dort gehört nicht ins Log (Regel 5).
+_API_ERROR_CUT_RE = re.compile(r"\s+(?:Key|Received)\b")
+_API_ERROR_KEY_RE = re.compile(r"\bsk-\S*")
+_API_ERROR_CODE_RE = re.compile(r"^(\d{3})\b")
+_API_ERROR_MAX = 160
+
+
+def short_api_error(message: str) -> str:
+    """Einzeilige, schlüsselfreie Kurzfassung einer Fehlermeldung aus `error.message` (#106).
+
+    - Umschließendes „[API Error: “ und „]“ entfallen.
+    - Beginnt der Rest mit einem dreistelligen Statuscode: „API <Code>: <Text>“, sonst „API: <Text>“.
+    - <Text> endet vor dem ersten „ Key“/„ Received“ (dort folgen bei LiteLLM Schlüsselteil und -Hash).
+    - Danach `redact()` und jedes Wort, das mit „sk-“ beginnt, entfällt (Regel 5).
+    - Zeilenumbrüche und Mehrfach-Leerzeichen werden ein Leerzeichen; höchstens 160 Zeichen,
+      Gekürztes endet auf „…“. Reine Funktion, kein Netz."""
+    text = message.strip()
+    if text.startswith(_API_ERROR_PREFIX):
+        text = text[len(_API_ERROR_PREFIX):].strip()
+    if text.endswith("]"):
+        text = text[:-1].strip()
+    cut = _API_ERROR_CUT_RE.search(text)
+    if cut:
+        text = text[:cut.start()].strip()
+    text = _API_ERROR_KEY_RE.sub("", redact(text))
+    text = " ".join(text.split())
+    m = _API_ERROR_CODE_RE.match(text)
+    result = f"API {m.group(1)}: {text[m.end():].strip()}" if m else f"API: {text}"
+    if len(result) > _API_ERROR_MAX:
+        result = result[: _API_ERROR_MAX - 1].rstrip() + "…"
+    return result
+
+
 def log_stream_line(line: str) -> None:
-    """Eine Zeile stream-json von Qwen Code als lesbares Log: Text, `$ befehl`, Ausgabe."""
+    """Eine Zeile stream-json von Qwen Code als lesbares Log: Text, `$ befehl`, Ausgabe.
+
+    Ein Ergebnis-Ereignis mit Anbieterfehler ({"type": "result", "is_error": true,
+    "subtype": "error_during_execution", "error": {"message": "[API Error: …"}}) setzt zusätzlich
+    LAST_AGENT_ERROR und schreibt dessen Kurzfassung als eigene Logzeile (#106)."""
+    global LAST_AGENT_ERROR
     def say(text: str) -> None:
         # Regel 5: keine Geheimniswerte aus der Werkzeugausgabe ins Log (#35).
         print(redact(text), flush=True)
@@ -901,6 +945,12 @@ def log_stream_line(line: str) -> None:
                 mark = "✗ Fehler:\n" if part.get("is_error") else ""
                 say(mark + _clip(out))
     elif kind == "result":
+        err = event.get("error")
+        message = err.get("message") if isinstance(err, dict) else None
+        if (event.get("is_error") and event.get("subtype") == "error_during_execution"
+                and isinstance(message, str) and message.startswith(_API_ERROR_PREFIX)):
+            LAST_AGENT_ERROR = short_api_error(message)
+            say(f"[Anbieterfehler] {LAST_AGENT_ERROR}")
         say(f"[Qwen Code: {event.get('subtype')}, {event.get('num_turns')} Züge, "
             f"{round((event.get('duration_ms') or 0) / 1000)} s{format_usage(event.get('usage'))}]")
 
@@ -1347,6 +1397,7 @@ def prepare_workdir() -> None:
 
 
 def main() -> int:
+    global LAST_AGENT_ERROR
     skey = "-"          # Regel 7: vor der Auftragswahl meldet der Takt „-“
     try:
         state = load_state()
@@ -1436,12 +1487,29 @@ def main() -> int:
         if pr_no is not None:
             info["pr"] = pr_no
         slot_status("running", **info)
+        LAST_AGENT_ERROR = None   # log_stream_line setzt ihn nur bei einem Anbieterfehler
         rc = run_agent(prompt)
         if rc == 124:
             log(f"{skey}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
         else:
             log(f"{skey}: {name} beendet (Exit {rc}).")
         slot_status("idle", message="Takt beendet", project=PROJECT)
+        err = LAST_AGENT_ERROR
+        if err:
+            # Scheitert der Lauf schon am Anbieter (429/401/5xx), ist das nicht die Schuld des
+            # Auftrags: Der Versuch wird zurückgenommen, sonst läge er nach MAX_TRIES bei Stephan
+            # (#106, Beleg 15.10.). Denselben Fehler je Schlüssel nur einmal melden.
+            state[skey] = max(0, state.get(skey, 0) - 1)
+            save_state(state)
+            log(f"{skey}: Anbieterfehler im Lauf ({err}), Versuch zählt nicht.")
+            akey = f"_apierr:{skey}"
+            if state.get(akey) != err:
+                alarm(skey, f"Anbieterfehler: {err}")
+                state[akey] = err
+                save_state(state)
+            return 0
+        if state.pop(f"_apierr:{skey}", None) is not None:
+            save_state(state)   # ein früherer Anbieterfehler ist vorbei
         # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
         if key.startswith("issue"):
             check_issue_result(key)

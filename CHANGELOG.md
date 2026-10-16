@@ -9,6 +9,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 
 ### Hinzugefügt
 - Dashboard: LiteLLM-Budget-Limits (`max_budget`) lassen sich im Browser ändern, geschützt durch einen Schreib-Token und den Master-Key aus `/etc/agent-dashboard.env` (Dienst `agent-dashboard`, `install.sh` fragt beides ab) (#111).
+- `LICENSE` (MIT, Copyright (c) 2026 Stephan Voigt) und `SECURITY.md` mit dem vertraulichen Meldeweg für Sicherheitslücken (GitHub „Private vulnerability reporting“); dazu der README-Abschnitt „Lizenz und Sicherheit“ (#110).
 - Web-Dashboard `sandbox/dashboard.py` (nur lesend, SSE) als Ersatz fürs HA-Dashboard (#104).
 - `install.sh`: Worker-Takt (`TAKT`) und Review-Takt (`REVIEW_TAKT`) laufen standardmäßig alle 2 Minuten statt alle 5 und 10 (#109).
 - `install.sh`: Dienst `agent-dashboard` für das Web-Dashboard, mit `DASHBOARD=1` einschalten, `DASHBOARD_PORT` einstellbar und gemerkt (#105, Teil 2 von #104).
@@ -37,6 +38,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
   bleibt die Zeile wie bisher (#99).
 
 ### Behoben
+- `worker_tick`: Scheitert ein Agentenlauf schon am Anbieter (LiteLLM 429/401/5xx), verbraucht er keinen Versuch mehr; der Grund steht gekürzt und ohne Schlüsselteile im Log, und es gibt genau einen „⚠ Stephan“-Alarm je Schlüssel und Fehlertext (`short_api_error`, `LAST_AGENT_ERROR`) (#106).
 - `worker_tick`: Regel 8 zählt Dateien aus einem Ausschlusssatz der Sektion „Betroffene Dateien“ („… bleibt unberührt“, „Keine andere Datei …“) nicht mehr als belegt; fremde Issues, die solche Dateien wirklich ändern, werden nicht mehr als Kollision übersprungen (#108).
 - `worker_tick`: der Agentenprozess bekommt `LITELLM_API_KEY` wieder; #71 hatte ihn mit entfernt, und jeder Agentenlauf endete nach 0 Sekunden mit `error_during_execution`. Alle anderen Geheimnisse bleiben draußen, das Log bleibt redigiert (#91).
 - `worker_tick`: der Agentenprozess behält den PATH aus `ENV` (Fix zu #71), damit `pytest` aus `/root/venv` gefunden wird (#80).
