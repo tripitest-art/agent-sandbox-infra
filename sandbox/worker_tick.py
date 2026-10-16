@@ -127,6 +127,15 @@ ERROR_RULE = (
     "das nicht, nicht „fertig“ melden, sondern den Fehler wörtlich als Kommentar {where} schreiben\n"
     "und aufhören.")
 
+# Steht im Issue-Auftrag direkt nach Schritt 6 (#68). Der pre-push-Hook lehnt einen Push mit roten
+# Tests ab; nur die Eskalation (Draft-PR nach drei Fehlschlägen, AGENTS.md Worker 6) darf ihn
+# umgehen. Ohne diesen Satz hält der Agent den abgebrochenen Push für einen Fehler und weicht ihm
+# aus, statt die Tests zu beheben.
+PUSH_RULE = (
+    "Der Push wird bei roten Tests abgelehnt (pre-push-Hook). Dann die Fehlermeldung lesen und "
+    "beheben, nicht umgehen. Nur für die Eskalation mit Draft-PR (nach drei erfolglosen Anläufen, "
+    "AGENTS.md Worker 6) gilt `git push --no-verify`.")
+
 ENV = dict(os.environ, PATH=f"/root/venv/bin:/root/.opencode/bin:{os.environ.get('PATH', '/usr/bin:/bin')}")
 
 # Regel 5: Diese Werte dürfen nie ins Log (#35) und, bis auf AGENT_ENV_PASS, nie in den Agentenprozess.
@@ -732,6 +741,7 @@ Das Issue steht unten; es ist der Vertrag. Gehe genau diese Schritte durch und f
    korrigieren, Schritt 5 wiederholen. Ein roter Test ist kein Grund aufzuhören, sondern der
    nächste Arbeitsschritt. Erst weiter, wenn alles grün ist.
 6. `git add -A && git commit -m "<was und warum>" && git push -u origin {branch}`
+   {PUSH_RULE}
 7. Schreib den PR-Text nach der Vorlage unten in .git/pr-body.md: jede Überschrift
    ausgefüllt, „Closes #{n}“, zutreffende Kästchen mit [x], unter „Offene Punkte“ eine Antwort
    („keine“ reicht), unter „Umgesetzt von / Review durch“ die Zeile „Worker: {WORKER}“. Dann
@@ -1185,6 +1195,52 @@ def ollama_free(status: dict | None = None, say=log) -> bool:
     return True
 
 
+def pre_push_hook(test_cmd: str) -> str:
+    """Text des pre-push-Hooks: blockiert den Push, solange die Tests rot sind (#68).
+
+    Absichtlich sh ohne Zusatzbefehle: Der Hook läuft beim `git push` des Agenten und muss
+    ohne Netz, ohne gh und mit jedem git auf dem Server funktionieren. `--no-verify` steht
+    hier bewusst nicht, weil die Umgehung nur der Eskalation im Auftrag erlaubt ist.
+    """
+    return (
+        "#!/bin/sh\n"
+        "# Erzeugt von worker_tick.prepare_workdir(): kein Push mit roten Tests (#68).\n"
+        f"{test_cmd}\n"
+        "if [ $? -ne 0 ]; then\n"
+        "    echo \"pre-push: Tests fehlgeschlagen, Push abgelehnt."
+        " Fehler beheben, nicht umgehen.\" >&2\n"
+        "    exit 1\n"
+        "fi\n"
+        "exit 0\n")
+
+
+def install_pre_push_hook(hooks_dir: str, test_cmd: str) -> str:
+    """Schreibt den pre-push-Hook nach hooks_dir und gibt seinen Pfad zurück (#68).
+
+    Wird bei jedem Lauf neu geschrieben, damit eine geänderte TEST_CMD oder ein gelöschter
+    Hook nicht still wirkungslos bleibt.
+    """
+    os.makedirs(hooks_dir, exist_ok=True)
+    path = os.path.join(hooks_dir, "pre-push")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(pre_push_hook(test_cmd))
+    os.chmod(path, 0o755)
+    return path
+
+
+def git_hooks_dir(cwd: str) -> str:
+    """Ermittelt das Hook-Verzeichnis, das git in cwd benutzt (#68).
+
+    Im Worktree-Modus ist das der gemeinsame Hook-Ordner des Basis-Klons; ihn zu berechnen,
+    statt `.git/hooks` zu raten, hält Hook und Repo zusammen (git-path liefert je nach
+    Version einen relativen oder absoluten Pfad).
+    """
+    out = subprocess.run(["git", "rev-parse", "--git-path", "hooks"], cwd=cwd,
+                         capture_output=True, text=True, check=True, env=ENV)
+    path = out.stdout.strip()
+    return path if os.path.isabs(path) else os.path.join(cwd, path)
+
+
 def prepare_workdir() -> None:
     """Bereitet das Arbeitsverzeichnis für einen neuen Lauf vor (main oder worktree)."""
     base = BASE_WORKDIR if os.path.exists(BASE_WORKDIR) else WORKDIR
@@ -1192,6 +1248,7 @@ def prepare_workdir() -> None:
         for cmd in (["git", "fetch", "-q", "origin"], ["git", "checkout", "-qf", "main"],
                     ["git", "reset", "-q", "--hard", "origin/main"], ["git", "clean", "-qfd"]):
             subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
+        install_pre_push_hook(git_hooks_dir(WORKDIR), TEST_CMD)
         return
 
     # Worktree-Modus: Basis-Repo fetchen (mit Lock gegen parallele Fetches)
@@ -1221,6 +1278,11 @@ def prepare_workdir() -> None:
                     ["git", "reset", "-q", "--hard", "origin/main"],
                     ["git", "clean", "-qfd"]):
             subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
+
+    # #68: Bei jedem Lauf neu setzen. Hook-Verzeichnis über git erfragen, weil es im Worktree der
+    # gemeinsame Ordner des Basis-Klons ist (nicht WORKDIR/.git/hooks) — ein falsch geratener Pfad
+    # würde still wirkungslos bleiben. Fehler hier sind echte Fehler (check=True), kein Verschlucken.
+    install_pre_push_hook(git_hooks_dir(WORKDIR), TEST_CMD)
 
 
 def main() -> int:

@@ -59,6 +59,13 @@ def _repo_workdir(monkeypatch, tmp_path):
     def no_network(url, timeout):   # nie den echten Proxy fragen; wie „kein Proxy“
         raise urllib.error.URLError("kein Netz im Test")
     monkeypatch.setattr(w.urllib.request, "urlopen", no_network)
+    # #68: prepare_workdir schreibt einen pre-push-Hook. Nie in das echte .git/hooks dieses Repos
+    # (der Hook würde hier jeden Push sperren); Tests, die die Abfrage selbst prüfen, setzen
+    # `git_hooks_dir` auf `_ECHTE_GIT_HOOKS_DIR` zurück.
+    monkeypatch.setattr(w, "git_hooks_dir", lambda cwd: str(tmp_path / "git-hooks"))
+
+
+_ECHTE_GIT_HOOKS_DIR = w.git_hooks_dir    # vor dem Autouse-Fixture gesichert (#68)
 
 
 def _good_body(issue_no=100):
@@ -1139,6 +1146,7 @@ def test_issue_job_skips_file_overlap(monkeypatch):
 def test_prepare_workdir_creates_worktree(monkeypatch, tmp_path):
     base_dir = tmp_path / "base_repo"
     workdir = tmp_path / "worktrees" / "w2"
+    hooks_dir = base_dir / ".git" / "hooks"
     base_dir.mkdir(parents=True)
     commands = []
 
@@ -1146,13 +1154,25 @@ def test_prepare_workdir_creates_worktree(monkeypatch, tmp_path):
         commands.append((cmd, cwd))
         if "worktree" in cmd and "add" in cmd:
             workdir.mkdir(parents=True)
+        if cmd[:2] == ["git", "rev-parse"]:
+            # #68: git nennt den Hook-Ordner; er liegt im gemeinsamen Basis-Klon, nicht im Worktree.
+            return w.subprocess.CompletedProcess(cmd, 0, stdout=f"{hooks_dir}\n", stderr="")
+        return w.subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(w, "BASE_WORKDIR", str(base_dir))
     monkeypatch.setattr(w, "WORKDIR", str(workdir))
+    # Die Abfrage des Hook-Ordners gehört hier zum Prüfling (Fixture-Stub aufheben, #68).
+    monkeypatch.setattr(w, "git_hooks_dir", _ECHTE_GIT_HOOKS_DIR)
     monkeypatch.setattr(w.subprocess, "run", fake_run)
 
     w.prepare_workdir()
     assert any("worktree" in c[0] and "add" in c[0] for c in commands)
+    assert ["git", "rev-parse", "--git-path", "hooks"] in [c[0] for c in commands]
+    # Der Hook wird wirklich geschrieben (Dateisystem in tmp_path) und führt den Testbefehl aus.
+    hook = hooks_dir / "pre-push"
+    assert hook.read_text(encoding="utf-8") == w.pre_push_hook(w.TEST_CMD)
+    if os.name != "nt":
+        assert hook.stat().st_mode & 0o111 == 0o111
 
 
 def test_prepare_workdir_reuses_existing_worktree_detached(monkeypatch):
@@ -1173,20 +1193,33 @@ def test_prepare_workdir_reuses_existing_worktree_detached(monkeypatch):
         def __exit__(self, *exc):
             return False
 
+        def write(self, text):
+            self.text = text
+
     # Ohne O_EXCL entfällt der flock-Zweig, damit der Ablauf auf Windows und Linux gleich ist.
     fake_os = type("FakeOs", (), {
         "path": type("FakePath", (), {
             "exists": staticmethod(lambda p: True),
             "join": staticmethod(_os.path.join),
             "dirname": staticmethod(_os.path.dirname),
+            "isabs": staticmethod(_os.path.isabs),
         }),
         "makedirs": staticmethod(lambda *a, **k: None),
+        "chmod": staticmethod(lambda *a, **k: None),
     })
+
+    def fake_run(cmd, cwd=None, **kw):
+        calls.append(list(cmd))
+        if cmd[:2] == ["git", "rev-parse"]:
+            return w.subprocess.CompletedProcess(cmd, 0, stdout="hooks\n", stderr="")
+
     monkeypatch.setattr(w, "BASE_WORKDIR", "/base")
     monkeypatch.setattr(w, "WORKDIR", "/base-worktrees/w2")
     monkeypatch.setattr(w, "os", fake_os)
     monkeypatch.setattr(w, "open", lambda *a, **k: _Null(), raising=False)
-    monkeypatch.setattr(w.subprocess, "run", lambda cmd, cwd=None, **kw: calls.append(list(cmd)))
+    # Wie in `test_issue_40.py` gehört die Hook-Abfrage (#68) zur erwarteten Aufruffolge.
+    monkeypatch.setattr(w, "git_hooks_dir", _ECHTE_GIT_HOOKS_DIR)
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
 
     w.prepare_workdir()
 
@@ -1195,9 +1228,59 @@ def test_prepare_workdir_reuses_existing_worktree_detached(monkeypatch):
         ["git", "checkout", "-qf", "--detach", "origin/main"],
         ["git", "reset", "-q", "--hard", "origin/main"],
         ["git", "clean", "-qfd"],
+        ["git", "rev-parse", "--git-path", "hooks"],
     ]
     for cmd in calls:
         assert "main" not in cmd and "-B" not in cmd
+
+
+def test_git_hooks_dir_nimmt_den_pfad_von_git(monkeypatch):
+    """#68: Der Hook-Ordner wird bei git erfragt, nie geraten.
+
+    Im Worktree ist es der gemeinsame Ordner des Basis-Klons; `.git/hooks` unter WORKDIR wäre
+    dort falsch (WORKDIR/.git ist eine Datei) und der Hook bliebe still wirkungslos.
+    """
+    seen = []
+
+    def fake_run(cmd, cwd=None, **kw):
+        seen.append((list(cmd), cwd))
+        return w.subprocess.CompletedProcess(cmd, 0, stdout=" .git/hooks \n", stderr="")
+
+    monkeypatch.setattr(w, "git_hooks_dir", _ECHTE_GIT_HOOKS_DIR)   # Fixture-Stub aufheben (#68)
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    assert w.git_hooks_dir("/work/w1") == os.path.join("/work/w1", ".git/hooks")
+    assert seen == [(["git", "rev-parse", "--git-path", "hooks"], "/work/w1")]
+
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, cwd=None, **kw: w.subprocess.CompletedProcess(
+        cmd, 0, stdout="/shared/.git/hooks\n", stderr=""))
+    assert w.git_hooks_dir("/work/w1") == "/shared/.git/hooks"
+
+
+def test_push_regel_nur_im_issue_auftrag(monkeypatch):
+    """#68: Der Auftrag für ein neues Issue nennt die Push-Sperre, die Nacharbeit nicht.
+
+    Ohne den Satz liest der Agent den abgelehnten Push als Werkzeugfehler und sucht die
+    Umgehung, statt die Tests zu beheben; in `rework_job`/`text_fix_job` gehört er nicht hin.
+    """
+    candidate = {
+        "number": 68,
+        "title": "Push mit roten Tests sperren",
+        "labels": [{"name": "bereit"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `sandbox/worker_tick.py`",
+    }
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[candidate]))
+    key, task, pr_no, before = w.issue_job()
+    assert key == "issue68"
+    assert w.PUSH_RULE in task
+    # Direkt nach Schritt 6 (dem Push), vor Schritt 7: dort liest der Agent den Push-Befehl.
+    assert task.index('git push -u origin feature/issue-68') < task.index(w.PUSH_RULE)
+    assert task.index(w.PUSH_RULE) < task.index("7. Schreib den PR-Text")
+
+    monkeypatch.setattr(w, "gh", FakeGH(prs=[_pr()]))
+    rkey, rtask, _, _ = w.rework_job()
+    assert rkey == "pr103@2026-09-29T21:39:23Z"
+    assert w.PUSH_RULE not in rtask
 
 
 def test_slot_logging(capsys, monkeypatch):
