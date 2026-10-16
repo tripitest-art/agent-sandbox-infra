@@ -41,6 +41,7 @@ Regeln und Vorlage liest das Skript zur Laufzeit aus sc-digger/main (AGENTS.md A
 und Goldene Regeln, skills/sc-digger-review/SKILL.md Schritte 5 und 6): Änderungen dort wirken sofort.
 Den Key (LITELLM_REVIEW_KEY) liest systemd aus /etc/qwen-reviewer.env, nie aus dem Repo.
 """
+import fnmatch
 import json
 import os
 import re
@@ -60,6 +61,8 @@ PROJECTS = projects.load_projects()   # ohne /etc/agent-projects.json: sc-digger
 REPO = PROJECTS[0].repo
 REVIEW_SKILL = PROJECTS[0].review_skill
 PROJECT_AUTO_MERGE = PROJECTS[0].auto_merge
+# Dateimuster, bei deren Treffer der Takt nie selbst mergt (wie PROJECT_AUTO_MERGE je Projekt).
+PROJECT_MANUAL_PATHS = PROJECTS[0].manual_paths
 OWNER = "tripitest-art"
 # Worker-Issues mit einem dieser Labels prüft der Takt; die Familienregel verhindert Selbstprüfung.
 LABELS = tuple(l.strip() for l in os.environ.get("REVIEW_LABELS", "agent-qwen,agent-antigravity,agent-claude").split(",") if l.strip())
@@ -139,10 +142,11 @@ def safe_snippet(text: str | None, limit: int = 60) -> str:
 
 
 def use_project(p: "projects.Project", first: bool) -> None:
-    """Schaltet auf Projekt `p` um: Repo, Review-Skill, Merge-Erlaubnis, Pflicht-Checks,
-    Zustandsdatei, Entwurfsordner."""
-    global REPO, REVIEW_SKILL, PROJECT_AUTO_MERGE, REQUIRED_CHECKS, STATE, DRAFT_DIR
+    """Schaltet auf Projekt `p` um: Repo, Review-Skill, Merge-Erlaubnis, Dateimuster,
+    Pflicht-Checks, Zustandsdatei, Entwurfsordner."""
+    global REPO, REVIEW_SKILL, PROJECT_AUTO_MERGE, PROJECT_MANUAL_PATHS, REQUIRED_CHECKS, STATE, DRAFT_DIR
     REPO, REVIEW_SKILL, PROJECT_AUTO_MERGE = p.repo, p.review_skill, p.auto_merge
+    PROJECT_MANUAL_PATHS = tuple(p.manual_paths)
     REQUIRED_CHECKS = tuple(p.required_checks)
     if first:
         STATE, DRAFT_DIR = BASE_STATE, BASE_DRAFT_DIR
@@ -164,6 +168,16 @@ def gh_json(*args: str):
 def repo_file(path: str) -> str:
     """Datei aus main des aktiven Projekts (roh)."""
     return gh_text("api", f"repos/{REPO}/contents/{path}?ref=main", "-H", "Accept: application/vnd.github.raw", repo=False)
+
+
+def pr_files(number: int) -> list[dict] | None:
+    """Dateiliste eines PRs (`gh pr view <n> --json files`), None wenn die Abfrage scheitert.
+    Jeder Aufruf liest frisch. None bedeutet „unbekannt“ und sperrt den automatischen Merge."""
+    try:
+        data = gh_json("pr", "view", str(number), "--json", "files")
+        return list(data["files"])
+    except (subprocess.CalledProcessError, KeyError, TypeError):
+        return None
 
 
 def load_state() -> dict:
@@ -526,6 +540,17 @@ def is_auto_merge(issue_body: str | None) -> bool:
     return False
 
 
+def manual_path_hits(files: list[str], patterns: tuple[str, ...]) -> list[str]:
+    """Dateien aus `files`, auf die mindestens ein Muster passt (fnmatch.fnmatchcase auf den
+    ganzen Pfad, „*“ passt auch über „/“ hinweg). Reihenfolge wie in `files`, jede Datei einmal.
+    Ohne Muster: []. Reine Funktion."""
+    hits: list[str] = []
+    for path in files:
+        if path not in hits and any(fnmatch.fnmatchcase(path, p) for p in patterns):
+            hits.append(path)
+    return hits
+
+
 def merge_pr(number: int, sha: str) -> bool:
     """Führt `gh pr merge <number> --squash --match-head-commit <sha>` aus.
     Der geprüfte Commit wird mitgegeben, damit ein Push zwischen Liste und Merge den Merge
@@ -761,7 +786,12 @@ def _run_pr_review() -> int:
                 # Kein Worker-Issue (Label `review-anfordern`, Branch ohne issue-<N>): nicht abfragen.
                 issue = (gh_json("issue", "view", str(pr["issue_no"]), "--json", "number,title,body")
                          if pr["issue_no"] is not None else None)
-                files = gh_json("pr", "view", str(n), "--json", "files")["files"]
+                # Die Dateiliste ist nur Beiwerk des Entwurfs: Ist sie nicht lesbar, wird ohne sie
+                # geprüft. Der Merge liest sie später noch einmal und sperrt dann bei unbekannter Lage.
+                files = pr_files(n)
+                if files is None:
+                    log(f"PR #{n}: Dateiliste nicht lesbar; Review ohne Dateiliste.")
+                    files = []
                 diff = gh_text("pr", "diff", str(n))
             except subprocess.CalledProcessError as exc:
                 log(f"PR #{n}: GitHub-Abfrage scheitert ({safe_snippet(exc.stderr, 120)}), nächster Takt.")
@@ -844,6 +874,19 @@ def _run_pr_review() -> int:
             except subprocess.CalledProcessError:
                 issue = None
         if issue and is_auto_merge(issue.get("body")):
+            if PROJECT_MANUAL_PATHS:
+                # Frische Abfrage: Zwischen Review und Merge kann der PR weitergeschoben worden sein.
+                paths = pr_files(n)
+                if paths is None:
+                    log(f"PR #{n}: Freigegeben, aber Dateiliste nicht lesbar; kein Merge.")
+                    to_stephan(n, key, "Freigegeben, Dateiliste nicht lesbar: bitte prüfen und mergen.", state)
+                    return 0
+                hits = manual_path_hits([f["path"] for f in paths], PROJECT_MANUAL_PATHS)
+                if hits:
+                    log(f"PR #{n}: Freigegeben, aber {REPO} mergt {', '.join(hits[:3])} nur von Hand.")
+                    to_stephan(n, key, f"Freigegeben, berührt Dateien mit manuellem Merge "
+                               f"({', '.join(hits[:3])}): bitte prüfen und mergen.", state)
+                    return 0
             merge_or_queue(n, pr["headRefOid"], state)
             save_state(state)
         else:
