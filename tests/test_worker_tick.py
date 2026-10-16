@@ -106,6 +106,8 @@ class FakeGH:
                     raise RuntimeError("gh nicht erreichbar")
                 return self.active
             return self.issues
+        if args[:2] == ("issue", "edit"):
+            return None
         raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
 
 
@@ -200,6 +202,7 @@ def test_issue_job(monkeypatch):
     assert "Ein roter Test ist kein Grund aufzuhören" in task  # erster Lauf endete dort
     assert "NICHT erledigt" in task and "ins Issue #102" in task
     assert "/tmp/" not in task
+    assert not any(c[:2] == ("issue", "edit") for c in fake.calls)
     assert '--title "$(gh issue view 102 --json title -q .title)"' in task
 
 
@@ -891,6 +894,8 @@ def _litellm(monkeypatch, tmp_path, up=True):
     monkeypatch.setattr(w, "ollama_free", lambda *a, **k: pytest.fail("Ollama gefragt, obwohl LiteLLM aktiv"))
     monkeypatch.setattr(w, "litellm_ready", lambda: None if up else "LiteLLM nicht erreichbar")
     monkeypatch.setattr(w, "probe_model", lambda model: None)
+    # #90: Der Takt fragt vor dem Lauf das Tagesbudget ab; im Test ohne Antwort (kein Netzaufruf).
+    monkeypatch.setattr(w, "key_info", lambda: None)
 
 
 def test_main_litellm_runs_job_without_pc(monkeypatch, tmp_path, capsys):
@@ -1039,6 +1044,95 @@ def test_main_litellm_without_work_does_not_probe(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "gh", FakeGH())
     monkeypatch.setattr(w, "probe_model", lambda m: pytest.fail("Probe ohne Arbeit"))
     assert w.main() == 0
+
+
+# --- Tagesbudget vor dem Lauf prüfen (#90) ---
+
+def test_key_info_liefert_den_verbrauch_des_eigenen_keys(monkeypatch):
+    monkeypatch.setattr(w, "LITELLM", "http://litellm.test:4000")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-testschluessel")
+    seen = {}
+
+    def opener(req, timeout=10):
+        seen.update(url=req.full_url, auth=req.get_header("Authorization"))
+        return _Resp({"info": {"spend": 1.5, "max_budget": 5.0}})
+    monkeypatch.setattr(w.urllib.request, "urlopen", opener)
+    assert w.key_info() == {"spend": 1.5, "max_budget": 5.0}
+    assert seen == {"url": "http://litellm.test:4000/key/info", "auth": "Bearer sk-testschluessel"}
+
+
+@pytest.mark.parametrize("payload", [{"key": "sk-x"}, {"info": [1, 2]}, {"info": None},
+                                     "kein JSON-Objekt", None])
+def test_key_info_gibt_bei_unbrauchbarer_antwort_none(monkeypatch, payload):
+    # Eine unklare Lage ist kein Grund anzuhalten: kein „info“-Objekt heißt None, keine Ausnahme.
+    monkeypatch.setattr(w.urllib.request, "urlopen", lambda req, timeout=10: _Resp(payload))
+    assert w.key_info() is None
+
+
+def test_key_info_nennt_den_schluessel_nie_im_log(monkeypatch, capsys):
+    """Regel 5: Der Schlüssel steht nur im Header; auch der Fehlertext bleibt aus dem Log."""
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-testschluessel-geheim")
+
+    def boom(req, timeout=10):
+        raise urllib.error.URLError(f"Proxy weg für {req.get_header('Authorization')}")
+    monkeypatch.setattr(w.urllib.request, "urlopen", boom)
+    assert w.key_info() is None
+    aus = capsys.readouterr()
+    assert aus.out == "" and "sk-testschluessel-geheim" not in aus.err
+
+
+def test_budget_problem_bleibt_ohne_beleg_still():
+    # Ohne Zahlen, ohne Limit, ohne „info“ läuft der Takt weiter (anders als bei Regel 8).
+    assert w.budget_problem(None) is None
+    assert w.budget_problem("leer") is None
+    assert w.budget_problem({}) is None
+    assert w.budget_problem({"spend": 5.0}) is None
+    assert w.budget_problem({"max_budget": 5.0}) is None
+    assert w.budget_problem({"spend": "5", "max_budget": 5.0}) is None
+    assert w.budget_problem({"spend": 4.99, "max_budget": 5.0}) is None
+
+
+def test_budget_problem_meldet_nur_den_reset_und_keine_budgetwerte():
+    info = {"spend": 5.0, "max_budget": 5.0, "budget_reset_at": "2026-10-17T00:00:00+00:00"}
+    msg = w.budget_problem(info)
+    assert msg == "LiteLLM-Tagesbudget aufgebraucht (Reset 2026-10-17T00:00)"
+    # Regel 5: weder Verbrauch noch Limit stehen in der Zeile.
+    assert "5.0" not in msg and "spend" not in msg and "max_budget" not in msg
+    # Genau auf der Grenze gilt das Budget als leer, ohne Reset-Zeitpunkt bleibt die Angabe offen.
+    assert w.budget_problem({"spend": 5, "max_budget": 5}) == \
+        "LiteLLM-Tagesbudget aufgebraucht (Reset unbekannt)"
+
+
+def test_main_ollama_fragt_kein_budget_ab(monkeypatch, tmp_path):
+    # Das Tagesbudget gehört zum LiteLLM-Zweig; mit lokalem Backend gibt es keinen Key.
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w, "ollama_free", lambda *a, **k: False)
+    monkeypatch.setattr(w, "key_info", lambda: pytest.fail("Budgetabfrage mit Ollama"))
+    assert w.main() == 0
+
+
+def test_main_litellm_zaehlt_bei_leerem_budget_keinen_versuch(monkeypatch, tmp_path, capsys):
+    # Ein leerer Key beantwortet auch die Ausweichmodelle mit 429 (#90): kein Lauf, kein Versuch.
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w, "key_info", lambda: {"spend": 0.0, "max_budget": 0.0,
+                                                "budget_reset_at": "2026-10-17T00:00:00+00:00"})
+    monkeypatch.setattr(w, "choose_model", lambda: pytest.fail("Modellprobe trotz leerem Budget"))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: pytest.fail("Lauf trotz leerem Budget"))
+    assert w.main() == 0
+    assert w.main() == 0      # gleiche Lage: nur eine Zeile
+    aus = capsys.readouterr().out
+    assert aus.count("LiteLLM-Tagesbudget aufgebraucht") == 1
+    assert "Versuch zählt nicht" in aus and "⚠ Stephan: " in aus
+    zustand = json.loads((tmp_path / "state.json").read_text())
+    assert "issue102" not in zustand
+    assert zustand["_budget"] == "2026-10-17T00:00"
+    # Der Merker fällt, sobald das Budget wieder frei ist: die nächste Knappheit wird erneut gemeldet.
+    monkeypatch.setattr(w, "key_info", lambda: {"spend": 0.0, "max_budget": 5.0})
+    monkeypatch.setattr(w, "choose_model", lambda: (None, ["kein Modell"]))
+    assert w.main() == 0
+    assert "_budget" not in json.loads((tmp_path / "state.json").read_text())
 
 
 def test_worker_names():
@@ -1407,6 +1501,7 @@ def _lauf_mit_reihenfolge(monkeypatch, tmp_path, hook):
     monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
     monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
     monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
     monkeypatch.setattr(w, "check_issue_result", lambda k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: schritte.append("workdir"))
@@ -1636,6 +1731,7 @@ def test_main_meldet_absturz_der_auftragsausfuehrung(monkeypatch, capsys):
     monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
     monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
     monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "prepare_workdir", boom)
 
     assert w.main() == 0
@@ -1658,6 +1754,7 @@ def test_main_meldet_nur_die_erste_zeile(monkeypatch, capsys):
     monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
     monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
     monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "prepare_workdir", boom)
 
     assert w.main() == 0
@@ -1698,6 +1795,21 @@ def test_pid_alive_erkennt_beendeten_prozess():
     assert w._pid_alive(proc.pid) is False
     assert w._pid_alive(os.getpid()) is True
     assert w._pid_alive(None) is False
+
+
+def test_pid_alive_linux_nutzt_weiter_os_kill_mit_signal_null(monkeypatch):
+    """Der Linux-Zweig bleibt unverändert: os.kill(pid, 0) entscheidet (#118)."""
+    aufrufe: list[tuple[int, int]] = []
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(w.os, "kill", lambda pid, sig: aufrufe.append((pid, sig)))
+    assert w._pid_alive(4242) is True
+    assert aufrufe == [(4242, 0)]
+
+    def kein_prozess(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(w.os, "kill", kein_prozess)
+    assert w._pid_alive(4242) is False
 
 
 def test_claim_job_schreibt_die_eigene_pid_und_gibt_frei(monkeypatch, tmp_path):
@@ -1774,6 +1886,7 @@ def test_main_belegt_vor_dem_lauf_und_gibt_frei(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "pick_job", lambda state: ("issue59", "Auftrag", None, None))
     monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
     monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "prepare_workdir", lambda: None)
     gesehen = {}
 
@@ -1816,3 +1929,62 @@ def test_claim_job_meldet_nicht_nutzbares_verzeichnis_einmal(monkeypatch, tmp_pa
     assert out.count("⚠ Stephan:") == 1 and "nicht nutzbar" in out
     assert w.claim_job("issue59") is True
     assert capsys.readouterr().out == ""
+
+
+# --- Tests zu Issue #38: Issue erst nach den Abbruch-Gates übernehmen ---
+
+def test_job_issue_number():
+    assert w.job_issue_number("issue7") == 7
+    assert w.job_issue_number("issue102") == 102
+    assert w.job_issue_number("issue0") == 0
+    assert w.job_issue_number("pr7@x") is None
+    assert w.job_issue_number("pr103@2026-09-29T21:39:23Z") is None
+    assert w.job_issue_number("text41@abcdef1") is None
+    assert w.job_issue_number("issue") is None
+    assert w.job_issue_number("prefix/issue7") is None
+
+
+def test_issue_job_ruft_gh_issue_edit_nie_auf(monkeypatch):
+    fake = FakeGH(issues=[_issue(number=77)])
+    monkeypatch.setattr(w, "gh", fake)
+    key, task, pr_no, before = w.issue_job()
+    assert key == "issue77"
+    assert not any(c[:2] == ("issue", "edit") for c in fake.calls)
+
+
+def test_gescheitertes_claim_issue_startet_keinen_agenten(monkeypatch, tmp_path):
+    state = tmp_path / "state.json"
+    monkeypatch.setattr(w, "STATE", str(state))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda s: ("issue77", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: False)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: pytest.fail("prepare_workdir aufgerufen trotz fehlgeschlagenem Claim"))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: pytest.fail("Agent gestartet trotz fehlgeschlagenem Claim"))
+    assert w.main() == 0
+    assert not state.exists() or "issue77" not in json.loads(state.read_text(encoding="utf-8"))
+
+
+def test_modellwechsel_uebernimmt_genau_ein_issue(monkeypatch, tmp_path):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "LITELLM_MODEL", "coder")
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "LITELLM_FALLBACKS", ["coder-free"])
+    monkeypatch.setattr(w, "probe_model", lambda m: "TimeoutError" if m == "coder" else None)
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+
+    claims = []
+    monkeypatch.setattr(w, "claim_issue", lambda n: claims.append(n) or True)
+
+    runs = []
+    monkeypatch.setattr(w, "run_agent", lambda prompt: runs.append(prompt) or 0)
+
+    issues = [_issue(number=101), _issue(number=102)]
+    monkeypatch.setattr(w, "gh", FakeGH(issues=issues, prs=[]))
+
+    assert w.main() == 0
+    assert claims == [101]
+    assert len(runs) == 1 and "Du setzt Issue #101 um" in runs[0]

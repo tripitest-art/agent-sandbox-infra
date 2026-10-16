@@ -18,7 +18,9 @@
       "hotspot": "sandbox/worker_tick.py",
       "hotspot_label": "berührt-worker_tick.py",
       "review_skill": "skills/agent-sandbox-review/SKILL.md",
-      "auto_merge": false
+      "auto_merge": true,
+      "manual_paths": ["AGENTS.md", ".github/*", "tests/acceptance/*", "skills/*",
+                       "docs/main-schutz.ruleset.json"]
     }
   ]
 }

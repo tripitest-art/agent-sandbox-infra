@@ -7,10 +7,21 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 
 ## Unreleased
 
+### Geändert
+- AGENTS.md Regel 4: Merge-Modus „manuell“ bleibt Standard, „automatisch“ nur für PRs ohne Dateien aus `manual_paths` (braucht `freigabe-geschützt`, wirkt mit #122 und Serverkonfiguration) (#123).
+- `review_tick`: Kurz vor dem Merge prüft der Takt die frische Dateiliste des freigegebenen PRs gegen die Dateimuster `manual_paths` des Projekts (z. B. `sandbox/*`, `AGENTS.md`); ein Treffer oder eine nicht lesbare Liste geht mit Label `braucht-stephan` an Stephan, ohne Muster bleibt es wie bisher (#126).
+
+### Geändert
+- review_tick: Token-Limit der Reviewer-Antwort 16000 statt 6000, einstellbar mit `REVIEW_MAX_TOKENS` (GLM zählt Denk-Tokens mit) (#135).
+- Merge-Modus: „automatisch“ ist der Standard für Worker-Issues, manuell nur für Aufsichtsdateien (`manual_paths`); braucht `freigabe-geschützt`, wirkt nach Serverkonfiguration (#133).
+
 ### Hinzugefügt
+- `wake_listener`: Dienst `agent-wake` startet Takt-Units sofort bei ntfy-Nachrichten (`WAKE_URL`), periodische Timer bleiben als Sicherheitsnetz (#132).
 - Dashboard: Abschnitt „Reviews und Merges“ (Freigabequote, Merges, Übergaben an Stephan, 24 h und 7 Tage, je Projekt und je Reviewer-Modell) aus `worker.log` (`dashboard_stats.py`) (#115).
 - Dashboard: Push-Meldungen über ntfy (`dashboard_notify.py`) bei `⚠ Stephan`-Zeilen, totem Slot, Budget ab 90 %, veralteten Daten; `NTFY_URL` in `/etc/agent-dashboard.env`, Test mit `--notify-test` (#114).
 - Dashboard: LiteLLM-Budget-Limits (`max_budget`) lassen sich im Browser ändern, geschützt durch einen Schreib-Token und den Master-Key aus `/etc/agent-dashboard.env` (Dienst `agent-dashboard`, `install.sh` fragt beides ab) (#111).
+- Auto-Deploy: `sandbox/autodeploy.py` und Timer `agent-sandbox-deploy` holen alle 15 Minuten `origin/main`, testen mit pytest, rollen per `install.sh` aus und setzen bei Fehlern zurück; Einschalten mit `AUTODEPLOY=1 bash sandbox/install.sh` (Betrieb: `docs/autodeploy.md`) (#15).
+- `install.sh`: `SKIP_TESTS=1` überspringt den Testlauf von sc-digger am Ende (nur Anzeige, rund 5 Minuten) (#125).
 - `LICENSE` (MIT, Copyright (c) 2026 Stephan Voigt) und `SECURITY.md` mit dem vertraulichen Meldeweg für Sicherheitslücken (GitHub „Private vulnerability reporting“); dazu der README-Abschnitt „Lizenz und Sicherheit“ (#110).
 - Web-Dashboard `sandbox/dashboard.py` (nur lesend, SSE) als Ersatz fürs HA-Dashboard (#104).
 - `install.sh`: Worker-Takt (`TAKT`) und Review-Takt (`REVIEW_TAKT`) laufen standardmäßig alle 2 Minuten statt alle 5 und 10 (#109).
@@ -20,8 +31,12 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - Dependabot für die GitHub Actions (wöchentlich, höchstens 2 offene PRs) (#93).
 - Doku: Backup und Wiederherstellung der Sandbox (`docs/backup.md`) (#95).
 - install.sh: Ressourcenlimits je Worker-Slot (`SLOT_MEMORY_MAX`, `SLOT_TASKS_MAX`, `SLOT_CPU_PERCENT` → `MemoryMax`, `TasksMax`, `CPUQuota`), gemerkt in `/etc/agent-sandbox.conf`; ohne Angabe kein Limit, Vorschlag aus Messung im README (#103, nach #100 und dem Revert #101).
+- GitHub-Action `.github/workflows/wake.yml`: Weckruf („wake“) an einen ntfy-Strom bei Label `bereit`, PR-Ereignissen und fertigen Checks, damit der Dienst `agent-wake` die Takte sofort startet (Teil 2 von #128, braucht das Secret `WAKE_PUBLISH_URL`) (#129).
 
 ### Geändert
+- `review_tick`: die Logzeile eines geposteten Reviews nennt den Reviewer („…, als Kommentar-Review gepostet, Reviewer coder-glm (Pfad).“, bei roten Checks ohne Modellaufruf „ohne-Modell“), damit das Dashboard Urteile je Modell zählen kann (#119).
+- `review_tick`: Ein PR wird auch dann geprüft, wenn sein Branch nicht `feature/issue-<N>` heißt – dafür setzt jemand mit Schreibrecht das Label `review-anfordern` (z. B. an `feature/dashboard-*` von Claude/Antigravity); ohne Worker-Issue prüft der Takt gegen PR-Text und Regeln und merged nie, der PR liegt nach dem Review bei Stephan (#121).
+- `review_tick`: Scheitert das Setzen des Commit-Status `review`, nennt die Warnzeile zusätzlich den HTTP-Statuscode aus dem gh-Fehler (z. B. 403 oder 404), damit ein Rechteproblem von einem Netzfehler unterscheidbar ist; der Fehlertext von gh bleibt weiterhin tabu (#117).
 - Review-Takt: Pflicht-Checks kommen aus der Projektliste (`required_checks`), Vorgabe `tests` und `acceptance-guard`; sc-digger nennt CodeQL dort selbst (#78).
 - `worker_tick`: Geheimnisse gehen nicht mehr an den Agentenprozess und nicht ins Log, der Agent bekommt nur eine Allowlist der Umgebung (#71).
 - `worker_tick`: die PR-Vorlage kommt aus `origin/main` statt aus dem Arbeitsbaum (#74).
@@ -40,6 +55,8 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
   bleibt die Zeile wie bisher (#99).
 
 ### Behoben
+- `worker_tick`/`qwen_webhook`: Die Lebendprüfung eines Prozesses nutzt unter Windows die Win32-API (`OpenProcess`/`GetExitCodeProcess`/`CloseHandle`) statt `os.kill(pid, 0)`, das dort `CTRL_C_EVENT` an die ganze Konsole schickt und die pytest-Sitzung auf einem Windows-Rechner abbricht; unter Linux bleibt der Code unverändert (#120).
+- `worker_tick`: Ist das Tagesbudget des Worker-Keys aufgebraucht (`spend >= max_budget` aus `/key/info`), wartet der Takt bis zum Reset und verbraucht dabei keinen Versuch; gemeldet wird das einmal je Reset-Zeitraum, ohne Budgetwerte und ohne Entparken (`key_info`, `budget_problem`) (#113).
 - `worker_tick`: Scheitert ein Agentenlauf schon am Anbieter (LiteLLM 429/401/5xx), verbraucht er keinen Versuch mehr; der Grund steht gekürzt und ohne Schlüsselteile im Log, und es gibt genau einen „⚠ Stephan“-Alarm je Schlüssel und Fehlertext (`short_api_error`, `LAST_AGENT_ERROR`) (#106).
 - `worker_tick`: Regel 8 zählt Dateien aus einem Ausschlusssatz der Sektion „Betroffene Dateien“ („… bleibt unberührt“, „Keine andere Datei …“) nicht mehr als belegt; fremde Issues, die solche Dateien wirklich ändern, werden nicht mehr als Kollision übersprungen (#108).
 - `worker_tick`: der Agentenprozess bekommt `LITELLM_API_KEY` wieder; #71 hatte ihn mit entfernt, und jeder Agentenlauf endete nach 0 Sekunden mit `error_during_execution`. Alle anderen Geheimnisse bleiben draußen, das Log bleibt redigiert (#91).

@@ -29,8 +29,9 @@ def test_under_antigravity_limit():
     assert len(TEXT) < 12_000
 
 
-def test_no_agent_merges_here():
-    assert "Hier mergt und deployt kein Agent" in TEXT
+def test_no_agent_deploys_here():
+    assert "Hier deployt kein Agent, Aufsichtsdateien merged nur Stephan" in TEXT
+    assert "manual_paths" in TEXT
 
 
 def test_vertragsdokumente_liegen_im_repo():

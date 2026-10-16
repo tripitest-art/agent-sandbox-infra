@@ -29,7 +29,9 @@ eine **Projektliste**. Das zweite Projekt ist diese Infrastruktur selbst
    "hotspot_label": "berührt-main.py", "review_skill": "skills/sc-digger-review/SKILL.md",
    "auto_merge": true, "required_checks": ["tests", "acceptance-guard", "CodeQL"]},
   {"name": "agent-sandbox-infra", "repo": "tripitest-art/agent-sandbox-infra",
-   "workdir": "/root/work/agent-sandbox-infra", "auto_merge": false}
+   "workdir": "/root/work/agent-sandbox-infra", "auto_merge": false,
+   "manual_paths": ["sandbox/*", ".github/*", "AGENTS.md", "tests/acceptance/*",
+                    "docs/main-schutz.ruleset.json", "skills/*"]}
 ]}
 ```
 
@@ -43,12 +45,14 @@ eine **Projektliste**. Das zweite Projekt ist diese Infrastruktur selbst
 | `hotspot_label` | nein | Issue-Label für den Hotspot; Vorgabe `berührt-main.py` |
 | `review_skill` | nein | Pfad des Review-Skills im Repo; ohne ihn prüft der Reviewer nur nach `AGENTS.md` |
 | `auto_merge` | nein | `false`: Der Review-Takt mergt hier nie; Vorgabe `true` |
+| `manual_paths` | nein | Dateimuster (`fnmatch`, z. B. `sandbox/*`); ein Treffer lässt den Takt nicht selbst mergen, der PR geht an Stephan. Vorgabe: leer (kein solches Muster) |
 | `required_checks` | nein | Checks, die den PR rot machen, wenn sie nicht `SUCCESS` sind; Vorgabe `["tests", "acceptance-guard"]`, sc-digger nennt zusätzlich `CodeQL` |
 
 Die Liste wird streng geprüft: unbekannte Schlüssel, doppelte Namen, Repos oder Ordner, ungültige
 Namen und Pfade sowie eine leere oder nicht aus Strings bestehende `required_checks`-Liste führen zu
-`ProjectConfigError`. Die Takte brechen dann mit Fehlermeldung ab, damit kein Projekt still wegfällt;
-`install.sh` bricht ebenso ab.
+`ProjectConfigError`. Ebenso wird eine `manual_paths`-Angabe abgewiesen, die keine Liste nicht-leerer
+Strings ist: Sonst ließe sich der manuelle Merge still abschalten. Die Takte brechen dann mit
+Fehlermeldung ab, damit kein Projekt still wegfällt; `install.sh` bricht ebenso ab.
 
 ## Wie die Takte mehrere Projekte behandeln
 
@@ -65,6 +69,10 @@ Namen und Pfade sowie eine leere oder nicht aus Strings bestehende `required_che
   jeweiligen Repo.
 - **`auto_merge: false`:** Auch bei „Merge-Modus automatisch“ im Issue mergt der Takt nicht. Der PR
   geht mit Label `braucht-stephan` und Kommentar an Stephan.
+- **`manual_paths`:** Berührt ein freigegebener PR eine Datei, auf die ein Muster passt, mergt der
+  Takt nicht selbst; der PR geht mit Label `braucht-stephan` und Kommentar an Stephan. Geprüft wird
+  kurz vor dem Merge mit frischer Dateiliste; ist sie nicht lesbar, gilt der PR als betroffen.
+  Nur bei „Merge-Modus automatisch“ im Issue kommt es überhaupt so weit.
 - **Test-Befehl und Hotspot** stehen im Auftrag an den Worker bzw. steuern die Konfliktprüfung des
   jeweiligen Projekts.
 
@@ -104,13 +112,17 @@ Voraussetzung ist der Vertrag aus sc-digger:
    ruleset → Import a ruleset). Der Import setzt `tests` und `acceptance-guard` als Pflicht-Checks voraus,
    die Workflows müssen also schon auf `main` liegen.
 4. **Server:** Eintrag in `/etc/agent-projects.json`, dann `bash sandbox/install.sh`.
-5. **Entscheidung `auto_merge`:** `false` für alles, was Betrieb, Server oder die Aufsicht selbst betrifft.
+5. **Entscheidung `auto_merge`:** `false` für alles, was Betrieb, Server oder die Aufsicht selbst betrifft;
+   bei gemischten Repositories `true` mit `manual_paths` für die Betriebs- und Aufsichtsdateien.
 
 ## Die Infrastruktur als Projekt: Sonderregeln
 
 Die Skripte steuern die Agenten, die sie ändern. Deshalb gilt (siehe `AGENTS.md`, Regeln 4 und 6):
 
-- `auto_merge: false`: Stephan prüft und mergt jeden PR.
+- `auto_merge: true` mit `manual_paths` für die Aufsichtsdateien (`AGENTS.md`, `.github/*`,
+  `tests/acceptance/*`, `skills/*`, `docs/main-schutz.ruleset.json`): Der Takt mergt nach „Freigegeben“
+  alle PRs ohne Treffer bei „Merge-Modus: automatisch“; Treffer gehen an Stephan. Mit `auto_merge: false`
+  prüft und mergt Stephan jeden PR.
 - Kein Agent deployt oder führt `install.sh`, `systemctl` oder Befehle auf dem Server aus. Ein Merge
   wirkt erst, wenn Stephan `git pull && bash sandbox/install.sh` ausführt.
 - Änderungen, die Review, Modellfamilien-Regel, `auto_merge`, Merge-Bedingungen oder `acceptance-guard`

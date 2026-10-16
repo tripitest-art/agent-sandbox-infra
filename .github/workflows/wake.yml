@@ -1,0 +1,53 @@
+name: wake
+
+# Weckruf an den Server: Bei GitHub-Ereignissen, auf die Worker- und Review-Takt warten, geht eine
+# Nachricht an einen ntfy-Strom. Der Dienst agent-wake (sandbox/wake_listener.py) hört dort ausgehend
+# mit und startet daraufhin die Takt-Units sofort. Die Timer laufen unverändert weiter: Geht ein
+# Weckruf verloren, holt der nächste Takt die Arbeit nach.
+#
+# Sicherheit: Die Nachricht ist immer das Wort "wake". Aus dem Ereignis (Titel, Texte, Nummern,
+# Autor) landet nichts darin, und der Listener liest den Inhalt ohnehin nie (Regel 9). Es gibt kein
+# pull_request_target und keinen Checkout, also läuft hier kein Code aus einem PR. Das Geheimnis ist
+# das ntfy-Thema in WAKE_PUBLISH_URL (GitHub-Secret), nie im Repo oder Log. Bei PRs aus Forks fehlt
+# das Secret; der Schritt meldet das nur und lässt den Lauf grün.
+on:
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, closed]
+  workflow_run:
+    workflows: [tests, acceptance-guard]
+    types: [completed]
+
+permissions: {}
+
+# Ein laufender und höchstens ein wartender Weckruf; weitere Ereignisse verschmelzen damit.
+concurrency:
+  group: wake
+  cancel-in-progress: false
+
+jobs:
+  wake:
+    # Nur Ereignisse, auf die ein Takt wartet: Issue wird `bereit`, PR kommt oder ändert sich,
+    # Label `review-anfordern`, PR geschlossen (Merge gibt blockierte Issues frei), Checks fertig.
+    if: >-
+      github.event_name != 'issues' && github.event_name != 'pull_request' ||
+      github.event_name == 'issues' && github.event.label.name == 'bereit' ||
+      github.event_name == 'pull_request' && (github.event.action != 'labeled' ||
+      github.event.label.name == 'review-anfordern')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Weckruf senden
+        env:
+          WAKE_PUBLISH_URL: ${{ secrets.WAKE_PUBLISH_URL }}
+        run: |
+          if [ -z "$WAKE_PUBLISH_URL" ]; then
+            echo "::notice::WAKE_PUBLISH_URL fehlt (Fork-PR oder Secret nicht gesetzt), kein Weckruf"
+            exit 0
+          fi
+          # Ein verlorener Weckruf darf keinen Check rot färben; der Takt fängt ihn auf.
+          # Kein -v/-x: die URL enthält das Thema.
+          if ! curl --fail --silent --show-error --max-time 10 --data "wake" "$WAKE_PUBLISH_URL" >/dev/null; then
+            echo "::warning::Weckruf fehlgeschlagen, der nächste Takt holt es nach"
+          fi

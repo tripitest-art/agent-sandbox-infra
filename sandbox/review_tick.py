@@ -3,10 +3,12 @@
 Eingerichtet von sandbox/install.sh; Anleitung: README.md.
 
 Pro Takt höchstens ein PR. Er sucht einen offenen PR von `feature/issue-<N>` (Issue mit Label
-agent-qwen, kein Fork-PR), dessen Checks fertig sind und der für den aktuellen Commit noch
-kein Review des Besitzers hat. Dazu holt das Skript selbst Issue, Dateiliste, Diff und Checks
-und schickt sie als reinen Text an ein Modell über LiteLLM. Das Modell hat KEINE Werkzeuge: Issue-,
-PR- und Diff-Texte sind fremder Input, ein Modell mit GitHub-Zugriff ließe sich damit steuern.
+agent-qwen, kein Fork-PR) oder einen offenen PR mit dem von Hand gesetzten Label
+`review-anfordern` (dann unabhängig vom Branch-Namen, etwa `feature/dashboard-*`), dessen Checks
+fertig sind und der für den aktuellen Commit noch kein Review des Besitzers hat. Dazu holt das
+Skript selbst Issue, Dateiliste, Diff und Checks und schickt sie als reinen Text an ein Modell über
+LiteLLM. Das Modell hat KEINE Werkzeuge: Issue-, PR- und Diff-Texte sind fremder Input, ein Modell
+mit GitHub-Zugriff ließe sich damit steuern.
 Nur dieses Skript schreibt etwas (festes Format, ein Kommentar-Review, nie Approve oder Merge).
 
 Prüfbar vom Skript, nicht vom Modell: Teststatus (nur aus den Check-Runs), Modellzeile
@@ -25,7 +27,9 @@ Liegt für den aktuellen Commit schon ein postbarer Entwurf (aus einem Lauf mit 
 postet REVIEW_POST=1 ihn ohne neuen Modellaufruf.
 
 Mit REVIEW_POST=1 zusätzlich: Freigegebene PRs mit Merge-Modus „automatisch“ werden gemergt; scheitert
-der Merge (z. B. noch nicht mergebar), versucht der nächste Takt es erneut (MERGE_RETRIES).
+der Merge (z. B. noch nicht mergebar), versucht der nächste Takt es erneut (MERGE_RETRIES). Ein PR mit
+Label `review-anfordern`, zu dem es kein Worker-Issue gibt, wird nie gemergt (kein Vertrag): er liegt
+nach dem Review bei Stephan.
 Nach dem geposteten Review setzt der Takt auf den geprüften Commit den Status `review`
 (success bei „Freigegeben“, failure bei „Änderungen nötig“), damit Stephan ihn in `main-schutz`
 als Pflicht-Check eintragen kann; ohne Review bleibt der Status aus.
@@ -37,6 +41,7 @@ Regeln und Vorlage liest das Skript zur Laufzeit aus sc-digger/main (AGENTS.md A
 und Goldene Regeln, skills/sc-digger-review/SKILL.md Schritte 5 und 6): Änderungen dort wirken sofort.
 Den Key (LITELLM_REVIEW_KEY) liest systemd aus /etc/qwen-reviewer.env, nie aus dem Repo.
 """
+import fnmatch
 import json
 import os
 import re
@@ -56,10 +61,16 @@ PROJECTS = projects.load_projects()   # ohne /etc/agent-projects.json: sc-digger
 REPO = PROJECTS[0].repo
 REVIEW_SKILL = PROJECTS[0].review_skill
 PROJECT_AUTO_MERGE = PROJECTS[0].auto_merge
+# Dateimuster, bei deren Treffer der Takt nie selbst mergt (wie PROJECT_AUTO_MERGE je Projekt).
+PROJECT_MANUAL_PATHS = PROJECTS[0].manual_paths
 OWNER = "tripitest-art"
 # Worker-Issues mit einem dieser Labels prüft der Takt; die Familienregel verhindert Selbstprüfung.
 LABELS = tuple(l.strip() for l in os.environ.get("REVIEW_LABELS", "agent-qwen,agent-antigravity,agent-claude").split(",") if l.strip())
 STEPHAN_LABEL = "braucht-stephan"   # PR braucht eine Entscheidung von Stephan
+# Von Hand gesetztes Label: dieser PR soll geprüft werden, auch wenn sein Branch nicht
+# `feature/issue-<N>` heißt (z. B. `feature/dashboard-*` von Claude/Antigravity). Setzen dürfen es
+# nur Personen mit Schreibrecht am Repository; der Takt setzt oder entfernt es nie.
+REVIEW_REQUEST_LABEL = "review-anfordern"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 REVIEW_KEY = os.environ.get("LITELLM_REVIEW_KEY", "")
 REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "coder-glm")
@@ -79,7 +90,19 @@ MAX_ROUNDS = 2              # Reviews „Änderungen nötig“ je PR, danach lie
 MERGE_RETRIES = 6          # so viele Takte lang wird ein gescheiterter Merge wiederholt
 BIG_DIFF_CHARS = 90_000     # darüber: REVIEW_MODEL_BIG
 MAX_DIFF_CHARS = 400_000    # darüber: nicht prüfen, an Stephan melden
-MAX_TOKENS = 6000           # Obergrenze der Modellantwort; erreicht sie das, gilt sie als unbrauchbar
+def _max_tokens() -> int:
+    """REVIEW_MAX_TOKENS (Vorgabe 16000). Unbrauchbare Werte (kein Integer, unter 1000) fallen auf die Vorgabe zurück."""
+    try:
+        value = int(os.environ.get("REVIEW_MAX_TOKENS", "16000"))
+    except ValueError:
+        return 16000
+    return value if value >= 1000 else 16000
+
+
+# Obergrenze der Modellantwort; erreicht sie das, gilt sie als unbrauchbar. Bei GLM zählen die Denk-Tokens
+# (reasoning_tokens) mit: Eine Anfrage „Antworte nur mit: ok“ braucht schon über 100, ein Review mit großem
+# Diff am 16.10. mehr als 6000 (PR #119 und #132 scheiterten je zweimal am Limit).
+MAX_TOKENS = _max_tokens()
 LLM_TIMEOUT = float(os.environ.get("REVIEW_LLM_TIMEOUT", "420"))
 # Pflicht-Checks dieses Repos (tests, acceptance-guard); sc-diggers Vertrag nennt zusätzlich CodeQL
 # und steht in dessen Projektlisteneintrag. use_project() übernimmt die Liste des aktiven Projekts.
@@ -131,10 +154,11 @@ def safe_snippet(text: str | None, limit: int = 60) -> str:
 
 
 def use_project(p: "projects.Project", first: bool) -> None:
-    """Schaltet auf Projekt `p` um: Repo, Review-Skill, Merge-Erlaubnis, Pflicht-Checks,
-    Zustandsdatei, Entwurfsordner."""
-    global REPO, REVIEW_SKILL, PROJECT_AUTO_MERGE, REQUIRED_CHECKS, STATE, DRAFT_DIR
+    """Schaltet auf Projekt `p` um: Repo, Review-Skill, Merge-Erlaubnis, Dateimuster,
+    Pflicht-Checks, Zustandsdatei, Entwurfsordner."""
+    global REPO, REVIEW_SKILL, PROJECT_AUTO_MERGE, PROJECT_MANUAL_PATHS, REQUIRED_CHECKS, STATE, DRAFT_DIR
     REPO, REVIEW_SKILL, PROJECT_AUTO_MERGE = p.repo, p.review_skill, p.auto_merge
+    PROJECT_MANUAL_PATHS = tuple(p.manual_paths)
     REQUIRED_CHECKS = tuple(p.required_checks)
     if first:
         STATE, DRAFT_DIR = BASE_STATE, BASE_DRAFT_DIR
@@ -156,6 +180,16 @@ def gh_json(*args: str):
 def repo_file(path: str) -> str:
     """Datei aus main des aktiven Projekts (roh)."""
     return gh_text("api", f"repos/{REPO}/contents/{path}?ref=main", "-H", "Accept: application/vnd.github.raw", repo=False)
+
+
+def pr_files(number: int) -> list[dict] | None:
+    """Dateiliste eines PRs (`gh pr view <n> --json files`), None wenn die Abfrage scheitert.
+    Jeder Aufruf liest frisch. None bedeutet „unbekannt“ und sperrt den automatischen Merge."""
+    try:
+        data = gh_json("pr", "view", str(number), "--json", "files")
+        return list(data["files"])
+    except (subprocess.CalledProcessError, KeyError, TypeError):
+        return None
 
 
 def load_state() -> dict:
@@ -301,13 +335,16 @@ def pending_draft(pr: dict) -> str | None:
 
 
 def pick_pr(prs: list[dict], state: dict, labels_of) -> dict | None:
-    """Ältester offener Worker-PR ohne Review für den aktuellen Commit. `labels_of(issue_no)` -> Labelnamen.
+    """Ältester offener PR ohne Review für den aktuellen Commit. `labels_of(issue_no)` -> Labelnamen.
     Mit REVIEW_POST=1 zählen auch schon geprüfte PRs, deren Entwurf noch nicht gepostet ist.
+    Ein PR zählt auch dann, wenn er das Label REVIEW_REQUEST_LABEL trägt, egal wie der Branch heißt
+    (dann ist `issue_no` None); für einen solchen PR wird `labels_of` nicht aufgerufen.
     Draft-PRs werden übersprungen: Laut AGENTS.md (Worker 6) ist das genau der PR, bei dem der
     Worker aufgegeben hat; GitHub lehnt den Merge ab, ein Review wäre also vergebens."""
     for pr in sorted(prs, key=lambda p: p["number"]):
         m = re.match(r"feature/issue-(\d+)", pr["headRefName"])
-        if not m or pr.get("isCrossRepository") or not pr.get("commits"):
+        requested = REVIEW_REQUEST_LABEL in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]
+        if not (m or requested) or pr.get("isCrossRepository") or not pr.get("commits"):
             continue   # Fork-PRs nie: Branch-Name und Inhalt bestimmt dort ein Fremder
         if pr.get("isDraft"):
             continue   # fehlt das Feld, gilt der PR als nicht-Draft
@@ -318,9 +355,9 @@ def pick_pr(prs: list[dict], state: dict, labels_of) -> dict | None:
         mine = [r for r in pr.get("reviews", []) if (r.get("author") or {}).get("login") == OWNER]
         if mine and review_is_current(max(mine, key=lambda r: r["submittedAt"]), pr):
             continue
-        if not set(LABELS) & set(labels_of(int(m.group(1)))):
+        if not requested and not set(LABELS) & set(labels_of(int(m.group(1)))):
             continue
-        pr = dict(pr, issue_no=int(m.group(1)))
+        pr = dict(pr, issue_no=int(m.group(1)) if m else None)
         return pr
     return None
 
@@ -357,12 +394,23 @@ def assemble(model_text: str, worker: str, checks: list[tuple[str, str]], review
     return "\n".join(head + rest).strip() + "\n"
 
 
+_REVIEWER_RE = re.compile(r", Reviewer: (\S+) \(andere Modellfamilie\)")
+NO_MODEL = "ohne-Modell"   # Label in der Logzeile, wenn rote Checks ohne Modellaufruf zum Review führten
+
+
+def reviewer_in_text(text: str) -> str:
+    """Reviewer-Alias aus der Zeile „…, Reviewer: <Alias> (andere Modellfamilie).“ eines Reviews,
+    sonst „unbekannt“. So kennt auch ein später gepostetes Entwurf-Review sein Modell."""
+    m = _REVIEWER_RE.search(text)
+    return m.group(1) if m else "unbekannt"
+
+
 def red_check_review(red: list[str], worker: str, checks: list[tuple[str, str]], reviewer: str) -> str:
     items = "\n".join(f"{i}. Check `{n}` ist nicht grün. Ursache im Log des Checks lesen und beheben." for i, n in enumerate(red, 1))
     return assemble(f"{VERDICTS[1]}\n\n### Muss\n{items}\n\n### Kann\n- keine\n", worker, checks, reviewer)
 
 
-def build_messages(issue: dict, pr: dict, files: list[dict], diff: str, checks: list[tuple[str, str]], rules: str) -> list[dict]:
+def build_messages(issue: dict | None, pr: dict, files: list[dict], diff: str, checks: list[tuple[str, str]], rules: str) -> list[dict]:
     flist = "\n".join(f"- {f['path']} (+{f['additions']}/−{f['deletions']})" for f in files)
     clist = ", ".join(f"{n}: {r}" for n, r in checks)
     system = (
@@ -375,9 +423,15 @@ def build_messages(issue: dict, pr: dict, files: list[dict], diff: str, checks: 
         "Goldener Regel und Datei plus Zeile oder Zitat aus dem Diff; sonst „Kann“. Schreibe keine Modellzeile und "
         "keine Check-Zeile, die setzt das Skript. Du kannst nur den Diff sehen, nicht den übrigen Code: Aussagen "
         "über Code außerhalb des Diffs sind höchstens „Kann“.\n\n----- REGELN (AGENTS.md, Skill) -----\n" + rules)
-    user = (f"Prüfe PR #{pr['number']} zu Issue #{issue['number']}.\n\n----- ISSUE -----\n# {issue['title']}\n{issue['body']}\n"
-            f"----- ENDE ISSUE -----\n\n----- PR-TEXT -----\n{pr['title']}\n{pr.get('body') or ''}\n----- ENDE PR-TEXT -----\n\n"
+    rest = (f"\n\n----- PR-TEXT -----\n{pr['title']}\n{pr.get('body') or ''}\n----- ENDE PR-TEXT -----\n\n"
             f"Check-Runs: {clist}\n\nGeänderte Dateien:\n{flist}\n\n----- DIFF -----\n{diff}\n----- ENDE DIFF -----")
+    if issue is None:
+        # PR ohne Worker-Issue (Label `review-anfordern`): kein Vertrag, also gegen PR-Text und Regeln prüfen.
+        user = (f"Prüfe PR #{pr['number']} (ohne Worker-Issue: es gibt keinen Vertrag; prüfe gegen den PR-Text "
+                "und die Regeln)." + rest)
+    else:
+        user = (f"Prüfe PR #{pr['number']} zu Issue #{issue['number']}.\n\n----- ISSUE -----\n# {issue['title']}\n"
+                f"{issue['body']}\n----- ENDE ISSUE -----" + rest)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
@@ -445,11 +499,33 @@ def review_status(verdict: str) -> tuple[str, str] | None:
     return None
 
 
+_HTTP_STATUS_RE = re.compile(r"\(HTTP (\d{3})\)")
+
+
+def gh_http_status(exc: BaseException) -> int | None:
+    """HTTP-Statuscode aus dem stderr einer fehlgeschlagenen gh-Abfrage.
+
+    Nur bei subprocess.CalledProcessError mit str-stderr, das „(HTTP <ddd>)“ enthält
+    (dreistellig, 100–599): der Code als int. In jedem anderen Fall None.
+    Gibt nie Text aus stderr zurück, nur die Zahl (Regel 5). Reine Funktion, kein Netz."""
+    if not isinstance(exc, subprocess.CalledProcessError):
+        return None
+    stderr = exc.stderr
+    if not isinstance(stderr, str):
+        return None
+    m = _HTTP_STATUS_RE.search(stderr)
+    if m is None:
+        return None
+    code = int(m.group(1))
+    return code if 100 <= code <= 599 else None
+
+
 def post_review_status(sha: str, verdict: str) -> bool:
     """Setzt den Commit-Status 'review' für `sha`: `gh api repos/<REPO>/statuses/<sha>` mit
     -f state=…, -f context=review, -f description=…. True, wenn gesetzt; ohne Status-Urteil
     (review_status -> None) False ohne Aufruf. Ein Fehler bricht den Takt nie ab: Log-Zeile
-    '⚠ Stephan: Status review für <sha[:7]> nicht gesetzt (<ExceptionName>)', Rückgabe False.
+    '⚠ Stephan: Status review für <sha[:7]> nicht gesetzt (<ExceptionName>)', kennt der Fehler
+    einen HTTP-Statuscode aus dem gh-stderr, zusätzlich ', HTTP <Code>'; Rückgabe False.
     Die Meldung enthält nie den Fehlertext von gh (Regel 5: keine Zugangsdaten in Logs)."""
     res = review_status(verdict)
     if res is None:
@@ -460,7 +536,9 @@ def post_review_status(sha: str, verdict: str) -> bool:
                 "-f", "context=review", "-f", f"description={description}", repo=False)
         return True
     except Exception as exc:   # ein Status darf den Takt nie abbrechen
-        log(f"⚠ Stephan: Status review für {sha[:7]} nicht gesetzt ({type(exc).__name__})")
+        code = gh_http_status(exc)
+        zusatz = f", HTTP {code}" if code is not None else ""
+        log(f"⚠ Stephan: Status review für {sha[:7]} nicht gesetzt ({type(exc).__name__}{zusatz})")
         return False
 
 
@@ -483,6 +561,17 @@ def is_auto_merge(issue_body: str | None) -> bool:
         if "automatisch" in val:
             return True
     return False
+
+
+def manual_path_hits(files: list[str], patterns: tuple[str, ...]) -> list[str]:
+    """Dateien aus `files`, auf die mindestens ein Muster passt (fnmatch.fnmatchcase auf den
+    ganzen Pfad, „*“ passt auch über „/“ hinweg). Reihenfolge wie in `files`, jede Datei einmal.
+    Ohne Muster: []. Reine Funktion."""
+    hits: list[str] = []
+    for path in files:
+        if path not in hits and any(fnmatch.fnmatchcase(path, p) for p in patterns):
+            hits.append(path)
+    return hits
 
 
 def merge_pr(number: int, sha: str) -> bool:
@@ -662,7 +751,7 @@ def unblock_dependent_issues() -> list[int]:
 def _run_pr_review() -> int:
     state = load_state()
     prs = gh_json("pr", "list", "--state", "open", "--json",
-                  "number,title,body,headRefName,headRefOid,isCrossRepository,isDraft,reviews,commits,statusCheckRollup")
+                  "number,title,body,headRefName,headRefOid,isCrossRepository,isDraft,labels,reviews,commits,statusCheckRollup")
     cache: dict[int, list[str]] = {}
 
     def labels_of(n: int) -> list[str]:
@@ -697,6 +786,7 @@ def _run_pr_review() -> int:
         return 0
 
     issue: dict | None = None
+    no_model = False   # True: rote Checks, das Review kam ohne Modellaufruf zustande
     draft = pending_draft(pr) if POST else None
     if draft:   # schon geprüft (REVIEW_POST=0), jetzt nur noch posten; die Runde ist bereits gezählt
         text, count_round = draft, False
@@ -711,14 +801,22 @@ def _run_pr_review() -> int:
             return 0
         if red:
             # Ohne Modellaufruf; REVIEWER_NAME steht hier nur in der Zeile, geprüft wird nichts.
+            no_model = True
             text = red_check_review(red, worker, checks, REVIEWER_NAME)
             meta = f"PR #{n} {pr['headRefOid'][:7]} Reviewer {REVIEWER_NAME} (ohne Modell: rote Checks)"
         else:
             try:
                 agents = repo_file("AGENTS.md")
                 skill = repo_file(REVIEW_SKILL) if REVIEW_SKILL else ""
-                issue = gh_json("issue", "view", str(pr["issue_no"]), "--json", "number,title,body")
-                files = gh_json("pr", "view", str(n), "--json", "files")["files"]
+                # Kein Worker-Issue (Label `review-anfordern`, Branch ohne issue-<N>): nicht abfragen.
+                issue = (gh_json("issue", "view", str(pr["issue_no"]), "--json", "number,title,body")
+                         if pr["issue_no"] is not None else None)
+                # Die Dateiliste ist nur Beiwerk des Entwurfs: Ist sie nicht lesbar, wird ohne sie
+                # geprüft. Der Merge liest sie später noch einmal und sperrt dann bei unbekannter Lage.
+                files = pr_files(n)
+                if files is None:
+                    log(f"PR #{n}: Dateiliste nicht lesbar; Review ohne Dateiliste.")
+                    files = []
                 diff = gh_text("pr", "diff", str(n))
             except subprocess.CalledProcessError as exc:
                 log(f"PR #{n}: GitHub-Abfrage scheitert ({safe_snippet(exc.stderr, 120)}), nächster Takt.")
@@ -774,7 +872,9 @@ def _run_pr_review() -> int:
         post_review_status(pr["headRefOid"], verdict)
         state.setdefault("gepostet", []).append(key)
         del state["gepostet"][:-500]
-        log(f"PR #{n}: {verdict.strip('*')}, {muss} Muss / {kann} Kann, als Kommentar-Review gepostet ({path}).")
+        reviewer = NO_MODEL if no_model else reviewer_in_text(text)   # die Dashboard-Statistik zählt danach
+        log(f"PR #{n}: {verdict.strip('*')}, {muss} Muss / {kann} Kann, als Kommentar-Review gepostet, "
+            f"Reviewer {reviewer} ({path}).")
     else:
         log(f"PR #{n}: Entwurf {verdict.strip('*')}, {muss} Muss / {kann} Kann ({path}); REVIEW_POST=0, nicht gepostet.")
     state.setdefault("erledigt", []).append(key)
@@ -785,16 +885,35 @@ def _run_pr_review() -> int:
         if not AUTO_MERGE:
             log(f"PR #{n}: Freigegeben, aber REVIEW_AUTO_MERGE=0; kein Merge.")
             return 0
+        if pr["issue_no"] is None:
+            # Ohne Worker-Issue gibt es keinen Vertrag und keinen automatischen Merge: immer Stephan.
+            log(f"PR #{n}: Freigegeben, aber kein Worker-Issue; liegt bei Stephan.")
+            to_stephan(n, key, "Freigegeben, kein Worker-Issue: bitte prüfen und mergen.", state)
+            return 0
         if not PROJECT_AUTO_MERGE:
             log(f"PR #{n}: Freigegeben, aber {REPO} ist auf manuellen Merge gestellt (auto_merge=false).")
             to_stephan(n, key, "Freigegeben; in diesem Projekt mergt immer Stephan: bitte prüfen und mergen.", state)
             return 0
         if issue is None:
+            # Beim Posten eines bestehenden Entwurfs wurde das Issue oben nicht geladen.
             try:
                 issue = gh_json("issue", "view", str(pr["issue_no"]), "--json", "number,title,body")
             except subprocess.CalledProcessError:
                 issue = None
         if issue and is_auto_merge(issue.get("body")):
+            if PROJECT_MANUAL_PATHS:
+                # Frische Abfrage: Zwischen Review und Merge kann der PR weitergeschoben worden sein.
+                paths = pr_files(n)
+                if paths is None:
+                    log(f"PR #{n}: Freigegeben, aber Dateiliste nicht lesbar; kein Merge.")
+                    to_stephan(n, key, "Freigegeben, Dateiliste nicht lesbar: bitte prüfen und mergen.", state)
+                    return 0
+                hits = manual_path_hits([f["path"] for f in paths], PROJECT_MANUAL_PATHS)
+                if hits:
+                    log(f"PR #{n}: Freigegeben, aber {REPO} mergt {', '.join(hits[:3])} nur von Hand.")
+                    to_stephan(n, key, f"Freigegeben, berührt Dateien mit manuellem Merge "
+                               f"({', '.join(hits[:3])}): bitte prüfen und mergen.", state)
+                    return 0
             merge_or_queue(n, pr["headRefOid"], state)
             save_state(state)
         else:

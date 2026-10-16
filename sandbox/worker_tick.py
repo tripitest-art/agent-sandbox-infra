@@ -277,7 +277,12 @@ def use_project(p: "projects.Project", first: bool) -> None:
 
 
 def gh(*args: str):
-    out = subprocess.run(["gh", *args, "--repo", REPO], capture_output=True, text=True, check=True, env=ENV)
+    try:
+        out = subprocess.run(["gh", *args, "--repo", REPO], capture_output=True, text=True, check=True, env=ENV)
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == 4 and "GH_TOKEN" in (getattr(exc, "stderr", None) or ""):
+            return None
+        raise
     text = out.stdout.strip()
     if not text:
         return None
@@ -674,7 +679,11 @@ def active_in_progress_issues() -> list[dict] | None:
 
 
 def claim_issue(n: int) -> bool:
-    """Wechselt atomar die Labels von 'bereit' zu 'in-arbeit' vor dem Start."""
+    """Wechselt die Labels `bereit` → `in-arbeit`.
+
+    True bei Erfolg. False, wenn der gh-Aufruf scheitert (Grund als erste stderr-Zeile im Log);
+    in diesem Fall bleibt das Issue unverändert.
+    """
     try:
         gh("issue", "edit", str(n), "--add-label", "in-arbeit", "--remove-label", "bereit")
         log(f"Issue #{n} erfolgreich auf 'in-arbeit' gesetzt.")
@@ -686,6 +695,17 @@ def claim_issue(n: int) -> bool:
         return False
 
 
+def job_issue_number(key: str) -> int | None:
+    """Issue-Nummer aus einem Auftragsschlüssel „issue<N>“, sonst None.
+
+    Der Taktgeber leitet daraus ab, welches Issue er vor dem Lauf übernehmen muss;
+    Nacharbeiten („pr<N>@<Review-Zeit>“) und Text-Aufträge („text<N>@<Commit>“) liefern None.
+    Es zählt der unpräfixte Schlüssel (ohne Projektvorsatz PREFIX).
+    """
+    m = re.fullmatch(r"issue(\d+)", key)
+    return int(m.group(1)) if m else None
+
+
 def issue_branch(n: int) -> str:
     # Fester Name statt eines vom Modell erfundenen: der Taktgeber findet den PR danach wieder,
     # und acceptance-guard erkennt feature/issue-<N> als Worker-Branch.
@@ -694,6 +714,10 @@ def issue_branch(n: int) -> str:
 
 def issue_job(skip: Callable[[str], bool] | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
+
+    Neu: die Auswahl ändert KEINE Labels mehr — kein claim_issue-Aufruf. Der Auftragstext bleibt
+    wörtlich wie bisher; Schritt 1 des Auftrags an das Modell bleibt
+    `gh issue edit <N> --add-label in-arbeit --remove-label bereit`.
 
     Neu (#32):
     - `active_in_progress_issues() is None` -> kein Auftrag (Rückgabe None), Logzeile mit Grund.
@@ -771,7 +795,6 @@ def issue_job(skip: Callable[[str], bool] | None = None):
         return None
 
     n, branch = selected["number"], issue_branch(selected["number"])
-    claim_issue(n)
 
     task = f"""Du setzt Issue #{n} um (AGENTS.md, Worker-Aufgaben → Worker). Du bist Worker: {WORKER}.
 Das Issue steht unten; es ist der Vertrag. Gehe genau diese Schritte durch und führe jeden als Befehl aus:
@@ -1007,13 +1030,52 @@ def litellm_ready() -> str | None:
     """BACKEND=litellm: None, wenn der LiteLLM-Proxy antwortet, sonst der Grund.
 
     /health/liveliness braucht keinen Key und kostet nichts. Budget und Modellrechte prüft
-    LiteLLM erst beim Auftrag; ein 429 (Budget aufgebraucht) sieht man dann im Log des Laufs.
+    LiteLLM erst beim Auftrag; ein leeres Tagesbudget erkennt der Takt davor (budget_problem).
     """
     try:
         with urllib.request.urlopen(f"{LITELLM}/health/liveliness", timeout=10):
             return None
     except Exception:
         return "LiteLLM nicht erreichbar"
+
+
+def key_info() -> dict | None:
+    """Verbrauch und Limit des eigenen Worker-Keys aus GET {LITELLM}/key/info.
+
+    None bei jedem Fehler (HTTP, Netz, Timeout, kein JSON, Feld „info“ fehlt): Der Takt hält
+    eine unklare Lage bewusst nicht an, ein defektes /key/info darf die Pipeline nicht
+    stilllegen. Der Schlüssel steht nur im Header und kommt nie ins Log (Regel 5).
+    """
+    req = urllib.request.Request(
+        f"{LITELLM}/key/info",
+        headers={"Authorization": f"Bearer {os.environ.get('LITELLM_API_KEY', '')}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.load(r)
+    except Exception:
+        return None
+    info = data.get("info") if isinstance(data, dict) else None
+    return info if isinstance(info, dict) else None
+
+
+def budget_problem(info: dict | None) -> str | None:
+    """Meldung, wenn das Tagesbudget des Worker-Keys aufgebraucht ist, sonst None.
+
+    Ist es leer, antwortet LiteLLM jeder Anfrage mit 429 – auch den Ausweichmodellen; ein
+    Lauf würde also nur einen Versuch verbrauchen (#90). „Spend >= max_budget“ ist der Beleg.
+    Eine unklare Lage (keine Antwort, kein Limit, keine Zahlen) gibt None: Der Takt läuft
+    weiter (anders als bei Regel 8). Die Meldung nennt keine Budgetwerte (Regel 5), nur den
+    Reset-Zeitpunkt aus `budget_reset_at`.
+    """
+    if not isinstance(info, Mapping):
+        return None
+    spend, max_budget = info.get("spend"), info.get("max_budget")
+    if not isinstance(spend, (int, float)) or not isinstance(max_budget, (int, float)):
+        return None
+    if spend < max_budget:
+        return None
+    reset = info.get("budget_reset_at")
+    return f"LiteLLM-Tagesbudget aufgebraucht (Reset {str(reset)[:16] if reset else 'unbekannt'})"
 
 
 def probe_model(model: str) -> str | None:
@@ -1125,6 +1187,22 @@ def _pid_alive(pid: int | None) -> bool:
     """True, wenn der Prozess noch läuft. Ein fehlendes Recht bedeutet: er lebt (anderer Nutzer)."""
     if not pid or pid <= 0:
         return False
+    if sys.platform == "win32":
+        # os.kill(pid, 0) ist unter Windows kein „nur prüfen“: Signal 0 ist dort CTRL_C_EVENT und
+        # trifft die ganze Konsole samt pytest-Sitzung. Deshalb fragt der Windows-Zweig die
+        # Win32-API, ohne os.kill (#118).
+        import ctypes
+
+        k = ctypes.windll.kernel32
+        handle = k.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return k.GetLastError() == 5             # Zugriff verweigert: der Prozess lebt
+        try:
+            code = ctypes.c_ulong()
+            k.GetExitCodeProcess(handle, ctypes.byref(code))
+        finally:
+            k.CloseHandle(handle)                    # immer schließen, auch bei Fehler
+        return code.value == 259                     # STILL_ACTIVE
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1435,6 +1513,19 @@ def main() -> int:
                 status, say=lambda m: log_on_change(state, LAST_WORK, f"{skey} belegt", m)):
             return 0
         if BACKEND == "litellm":
+            # #90: Zuerst das Tagesbudget des eigenen Keys. Ein leerer Key beantwortet auch die
+            # Ausweichmodelle mit 429; ohne diese Prüfung verbrauchte der Lauf einen Versuch und
+            # der Auftrag stünde nach MAX_TRIES bei Stephan. Ohne Arbeit kostet die Abfrage
+            # nichts, und ohne Versuch läuft der Auftrag nach dem Reset von selbst weiter.
+            info = key_info()
+            problem = budget_problem(info)
+            if problem:
+                reset = str((info or {}).get("budget_reset_at") or "unbekannt")[:16]
+                log_on_change(state, "_budget", reset,
+                              f"⚠ Stephan: {problem}, warte. Versuch zählt nicht.")
+                return 0
+            if state.pop("_budget", None) is not None:
+                save_state(state)   # Budget wieder frei: die nächste Knappheit wird erneut gemeldet
             # Erst hier prüfen: ohne Arbeit kostet der Takt keine Anfrage. Vor dem Zähler, damit ein
             # gestörter Anbieter keine Versuche verbraucht.
             model, failed = choose_model()
@@ -1458,6 +1549,10 @@ def main() -> int:
                           f"{skey}: von einem anderen Slot belegt, warte.")
             return 0
         state[LAST_WORK] = skey
+
+        n = job_issue_number(key)
+        if n is not None and not claim_issue(n):
+            return 0
 
         state[skey] = state.get(skey, 0) + 1
         save_state(state)

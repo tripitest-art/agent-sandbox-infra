@@ -43,8 +43,12 @@ Der Planer schreibt Issues, keinen Code: keine Branches, keine Commits, keine PR
    - **Hotspot-Abschnitt:** in diesem Repository immer
      `nein (Infra-Repo, kein Hotspot)` — die Überschrift stammt aus dem Formular der
      Projektvorlage und nennt dort die Hauptdatei des anderen Projekts.
-   - **Merge-Modus:** in diesem Repository immer `manuell durch Stephan (Betrieb, Server,
-     Zugangsdaten)`; hier mergt und deployt kein Agent (Regel 4).
+   - **Merge-Modus:** `automatisch` ist der Standard: Nach „Freigegeben“ von GLM mergt der Review-Takt
+     selbst. Stephan prüft nur, wenn GLM Fehler meldet. `manuell durch Stephan (Betrieb, Server,
+     Zugangsdaten)` nur für ein Issue, das eine Aufsichtsdatei berührt (`manual_paths` der Projektliste:
+     `AGENTS.md`, `.github/*`, `tests/acceptance/*`, `skills/*`, `docs/main-schutz.ruleset.json`) oder wenn
+     Stephan es für dieses Issue verlangt. Der Review-Takt prüft die Dateiliste zusätzlich selbst, auch wenn
+     im Issue „automatisch“ steht; deployt wird nie automatisch (Regel 4).
 5. **Akzeptanztests** in **genau einem** ```` ```python ````-Block direkt unter
    `### Akzeptanztests` (so liest ihn `acceptance-guard`). Sie
    - prüfen nur die Schnittstellen aus dem Issue, keine Interna;

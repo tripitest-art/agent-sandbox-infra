@@ -160,6 +160,21 @@ def test_pid_is_active_without_pid():
     assert q.pid_is_active(os.getpid()) is True
 
 
+def test_pid_is_active_linux_nutzt_weiter_os_kill_mit_signal_null(monkeypatch):
+    """Der Linux-Zweig bleibt unverändert: os.kill(pid, 0) entscheidet (#118)."""
+    aufrufe: list[tuple[int, int]] = []
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(q.os, "kill", lambda pid, sig: aufrufe.append((pid, sig)))
+    assert q.pid_is_active(4242) is True
+    assert aufrufe == [(4242, 0)]
+
+    def kein_prozess(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(q.os, "kill", kein_prozess)
+    assert q.pid_is_active(4242) is False
+
+
 def test_payload_without_slots_omits_key():
     assert json.loads(q.payload(["a"])) == {"lines": "a"}
     assert json.loads(q.payload(["a"], slots={})) == {"lines": "a", "slots": {}}

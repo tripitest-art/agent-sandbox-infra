@@ -23,7 +23,7 @@ GOOD = {"projects": [
     {"name": "sc-digger", "repo": "tripitest-art/sc-digger", "workdir": "/root/sc-digger",
      "hotspot": "sc_digger/main.py", "review_skill": "skills/sc-digger-review/SKILL.md"},
     {"name": "infra", "repo": "tripitest-art/agent-sandbox-infra", "workdir": "/root/agent-sandbox-infra",
-     "hotspot": None, "auto_merge": False},
+     "hotspot": None, "auto_merge": False, "manual_paths": ["sandbox/*", "AGENTS.md"]},
 ]}
 
 
@@ -62,6 +62,19 @@ def test_required_checks_from_project_list():
     assert a.required_checks == ("tests", "acceptance-guard")
 
 
+def test_manual_paths_default_is_empty_and_list_becomes_tuple():
+    """Dateimuster für den manuellen Merge (Issue #122): ohne Angabe leer, aus JSON wird ein Tupel."""
+    a, b = pj.parse_projects(_text(manual_paths=["sandbox/*", "AGENTS.md"]))
+    assert a.manual_paths == ()
+    assert b.manual_paths == ("sandbox/*", "AGENTS.md")
+    assert pj.parse_projects(json.dumps(GOOD))[1].manual_paths == ("sandbox/*", "AGENTS.md")
+
+
+def test_project_without_manual_paths_is_allowed():
+    """Ein Projekt ohne Muster ist erlaubt — nur ein unbrauchbares Muster wird abgewiesen."""
+    assert pj.parse_projects(_text(manual_paths=[]))[1].manual_paths == ()
+
+
 def test_null_test_cmd_falls_back_to_default():
     assert pj.parse_projects(_text(test_cmd=None))[1].test_cmd == "python -m pytest -q"
 
@@ -75,6 +88,10 @@ def test_null_test_cmd_falls_back_to_default():
     ({"required_checks": []}, "required_checks"),
     ({"required_checks": ["tests", ""]}, "required_checks"),
     ({"required_checks": ["tests", 7]}, "required_checks"),
+    ({"manual_paths": "sandbox/*"}, "manual_paths"),
+    ({"manual_paths": [""]}, "manual_paths"),
+    ({"manual_paths": [7]}, "manual_paths"),
+    ({"manual_paths": {"a": "b"}}, "manual_paths"),
     ({"test_cmd": ""}, "test_cmd"),
     ({"unbekannt": 1}, "unbekannt"),
     ({"name": "sc-digger"}, "doppelt"),
@@ -105,6 +122,9 @@ def test_example_file_is_valid():
     assert [p.name for p in ps] == ["sc-digger", "agent-sandbox-infra"]
     assert ps[0].required_checks == ("tests", "acceptance-guard", "CodeQL")   # sc-digger verlangt CodeQL
     assert ps[1].required_checks == ("tests", "acceptance-guard")             # dieses Repo: Vorgabe
+    # Das Beispiel zeigt die Aufsichtsdateien mit manuellem Merge (Issue #122); Skripte unter sandbox/ mergt der Takt.
+    assert ps[1].auto_merge is True
+    assert "AGENTS.md" in ps[1].manual_paths and "sandbox/*" not in ps[1].manual_paths
 
 
 # ---- Ausgabe ----
@@ -213,6 +233,9 @@ def r(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "BASE_STATE", str(tmp_path / "review-state.json"))
     monkeypatch.setattr(mod, "BASE_DRAFT_DIR", str(tmp_path / "reviews"))
     monkeypatch.setattr(mod, "REVIEW_KEY", "k")
+    # Auch diesen aus PROJECTS abgeleiteten Modulzustand festlegen: Sonst hinge das Ergebnis an der
+    # Projektliste des Servers (/etc/agent-projects.json), die beim Import gelesen wurde.
+    monkeypatch.setattr(mod, "PROJECT_MANUAL_PATHS", ())
     monkeypatch.setattr(mod, "unblock_dependent_issues", lambda: [])
     return mod
 
@@ -222,9 +245,10 @@ def test_review_paths_per_project(r, tmp_path):
     assert r.STATE == str(tmp_path / "review-state-infra.json")
     assert r.DRAFT_DIR == str(tmp_path / "reviews-infra")
     assert (r.REPO, r.REVIEW_SKILL, r.PROJECT_AUTO_MERGE) == ("tripitest-art/agent-sandbox-infra", None, False)
+    assert r.PROJECT_MANUAL_PATHS == ("sandbox/*", "AGENTS.md")   # Dateimuster je Projekt (Issue #122)
     r.use_project(r.PROJECTS[0], first=True)
     assert r.STATE == str(tmp_path / "review-state.json") and r.DRAFT_DIR == str(tmp_path / "reviews")
-    assert r.PROJECT_AUTO_MERGE is True
+    assert r.PROJECT_AUTO_MERGE is True and r.PROJECT_MANUAL_PATHS == ()
 
 
 def test_review_visits_every_project_and_isolates_errors(r, monkeypatch, capsys):

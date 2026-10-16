@@ -33,12 +33,13 @@ def _pr(number=7, **kw):
 def _env(monkeypatch, tmp_path):
     # Serverprojektliste /etc/agent-projects.json (bzw. AGENT_PROJECTS) nennt zwei Projekte; run_once()
     # liefe sonst über beide und riefe das Modell zweimal. Die Tests rechnen mit dem Vorgabeprojekt
-    # („keine Datei“) — auch die daraus abgeleiteten Globalen (Repo, Skill, Merge-Erlaubnis).
+    # („keine Datei“) — auch die daraus abgeleiteten Globalen (Repo, Skill, Merge-Erlaubnis, Dateimuster).
     p = r.projects.default_projects()[0]
     monkeypatch.setattr(r, "PROJECTS", [p])
     monkeypatch.setattr(r, "REPO", p.repo)
     monkeypatch.setattr(r, "REVIEW_SKILL", p.review_skill)
     monkeypatch.setattr(r, "PROJECT_AUTO_MERGE", p.auto_merge)
+    monkeypatch.setattr(r, "PROJECT_MANUAL_PATHS", p.manual_paths)
     # BASE_* mitpatchen: use_project() leitet STATE/DRAFT_DIR daraus ab, sobald die Projektliste
     # (/etc/agent-projects.json) mehr als ein Projekt nennt. Ohne diese zwei Zeilen schreiben die
     # Tests dann in die Zustandsdateien des Servers, statt in tmp_path.
@@ -60,6 +61,17 @@ def _env(monkeypatch, tmp_path):
     def no_network(*a, **k):
         raise urllib.error.URLError("kein Netz im Test")
     monkeypatch.setattr(r.urllib.request, "urlopen", no_network)
+
+
+def test_max_tokens_vorgabe_und_einstellung(monkeypatch):
+    """GLM zählt Denk-Tokens zur Antwort: Die Vorgabe liegt bei 16000, REVIEW_MAX_TOKENS stellt sie ein."""
+    monkeypatch.delenv("REVIEW_MAX_TOKENS", raising=False)
+    assert r._max_tokens() == 16000
+    monkeypatch.setenv("REVIEW_MAX_TOKENS", "9000")
+    assert r._max_tokens() == 9000
+    for falsch in ("viel", "", "0", "999", "-5"):
+        monkeypatch.setenv("REVIEW_MAX_TOKENS", falsch)
+        assert r._max_tokens() == 16000
 
 
 def test_extract_section_by_heading_level():
@@ -167,6 +179,17 @@ def test_use_project_uebernimmt_die_pflicht_checks(monkeypatch):
     assert r.REQUIRED_CHECKS == ("tests", "acceptance-guard", "CodeQL")
     r.use_project(_projekt_mit_pflicht_checks("tests"), first=True)
     assert r.REQUIRED_CHECKS == ("tests",)
+
+
+def test_use_project_uebernimmt_die_manual_paths(monkeypatch):
+    """Die Dateimuster für den manuellen Merge kommen je Projekt aus der Liste (Issue #122)."""
+    monkeypatch.setattr(r, "PROJECT_MANUAL_PATHS", r.PROJECT_MANUAL_PATHS)   # Modulzustand wiederherstellen
+    p = r.projects.Project(name="sc-digger", repo="tripitest-art/sc-digger", workdir="/root/sc-digger",
+                           manual_paths=("sandbox/*", "AGENTS.md"))
+    r.use_project(p, first=True)
+    assert r.PROJECT_MANUAL_PATHS == ("sandbox/*", "AGENTS.md")
+    r.use_project(_projekt_mit_pflicht_checks("tests"), first=True)
+    assert r.PROJECT_MANUAL_PATHS == ()
 
 
 def test_pflicht_check_aus_der_projektliste_macht_rot(monkeypatch):
@@ -293,6 +316,53 @@ def test_dry_run_sets_no_review_commit_status(monkeypatch):
     monkeypatch.setattr(r, "gh_text", gh_text)
     r.run_once()
     assert status == [] and "posted" not in calls
+
+
+def _cp_error(stderr):
+    return r.subprocess.CalledProcessError(1, "gh", stderr=stderr)
+
+
+def test_gh_http_status_liest_dreistelligen_code():
+    """gh nennt den HTTP-Status im stderr als „(HTTP <ddd>)“; nur die Zahl wird übernommen (Regel 5)."""
+    assert r.gh_http_status(_cp_error("gh: Resource not accessible by personal access token (HTTP 403)")) == 403
+    assert r.gh_http_status(_cp_error("gh: Not Found (HTTP 404)\n")) == 404
+    assert r.gh_http_status(_cp_error("gh: API rate limit exceeded (HTTP 429)")) == 429
+
+
+def test_gh_http_status_none_ohne_beleg():
+    """Ohne dreistelligen Code, ohne str-stderr oder bei fremder Ausnahme: None — und nie ein Text."""
+    assert r.gh_http_status(_cp_error("irgendein Fehler")) is None
+    assert r.gh_http_status(_cp_error("")) is None
+    assert r.gh_http_status(_cp_error(b"(HTTP 403)")) is None
+    assert r.gh_http_status(_cp_error(None)) is None
+    assert r.gh_http_status(_cp_error("(HTTP 99)")) is None
+    assert r.gh_http_status(_cp_error("(HTTP 600)")) is None
+    assert r.gh_http_status(_cp_error("(HTTP 1234)")) is None
+    assert r.gh_http_status(RuntimeError("(HTTP 403)")) is None
+
+
+def test_status_warnung_nennt_http_code(monkeypatch, capsys):
+    """Scheitert der Status mit HTTP-Code, nennt die Warnung den Code, aber nie den gh-Fehlertext."""
+    def gh_text(*args, **kw):
+        raise _cp_error("gh: Resource not accessible by personal access token (HTTP 403)")
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    assert r.post_review_status(SHA, r.VERDICTS[0]) is False
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: Status review für aaaaaaa nicht gesetzt (CalledProcessError, HTTP 403)" in out
+    assert "Resource not accessible" not in out
+
+
+def test_status_warnung_ohne_http_code_wie_bisher(monkeypatch, capsys):
+    """Ohne erkennbaren Code bleibt die Warnung wie bisher: nur der Ausnahmeklassenname."""
+    def gh_text(*args, **kw):
+        raise _cp_error("geheim-im-fehlertext")
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    assert r.post_review_status(SHA, r.VERDICTS[0]) is False
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: Status review für aaaaaaa nicht gesetzt (CalledProcessError)" in out
+    assert "HTTP" not in out and "geheim-im-fehlertext" not in out
 
 
 def test_red_check_needs_no_model_and_counts_a_round(monkeypatch, tmp_path):
@@ -686,6 +756,73 @@ def _github_with_merge(monkeypatch, merge_mode="automatisch", merge_ok=True, pr_
     return calls
 
 
+def _github_mit_manual_paths(monkeypatch, manual_paths, files):
+    """GitHub-Fake für die Merge-Entscheidung nach Dateimustern (Issue #122).
+
+    `manual_paths` ist das Muster des Projekts, `files` die Dateiliste des PRs. Gezählt wird jede
+    Abfrage der Dateiliste (`pr view --json files`): einmal der Review, einmal die Merge-Entscheidung.
+    """
+    calls = _fake_github(monkeypatch, [_pr()])
+    calls.update(merged=[], edits=[], comments=[], dateiliste=[])
+    base_json = r.gh_json
+
+    def gh_json(*args):
+        if args[:2] == ("issue", "list"):
+            return []
+        if args[:2] == ("issue", "view") and "labels" not in args:
+            return {"number": 5, "title": "T", "body": "### Merge-Modus\nautomatisch"}
+        if args[:2] == ("pr", "view"):
+            calls["dateiliste"].append(args)
+            return {"files": [{"path": f, "additions": 1, "deletions": 0} for f in files]}
+        return base_json(*args)
+
+    def gh_text(*args, **kw):
+        if args[:2] == ("pr", "merge"):
+            calls["merged"].append(args[2])
+            return ""
+        if args[:2] == ("pr", "edit"):
+            calls["edits"].append(args[2:])
+            return ""
+        if args[:2] == ("pr", "comment"):
+            calls["comments"].append(args[2])
+            return ""
+        if args[:2] == ("label", "create") or args[0] == "api":
+            return ""
+        if args[:2] == ("pr", "diff"):
+            return "diff --git a/a.py b/a.py\n+x\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(r, "gh_json", gh_json)
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    monkeypatch.setattr(r, "POST", True)
+    monkeypatch.setattr(r, "AUTO_MERGE", True)
+    monkeypatch.setattr(r, "PROJECT_MANUAL_PATHS", manual_paths)
+    r.run_once()
+    return calls
+
+
+def test_projekt_ohne_manual_paths_fragt_die_dateiliste_nicht_noch_einmal_ab(monkeypatch):
+    """Ohne Muster bleibt der Merge-Zweig wie bisher: keine zweite Dateiliste, sofort mergen."""
+    calls = _github_mit_manual_paths(monkeypatch, (), ["sandbox/worker_tick.py"])
+    assert calls["merged"] == ["7"]
+    assert len(calls["dateiliste"]) == 1              # nur der Review hat die Liste gelesen
+
+
+def test_manual_paths_ohne_treffer_mergt_der_takt_selbst(monkeypatch):
+    """Ein Muster, das auf keine Datei des PRs passt, ändert nichts: Merge durch den Takt."""
+    calls = _github_mit_manual_paths(monkeypatch, ("sandbox/*", "AGENTS.md"), ["docs/a.md", "CHANGELOG.md"])
+    assert calls["merged"] == ["7"]
+    assert len(calls["dateiliste"]) == 2              # frische Liste kurz vor dem Merge
+
+
+def test_manual_paths_mit_treffer_geht_an_stephan(monkeypatch):
+    """Ein Treffer sperrt den automatischen Merge; der PR bekommt Label und Kommentar für Stephan."""
+    calls = _github_mit_manual_paths(monkeypatch, ("sandbox/*", "AGENTS.md"), ["docs/a.md", "sandbox/worker_tick.py"])
+    assert calls["merged"] == []
+    assert calls["edits"] == [("7", "--add-label", r.STEPHAN_LABEL)]
+    assert calls["comments"] == ["7"]
+
+
 def test_draft_from_dry_run_is_posted_later_without_new_model_call(monkeypatch, tmp_path, capsys):
     calls = _github_with_merge(monkeypatch)
     r.run_once()                                   # REVIEW_POST=0: nur Entwurf
@@ -882,3 +1019,94 @@ def test_multiline_gh_error_lands_single_line_in_the_log(monkeypatch, capsys):
     r.run_once()
     line = next(l for l in capsys.readouterr().out.splitlines() if "GitHub-Abfrage scheitert" in l)
     assert "⚠" not in line and "Stephan" not in line and "\t" not in line
+
+
+# --- Reviewer in der Logzeile des geposteten Reviews --------------------------------------------
+
+def test_reviewer_in_text_liest_den_alias_und_kennt_den_fehlerfall():
+    text = ("**Freigegeben**\n\nReview nach AGENTS.md → Reviewer. Worker: DeepSeek (LiteLLM coder-fast), "
+            "Reviewer: coder-glm (andere Modellfamilie).\n")
+    assert r.reviewer_in_text(text) == "coder-glm"
+    assert r.reviewer_in_text("**Freigegeben**\n\nnichts") == "unbekannt"
+
+
+def test_gepostetes_review_nennt_das_modell_in_der_logzeile(monkeypatch, capsys):
+    monkeypatch.setattr(r, "POST", True)
+    _fake_github(monkeypatch, [_pr()])
+    r.run_once()
+    assert "als Kommentar-Review gepostet, Reviewer coder-glm (" in capsys.readouterr().out
+
+
+def test_rote_checks_stehen_als_ohne_modell_in_der_logzeile(monkeypatch, capsys):
+    monkeypatch.setattr(r, "POST", True)
+    red = [dict(GOOD_CHECKS[0], conclusion="FAILURE")] + GOOD_CHECKS[1:]
+    calls = _fake_github(monkeypatch, [_pr(statusCheckRollup=red)])
+    r.run_once()
+    assert "llm" not in calls
+    assert "Änderungen nötig, 1 Muss / 0 Kann, als Kommentar-Review gepostet, Reviewer ohne-Modell (" in capsys.readouterr().out
+
+
+def test_spaeter_gepostetes_draft_nennt_das_modell_aus_dem_text(monkeypatch, capsys):
+    calls = _github_with_merge(monkeypatch)
+    r.run_once()                                   # REVIEW_POST=0: nur Entwurf
+    capsys.readouterr()
+    monkeypatch.setattr(r, "POST", True)
+    r.run_once()
+    assert calls["llm"] == 1
+    assert "gepostet, Reviewer coder-glm (" in capsys.readouterr().out
+
+
+# --- Issue #121: PRs mit Label `review-anfordern` auch ohne Worker-Issue prüfen ---
+
+def _label_pr(**kw):
+    """PR wie die von Hand angelegten (#111/#114/#115): Branch ohne issue-<N>."""
+    return _pr(headRefName="feature/dashboard-budget", labels=[{"name": r.REVIEW_REQUEST_LABEL}], **kw)
+
+
+def test_label_pr_mit_roten_pflicht_checks_wird_ohne_modell_zu_aenderungen_noetig(monkeypatch, tmp_path):
+    red = [dict(GOOD_CHECKS[0], conclusion="FAILURE")] + GOOD_CHECKS[1:]
+    calls = _fake_github(monkeypatch, [_label_pr(statusCheckRollup=red)])
+    r.run_once()
+    assert "llm" not in calls                       # rote Pflicht-Checks brauchen kein Modell
+    text = next((tmp_path / "reviews").glob("pr7-*.md")).read_text(encoding="utf-8")
+    assert "**Änderungen nötig**" in text and "`tests` ist nicht grün" in text
+    assert json.loads((tmp_path / "state.json").read_text())["runden"] == {"7": 1}
+
+
+def test_label_pr_zaehlt_die_zweite_runde_wie_ein_worker_pr(monkeypatch, tmp_path):
+    red = [dict(GOOD_CHECKS[0], conclusion="FAILURE")] + GOOD_CHECKS[1:]
+    (tmp_path / "state.json").write_text(json.dumps({"runden": {"7": 1}}))
+    calls = _fake_github(monkeypatch, [_label_pr(statusCheckRollup=red)])
+    r.run_once()
+    assert "llm" not in calls
+    assert json.loads((tmp_path / "state.json").read_text())["runden"] == {"7": 2}
+
+
+def test_label_pr_ohne_worker_zeile_wird_nicht_geprueft(monkeypatch, capsys):
+    calls = _fake_github(monkeypatch, [_label_pr(body="Was und warum\n\nkein Worker-Hinweis\n")])
+    r.run_once()
+    assert "llm" not in calls and "Zeile „Worker: …“ fehlt im PR-Text" in capsys.readouterr().out
+
+
+def test_label_pr_wird_nie_gemergt_und_liegt_bei_stephan(monkeypatch, capsys):
+    """Ohne Worker-Issue gibt es keinen Vertrag und keinen automatischen Merge (Issue #121)."""
+    monkeypatch.setattr(r, "POST", True)
+    monkeypatch.setattr(r, "PROJECT_AUTO_MERGE", True)
+    calls = _fake_github(monkeypatch, [_label_pr()])
+    merged = []
+
+    def gh_text(*args, **kw):
+        if args[:2] == ("pr", "merge"):
+            merged.append(args[2])
+            return ""
+        if args[:2] == ("pr", "edit"):
+            return ""
+        if args[:2] == ("pr", "comment"):
+            return ""
+        return "diff --git a/a.py b/a.py\n+x\n"
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    r.run_once()
+    assert calls.get("posted") == [7]
+    assert merged == []                             # kein Merge ohne Issue, trotz auto_merge
+    assert "kein Worker-Issue" in capsys.readouterr().out
