@@ -90,7 +90,19 @@ MAX_ROUNDS = 2              # Reviews „Änderungen nötig“ je PR, danach lie
 MERGE_RETRIES = 6          # so viele Takte lang wird ein gescheiterter Merge wiederholt
 BIG_DIFF_CHARS = 90_000     # darüber: REVIEW_MODEL_BIG
 MAX_DIFF_CHARS = 400_000    # darüber: nicht prüfen, an Stephan melden
-MAX_TOKENS = 6000           # Obergrenze der Modellantwort; erreicht sie das, gilt sie als unbrauchbar
+def _max_tokens() -> int:
+    """REVIEW_MAX_TOKENS (Vorgabe 16000). Unbrauchbare Werte (kein Integer, unter 1000) fallen auf die Vorgabe zurück."""
+    try:
+        value = int(os.environ.get("REVIEW_MAX_TOKENS", "16000"))
+    except ValueError:
+        return 16000
+    return value if value >= 1000 else 16000
+
+
+# Obergrenze der Modellantwort; erreicht sie das, gilt sie als unbrauchbar. Bei GLM zählen die Denk-Tokens
+# (reasoning_tokens) mit: Eine Anfrage „Antworte nur mit: ok“ braucht schon über 100, ein Review mit großem
+# Diff am 16.10. mehr als 6000 (PR #119 und #132 scheiterten je zweimal am Limit).
+MAX_TOKENS = _max_tokens()
 LLM_TIMEOUT = float(os.environ.get("REVIEW_LLM_TIMEOUT", "420"))
 # Pflicht-Checks dieses Repos (tests, acceptance-guard); sc-diggers Vertrag nennt zusätzlich CodeQL
 # und steht in dessen Projektlisteneintrag. use_project() übernimmt die Liste des aktiven Projekts.
