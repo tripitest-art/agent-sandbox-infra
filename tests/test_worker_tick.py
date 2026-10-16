@@ -106,6 +106,8 @@ class FakeGH:
                     raise RuntimeError("gh nicht erreichbar")
                 return self.active
             return self.issues
+        if args[:2] == ("issue", "edit"):
+            return None
         raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
 
 
@@ -200,6 +202,7 @@ def test_issue_job(monkeypatch):
     assert "Ein roter Test ist kein Grund aufzuhören" in task  # erster Lauf endete dort
     assert "NICHT erledigt" in task and "ins Issue #102" in task
     assert "/tmp/" not in task
+    assert not any(c[:2] == ("issue", "edit") for c in fake.calls)
     assert '--title "$(gh issue view 102 --json title -q .title)"' in task
 
 
@@ -1922,3 +1925,62 @@ def test_claim_job_meldet_nicht_nutzbares_verzeichnis_einmal(monkeypatch, tmp_pa
     assert out.count("⚠ Stephan:") == 1 and "nicht nutzbar" in out
     assert w.claim_job("issue59") is True
     assert capsys.readouterr().out == ""
+
+
+# --- Tests zu Issue #38: Issue erst nach den Abbruch-Gates übernehmen ---
+
+def test_job_issue_number():
+    assert w.job_issue_number("issue7") == 7
+    assert w.job_issue_number("issue102") == 102
+    assert w.job_issue_number("issue0") == 0
+    assert w.job_issue_number("pr7@x") is None
+    assert w.job_issue_number("pr103@2026-09-29T21:39:23Z") is None
+    assert w.job_issue_number("text41@abcdef1") is None
+    assert w.job_issue_number("issue") is None
+    assert w.job_issue_number("prefix/issue7") is None
+
+
+def test_issue_job_ruft_gh_issue_edit_nie_auf(monkeypatch):
+    fake = FakeGH(issues=[_issue(number=77)])
+    monkeypatch.setattr(w, "gh", fake)
+    key, task, pr_no, before = w.issue_job()
+    assert key == "issue77"
+    assert not any(c[:2] == ("issue", "edit") for c in fake.calls)
+
+
+def test_gescheitertes_claim_issue_startet_keinen_agenten(monkeypatch, tmp_path):
+    state = tmp_path / "state.json"
+    monkeypatch.setattr(w, "STATE", str(state))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda s: ("issue77", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: False)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: pytest.fail("prepare_workdir aufgerufen trotz fehlgeschlagenem Claim"))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: pytest.fail("Agent gestartet trotz fehlgeschlagenem Claim"))
+    assert w.main() == 0
+    assert not state.exists() or "issue77" not in json.loads(state.read_text(encoding="utf-8"))
+
+
+def test_modellwechsel_uebernimmt_genau_ein_issue(monkeypatch, tmp_path):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "LITELLM_MODEL", "coder")
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "LITELLM_FALLBACKS", ["coder-free"])
+    monkeypatch.setattr(w, "probe_model", lambda m: "TimeoutError" if m == "coder" else None)
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+
+    claims = []
+    monkeypatch.setattr(w, "claim_issue", lambda n: claims.append(n) or True)
+
+    runs = []
+    monkeypatch.setattr(w, "run_agent", lambda prompt: runs.append(prompt) or 0)
+
+    issues = [_issue(number=101), _issue(number=102)]
+    monkeypatch.setattr(w, "gh", FakeGH(issues=issues, prs=[]))
+
+    assert w.main() == 0
+    assert claims == [101]
+    assert len(runs) == 1 and "Du setzt Issue #101 um" in runs[0]

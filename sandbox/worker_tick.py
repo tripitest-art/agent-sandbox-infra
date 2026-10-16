@@ -674,7 +674,11 @@ def active_in_progress_issues() -> list[dict] | None:
 
 
 def claim_issue(n: int) -> bool:
-    """Wechselt atomar die Labels von 'bereit' zu 'in-arbeit' vor dem Start."""
+    """Wechselt die Labels `bereit` → `in-arbeit`.
+
+    True bei Erfolg. False, wenn der gh-Aufruf scheitert (Grund als erste stderr-Zeile im Log);
+    in diesem Fall bleibt das Issue unverändert.
+    """
     try:
         gh("issue", "edit", str(n), "--add-label", "in-arbeit", "--remove-label", "bereit")
         log(f"Issue #{n} erfolgreich auf 'in-arbeit' gesetzt.")
@@ -686,6 +690,17 @@ def claim_issue(n: int) -> bool:
         return False
 
 
+def job_issue_number(key: str) -> int | None:
+    """Issue-Nummer aus einem Auftragsschlüssel „issue<N>“, sonst None.
+
+    Der Taktgeber leitet daraus ab, welches Issue er vor dem Lauf übernehmen muss;
+    Nacharbeiten („pr<N>@<Review-Zeit>“) und Text-Aufträge („text<N>@<Commit>“) liefern None.
+    Es zählt der unpräfixte Schlüssel (ohne Projektvorsatz PREFIX).
+    """
+    m = re.fullmatch(r"issue(\d+)", key)
+    return int(m.group(1)) if m else None
+
+
 def issue_branch(n: int) -> str:
     # Fester Name statt eines vom Modell erfundenen: der Taktgeber findet den PR danach wieder,
     # und acceptance-guard erkennt feature/issue-<N> als Worker-Branch.
@@ -694,6 +709,10 @@ def issue_branch(n: int) -> str:
 
 def issue_job(skip: Callable[[str], bool] | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
+
+    Neu: die Auswahl ändert KEINE Labels mehr — kein claim_issue-Aufruf. Der Auftragstext bleibt
+    wörtlich wie bisher; Schritt 1 des Auftrags an das Modell bleibt
+    `gh issue edit <N> --add-label in-arbeit --remove-label bereit`.
 
     Neu (#32):
     - `active_in_progress_issues() is None` -> kein Auftrag (Rückgabe None), Logzeile mit Grund.
@@ -771,7 +790,6 @@ def issue_job(skip: Callable[[str], bool] | None = None):
         return None
 
     n, branch = selected["number"], issue_branch(selected["number"])
-    claim_issue(n)
 
     task = f"""Du setzt Issue #{n} um (AGENTS.md, Worker-Aufgaben → Worker). Du bist Worker: {WORKER}.
 Das Issue steht unten; es ist der Vertrag. Gehe genau diese Schritte durch und führe jeden als Befehl aus:
@@ -1526,6 +1544,10 @@ def main() -> int:
                           f"{skey}: von einem anderen Slot belegt, warte.")
             return 0
         state[LAST_WORK] = skey
+
+        n = job_issue_number(key)
+        if n is not None and not claim_issue(n):
+            return 0
 
         state[skey] = state.get(skey, 0) + 1
         save_state(state)
