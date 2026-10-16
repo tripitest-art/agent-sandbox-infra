@@ -289,3 +289,75 @@ def test_gescheiterte_pruefung_schaltet_worker_und_review_timer_ab(tmp_path):
     assert "systemctl disable --now qwen-worker.timer" in systemctl_log(tmp_path)
     assert "systemctl disable --now qwen-review.timer" in systemctl_log(tmp_path)
     assert "Timer bleibt aus" in r.stdout
+
+
+# ---- Ressourcenlimits je Worker-Slot (#88) ----
+
+def test_slot_limit_lines_empty_means_no_limit(tmp_path):
+    r = sh('slot_limit_lines', tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == ""
+
+
+def test_slot_limit_lines_none_means_no_limit(tmp_path):
+    r = sh('SLOT_MEMORY_MAX=none SLOT_TASKS_MAX=none SLOT_CPU_PERCENT=none; slot_limit_lines', tmp_path)
+    assert r.returncode == 0 and r.stdout == ""
+
+
+def test_slot_limit_lines_emits_directives(tmp_path):
+    r = sh('SLOT_MEMORY_MAX=1200M SLOT_TASKS_MAX=512 SLOT_CPU_PERCENT=150; slot_limit_lines', tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["MemoryMax=1200M", "TasksMax=512", "CPUQuota=150%"]
+
+
+def test_slot_limit_lines_only_set_values(tmp_path):
+    r = sh('SLOT_MEMORY_MAX=2G; slot_limit_lines', tmp_path)
+    assert r.stdout.splitlines() == ["MemoryMax=2G"]
+
+
+@pytest.mark.parametrize("var,value", [
+    ("SLOT_MEMORY_MAX", "viel"), ("SLOT_MEMORY_MAX", "0"), ("SLOT_MEMORY_MAX", "12%"),
+    ("SLOT_TASKS_MAX", "-1"), ("SLOT_TASKS_MAX", "0"), ("SLOT_TASKS_MAX", "512M"),
+    ("SLOT_CPU_PERCENT", "150%"), ("SLOT_CPU_PERCENT", "0"), ("SLOT_CPU_PERCENT", "x"),
+])
+def test_slot_limits_check_rejects_nonsense(tmp_path, var, value):
+    r = sh(f'{var}={value}; slot_limits_check', tmp_path)
+    assert r.returncode != 0
+    assert var in r.stderr
+
+
+def test_slot_limits_check_accepts_valid_and_empty(tmp_path):
+    assert sh('slot_limits_check', tmp_path).returncode == 0
+    assert sh('SLOT_MEMORY_MAX=1200M SLOT_TASKS_MAX=512 SLOT_CPU_PERCENT=150; slot_limits_check',
+              tmp_path).returncode == 0
+    assert sh('SLOT_MEMORY_MAX=none SLOT_TASKS_MAX=none SLOT_CPU_PERCENT=none; slot_limits_check',
+              tmp_path).returncode == 0
+
+
+def test_slot_limits_survive_conf_roundtrip(tmp_path):
+    r = sh('SLOT_MEMORY_MAX=1200M SLOT_TASKS_MAX=512 SLOT_CPU_PERCENT=150\n'
+           'conf_save SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT\n'
+           'echo "$(conf_get SLOT_MEMORY_MAX)/$(conf_get SLOT_TASKS_MAX)/$(conf_get SLOT_CPU_PERCENT)"', tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "1200M/512/150"
+
+
+def test_install_sh_puts_slot_limits_into_worker_template_unit():
+    text = (SANDBOX / "install.sh").read_text(encoding="utf-8")
+    unit = text.split("qwen-worker@.service <<UNIT", 1)[1].split("\nUNIT\n", 1)[0]
+    assert "$(slot_limit_lines)" in unit
+    assert "slot_limits_check" in text
+    assert "SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT" in text   # wird gemerkt
+
+
+def test_unit_kopie_unter_systemd_nennt_die_slot_limits():
+    # Die Kopie unter sandbox/systemd/ ist die Vorlage zum Nachlesen; sie darf nicht hinter
+    # install.sh zurückbleiben (#88): Direktiven stehen als Vorschlag (auskommentiert) darin.
+    unit = (SANDBOX / "systemd" / "qwen-worker@.service").read_text(encoding="utf-8")
+    for direktive in ("MemoryMax=", "TasksMax=", "CPUQuota="):
+        assert direktive in unit, direktive
+    for einstellung in ("SLOT_MEMORY_MAX", "SLOT_TASKS_MAX", "SLOT_CPU_PERCENT"):
+        assert einstellung in unit, einstellung
+    # Auskommentiert: ohne Einstellung gilt weiter kein Limit.
+    zeilen = [z for z in unit.splitlines() if z.startswith(("MemoryMax=", "TasksMax=", "CPUQuota="))]
+    assert zeilen == []
