@@ -645,6 +645,12 @@ def test_agent_env_allowlist_enthaelt_keinen_geheimnisnamen():
     assert {"PATH", "HOME"} <= set(w.AGENT_ENV_ALLOW)
 
 
+def test_agent_env_pass_ist_nur_der_modellschluessel():
+    # Qwen und OpenCode lesen den Schlüssel aus LITELLM_API_KEY; ohne ihn endet jeder Lauf nach 0 s.
+    assert w.AGENT_ENV_PASS == ("LITELLM_API_KEY",)
+    assert set(w.AGENT_ENV_PASS) <= set(w.SECRET_ENV_KEYS)   # redact() entfernt ihn weiter aus dem Log
+
+
 def test_agent_env_liest_os_environ_und_laesst_geheimnisse_weg(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("HOME", "/root")
@@ -652,8 +658,9 @@ def test_agent_env_liest_os_environ_und_laesst_geheimnisse_weg(monkeypatch):
     monkeypatch.setenv("HA_STATUS_URL", GEHEIM)
     env = w.agent_env()
     assert env["PATH"] == "/usr/bin" and env["HOME"] == "/root"
-    assert set(env).isdisjoint(w.SECRET_ENV_KEYS)
-    assert GEHEIM not in " ".join(env.values())
+    assert env["LITELLM_API_KEY"] == GEHEIM               # Modellschlüssel geht durch
+    assert set(env).isdisjoint(set(w.SECRET_ENV_KEYS) - set(w.AGENT_ENV_PASS))
+    assert "HA_STATUS_URL" not in env
 
 
 def test_agent_env_behaelt_den_path_aus_env(monkeypatch):
@@ -664,8 +671,7 @@ def test_agent_env_behaelt_den_path_aus_env(monkeypatch):
     env = w.agent_env(w.ENV)
     assert env["PATH"] == w.ENV["PATH"]
     assert env["PATH"] != "/usr/bin:/bin"
-    assert set(env).isdisjoint(w.SECRET_ENV_KEYS)
-    assert GEHEIM not in " ".join(env.values())
+    assert set(env).isdisjoint(set(w.SECRET_ENV_KEYS) - set(w.AGENT_ENV_PASS))
 
 
 def test_redact_ohne_angabe_liest_die_gesetzten_schluessel(monkeypatch):

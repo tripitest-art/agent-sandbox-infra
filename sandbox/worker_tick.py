@@ -119,7 +119,7 @@ ERROR_RULE = (
 
 ENV = dict(os.environ, PATH=f"/root/venv/bin:/root/.opencode/bin:{os.environ.get('PATH', '/usr/bin:/bin')}")
 
-# Regel 5: Diese Werte dürfen den Agentenprozess nie erreichen und nie ins Log (#35).
+# Regel 5: Diese Werte dürfen nie ins Log (#35) und, bis auf AGENT_ENV_PASS, nie in den Agentenprozess.
 SECRET_ENV_KEYS = ("LITELLM_API_KEY", "LITELLM_REVIEW_KEY", "LITELLM_WORKER_KEY",
                    "LITELLM_PLANER_KEY", "GITHUB_TOKEN", "GH_TOKEN",
                    "HA_STATUS_URL", "HA_WEBHOOK_URL")
@@ -132,15 +132,24 @@ AGENT_ENV_ALLOW = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR", "SHELL",
                    "XDG_DATA_HOME", "XDG_CACHE_HOME")
 
 
+# Der Agent ruft das Modell selbst auf: qwen und opencode lesen den Schlüssel aus dieser Variablen
+# (`envKey` in ~/.qwen/settings.json, `{env:LITELLM_API_KEY}` in der OpenCode-Konfiguration).
+# Ohne ihn endet jeder Lauf nach 0 Sekunden mit `error_during_execution`. Er bleibt in
+# SECRET_ENV_KEYS, damit `redact()` ihn aus jeder geloggten Zeile entfernt (Regel 5), und alle
+# anderen Schlüssel aus SECRET_ENV_KEYS bleiben draußen.
+AGENT_ENV_PASS = ("LITELLM_API_KEY",)
+
+
 def agent_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Umgebung für den Agentenprozess: nur Schlüssel aus AGENT_ENV_ALLOW, die gesetzt sind.
+    """Umgebung für den Agentenprozess: Schlüssel aus AGENT_ENV_ALLOW und AGENT_ENV_PASS, die gesetzt sind.
 
     `environ is None` liest `os.environ`. Schlüssel aus SECRET_ENV_KEYS kommen nie mit, auch
-    wenn sie in `environ` stehen. Der Agent braucht PATH (Aufruf von qwen/opencode/gh) und
+    wenn sie in `environ` stehen, außer den Namen in AGENT_ENV_PASS (der Modellschlüssel des
+    Workers). Der Agent braucht PATH (Aufruf von qwen/opencode/gh) und
     HOME (gh-Konfiguration `~/.config/gh/hosts.yml`, Modellkonfiguration)."""
     source = os.environ if environ is None else environ
     return {k: v for k, v in source.items()
-            if k in AGENT_ENV_ALLOW and k not in SECRET_ENV_KEYS}
+            if k in AGENT_ENV_PASS or (k in AGENT_ENV_ALLOW and k not in SECRET_ENV_KEYS)}
 
 
 def redact(text: str, secrets: Iterable[str] | None = None) -> str:
@@ -807,8 +816,8 @@ def log_stream_line(line: str) -> None:
 def run_agent(prompt: str) -> int:
     """Startet den Agenten; `timeout` beendet ihn hart, falls er selbst nicht aufhört.
 
-    Der Agentenprozess bekommt `agent_env(ENV)` statt `ENV`: nur die Allowlist, keine
-    Geheimnisse (#35). `ENV` statt `os.environ` ist nötig, weil nur dort der PATH-Zusatz
+    Der Agentenprozess bekommt `agent_env(ENV)` statt `ENV`: nur die Allowlist und der
+    Modellschlüssel, sonst keine Geheimnisse (#35). `ENV` statt `os.environ` ist nötig, weil nur dort der PATH-Zusatz
     `/root/venv/bin:/root/.opencode/bin` steht; die Worker-Units setzen keinen PATH, und
     `pytest` liegt nur im venv (#72). Die bei OpenCode ungefiltert gedruckte Ausgabe läuft
     durch `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home Assistant kommt."""
