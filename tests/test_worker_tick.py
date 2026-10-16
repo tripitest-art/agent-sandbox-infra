@@ -1146,7 +1146,6 @@ def test_issue_job_skips_file_overlap(monkeypatch):
 def test_prepare_workdir_creates_worktree(monkeypatch, tmp_path):
     base_dir = tmp_path / "base_repo"
     workdir = tmp_path / "worktrees" / "w2"
-    hooks_dir = base_dir / ".git" / "hooks"
     base_dir.mkdir(parents=True)
     commands = []
 
@@ -1154,25 +1153,13 @@ def test_prepare_workdir_creates_worktree(monkeypatch, tmp_path):
         commands.append((cmd, cwd))
         if "worktree" in cmd and "add" in cmd:
             workdir.mkdir(parents=True)
-        if cmd[:2] == ["git", "rev-parse"]:
-            # #68: git nennt den Hook-Ordner; er liegt im gemeinsamen Basis-Klon, nicht im Worktree.
-            return w.subprocess.CompletedProcess(cmd, 0, stdout=f"{hooks_dir}\n", stderr="")
-        return w.subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(w, "BASE_WORKDIR", str(base_dir))
     monkeypatch.setattr(w, "WORKDIR", str(workdir))
-    # Die Abfrage des Hook-Ordners gehört hier zum Prüfling (Fixture-Stub aufheben, #68).
-    monkeypatch.setattr(w, "git_hooks_dir", _ECHTE_GIT_HOOKS_DIR)
     monkeypatch.setattr(w.subprocess, "run", fake_run)
 
     w.prepare_workdir()
     assert any("worktree" in c[0] and "add" in c[0] for c in commands)
-    assert ["git", "rev-parse", "--git-path", "hooks"] in [c[0] for c in commands]
-    # Der Hook wird wirklich geschrieben (Dateisystem in tmp_path) und führt den Testbefehl aus.
-    hook = hooks_dir / "pre-push"
-    assert hook.read_text(encoding="utf-8") == w.pre_push_hook(w.TEST_CMD)
-    if os.name != "nt":
-        assert hook.stat().st_mode & 0o111 == 0o111
 
 
 def test_prepare_workdir_reuses_existing_worktree_detached(monkeypatch):
@@ -1193,33 +1180,20 @@ def test_prepare_workdir_reuses_existing_worktree_detached(monkeypatch):
         def __exit__(self, *exc):
             return False
 
-        def write(self, text):
-            self.text = text
-
     # Ohne O_EXCL entfällt der flock-Zweig, damit der Ablauf auf Windows und Linux gleich ist.
     fake_os = type("FakeOs", (), {
         "path": type("FakePath", (), {
             "exists": staticmethod(lambda p: True),
             "join": staticmethod(_os.path.join),
             "dirname": staticmethod(_os.path.dirname),
-            "isabs": staticmethod(_os.path.isabs),
         }),
         "makedirs": staticmethod(lambda *a, **k: None),
-        "chmod": staticmethod(lambda *a, **k: None),
     })
-
-    def fake_run(cmd, cwd=None, **kw):
-        calls.append(list(cmd))
-        if cmd[:2] == ["git", "rev-parse"]:
-            return w.subprocess.CompletedProcess(cmd, 0, stdout="hooks\n", stderr="")
-
     monkeypatch.setattr(w, "BASE_WORKDIR", "/base")
     monkeypatch.setattr(w, "WORKDIR", "/base-worktrees/w2")
     monkeypatch.setattr(w, "os", fake_os)
     monkeypatch.setattr(w, "open", lambda *a, **k: _Null(), raising=False)
-    # Wie in `test_issue_40.py` gehört die Hook-Abfrage (#68) zur erwarteten Aufruffolge.
-    monkeypatch.setattr(w, "git_hooks_dir", _ECHTE_GIT_HOOKS_DIR)
-    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, cwd=None, **kw: calls.append(list(cmd)))
 
     w.prepare_workdir()
 
@@ -1228,7 +1202,6 @@ def test_prepare_workdir_reuses_existing_worktree_detached(monkeypatch):
         ["git", "checkout", "-qf", "--detach", "origin/main"],
         ["git", "reset", "-q", "--hard", "origin/main"],
         ["git", "clean", "-qfd"],
-        ["git", "rev-parse", "--git-path", "hooks"],
     ]
     for cmd in calls:
         assert "main" not in cmd and "-B" not in cmd
@@ -1254,6 +1227,59 @@ def test_git_hooks_dir_nimmt_den_pfad_von_git(monkeypatch):
     monkeypatch.setattr(w.subprocess, "run", lambda cmd, cwd=None, **kw: w.subprocess.CompletedProcess(
         cmd, 0, stdout="/shared/.git/hooks\n", stderr=""))
     assert w.git_hooks_dir("/work/w1") == "/shared/.git/hooks"
+
+
+def test_ensure_pre_push_hook_schreibt_in_den_hook_ordner_von_git(monkeypatch, tmp_path):
+    """#68: Der Hook landet dort, wo git ihn für den Klon des Slots sucht, und führt TEST_CMD aus."""
+    workdir = tmp_path / "wd"
+    workdir.mkdir()
+    monkeypatch.setattr(w, "WORKDIR", str(workdir))
+    path = w.ensure_pre_push_hook()          # Fixture: git_hooks_dir -> tmp_path/git-hooks
+    assert path == str(tmp_path / "git-hooks" / "pre-push")
+    assert (tmp_path / "git-hooks" / "pre-push").read_text(encoding="utf-8") == w.pre_push_hook(w.TEST_CMD)
+    assert not list((tmp_path / "git-hooks").glob("*.tmp"))      # atomar ersetzt, nichts bleibt liegen
+
+
+def test_ensure_pre_push_hook_ohne_arbeitsverzeichnis_tut_nichts(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path / "gibt-es-nicht"))
+    monkeypatch.setattr(w, "git_hooks_dir", lambda cwd: pytest.fail("kein git ohne Arbeitsverzeichnis"))
+    assert w.ensure_pre_push_hook() is None
+
+
+def _lauf_mit_reihenfolge(monkeypatch, tmp_path, hook):
+    schritte = []
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+    monkeypatch.setattr(w, "check_issue_result", lambda k: None)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: schritte.append("workdir"))
+    monkeypatch.setattr(w, "ensure_pre_push_hook", hook(schritte))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: schritte.append("agent") or 0)
+    return schritte
+
+
+def test_main_setzt_den_hook_nach_dem_workdir_und_vor_dem_agenten(monkeypatch, tmp_path):
+    schritte = _lauf_mit_reihenfolge(monkeypatch, tmp_path, lambda s: lambda: s.append("hook"))
+    assert w.main() == 0
+    assert schritte == ["workdir", "hook", "agent"]
+
+
+def test_main_startet_den_agenten_nicht_ohne_hook(monkeypatch, tmp_path, capsys):
+    def kaputt(schritte):
+        def hook():
+            raise w.subprocess.CalledProcessError(128, ["git", "rev-parse"])
+        return hook
+
+    schritte = _lauf_mit_reihenfolge(monkeypatch, tmp_path, kaputt)
+    assert w.main() == 0
+    assert schritte == ["workdir"]                          # kein Agentenlauf ohne Sperre
+    assert "⚠ Stephan: issue7: Fehler: " in capsys.readouterr().out
 
 
 def test_push_regel_nur_im_issue_auftrag(monkeypatch):

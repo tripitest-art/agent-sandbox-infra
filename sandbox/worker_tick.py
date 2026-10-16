@@ -1204,7 +1204,7 @@ def pre_push_hook(test_cmd: str) -> str:
     """
     return (
         "#!/bin/sh\n"
-        "# Erzeugt von worker_tick.prepare_workdir(): kein Push mit roten Tests (#68).\n"
+        "# Erzeugt von worker_tick.ensure_pre_push_hook(): kein Push mit roten Tests (#68).\n"
         f"{test_cmd}\n"
         "if [ $? -ne 0 ]; then\n"
         "    echo \"pre-push: Tests fehlgeschlagen, Push abgelehnt."
@@ -1222,9 +1222,13 @@ def install_pre_push_hook(hooks_dir: str, test_cmd: str) -> str:
     """
     os.makedirs(hooks_dir, exist_ok=True)
     path = os.path.join(hooks_dir, "pre-push")
-    with open(path, "w", encoding="utf-8") as fh:
+    # Der Hook-Ordner gehört allen Slots eines Klons: Erst in eine eigene Datei schreiben und dann
+    # ersetzen, sonst führt ein pushender Slot einen halb geschriebenen Hook aus.
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(pre_push_hook(test_cmd))
-    os.chmod(path, 0o755)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, path)
     return path
 
 
@@ -1241,6 +1245,21 @@ def git_hooks_dir(cwd: str) -> str:
     return path if os.path.isabs(path) else os.path.join(cwd, path)
 
 
+def ensure_pre_push_hook() -> str | None:
+    """Schreibt den pre-push-Hook in den Klon des Slots und gibt seinen Pfad zurück (#68).
+
+    main() ruft das nach prepare_workdir() und vor dem Agenten auf, bei jedem Lauf. Es gehört nicht
+    in prepare_workdir(): Dessen Aufruffolge (nur git fetch/worktree/checkout/reset/clean, kein
+    Schreibzugriff) ist durch test_issue_40 festgeschrieben. Das Hook-Verzeichnis kommt von git,
+    nicht aus einer Vermutung (siehe git_hooks_dir). Ein Fehler bricht den Lauf ab (Regel 7), statt
+    den Agenten ungeschützt starten zu lassen. Gibt es WORKDIR nicht, ist nichts zu schützen: das
+    kommt nach einem erfolgreichen prepare_workdir() nicht vor, nur in Tests mit gefaktem Aufruf.
+    """
+    if not os.path.isdir(WORKDIR):
+        return None
+    return install_pre_push_hook(git_hooks_dir(WORKDIR), TEST_CMD)
+
+
 def prepare_workdir() -> None:
     """Bereitet das Arbeitsverzeichnis für einen neuen Lauf vor (main oder worktree)."""
     base = BASE_WORKDIR if os.path.exists(BASE_WORKDIR) else WORKDIR
@@ -1248,7 +1267,6 @@ def prepare_workdir() -> None:
         for cmd in (["git", "fetch", "-q", "origin"], ["git", "checkout", "-qf", "main"],
                     ["git", "reset", "-q", "--hard", "origin/main"], ["git", "clean", "-qfd"]):
             subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
-        install_pre_push_hook(git_hooks_dir(WORKDIR), TEST_CMD)
         return
 
     # Worktree-Modus: Basis-Repo fetchen (mit Lock gegen parallele Fetches)
@@ -1278,11 +1296,6 @@ def prepare_workdir() -> None:
                     ["git", "reset", "-q", "--hard", "origin/main"],
                     ["git", "clean", "-qfd"]):
             subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
-
-    # #68: Bei jedem Lauf neu setzen. Hook-Verzeichnis über git erfragen, weil es im Worktree der
-    # gemeinsame Ordner des Basis-Klons ist (nicht WORKDIR/.git/hooks) — ein falsch geratener Pfad
-    # würde still wirkungslos bleiben. Fehler hier sind echte Fehler (check=True), kein Verschlucken.
-    install_pre_push_hook(git_hooks_dir(WORKDIR), TEST_CMD)
 
 
 def main() -> int:
@@ -1351,6 +1364,7 @@ def main() -> int:
         save_state(state)
         # Jeder Lauf startet auf sauberem main; Reste eines abgebrochenen Laufs stören sonst.
         prepare_workdir()
+        ensure_pre_push_hook()   # #68: vor dem Agenten, damit schon sein erster Push geprüft wird
 
         prompt = (f"{task}\n\n"
                   "WICHTIGE REGELN FÜR DIESEN LAUF:\n"
