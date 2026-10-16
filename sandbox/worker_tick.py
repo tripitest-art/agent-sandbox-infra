@@ -517,6 +517,11 @@ _ACCEPTANCE_PATH_RE = re.compile(r"^tests/acceptance/test_issue_\d+\.py$")
 _PATH_TOKEN_RE = re.compile(r"[\w./@+~-]+")
 _BULLET_RE = re.compile(r"^\s*[-*]\s+(.*)$")
 _BACKTICK_RE = re.compile(r"`([^`\n]*)`")
+# Ausschlusssätze („… bleibt unberührt“, „Keine andere Datei …“) beschreiben, was der Worker
+# NICHT anfassen darf. Ihre Pfade zählen nicht als belegt, sonst überspringt Regel 8 fremde
+# Issues, die genau diese Dateien wirklich ändern (#79).
+_EXCLUSION_WORDS = ("unberührt", "nicht angefasst", "nicht geändert")
+_EXCLUSION_START = "keine andere datei"
 
 
 def affected_files_section(md: str) -> str | None:
@@ -567,16 +572,59 @@ def parse_affected_files(issue_body: str) -> set[str] | None:
     `- `irgendeine_variable = True` (keine Datei)` bleibt ausgeschlossen.
     `tests/acceptance/test_issue_<N>.py` steht weiterhin nie in der Menge. Die bestehende
     Zusicherung aus `tests/test_worker_tick.py::test_parse_affected_files` gilt unverändert.
+
+    Ausschlusssätze zählen nicht (#79): In einem Absatz (Zeilen bis zur nächsten Leerzeile oder
+    Aufzählungszeile), der irgendwo „unberührt“, „nicht angefasst“, „nicht geändert“ oder am
+    Zeilenanfang „Keine andere Datei“ enthält, zählen alle Pfade nicht; ebenso in einer
+    Aufzählungszeile mit einem dieser Wörter. Planer schreiben so, was der Worker NICHT anfassen
+    darf. Absätze und Zeilen ohne diese Wörter verhalten sich wie bisher. Bleibt nichts übrig, ist
+    das Ergebnis die leere Menge — nicht None, denn die Sektion existiert.
     """
     sec = affected_files_section(issue_body)
     if sec is None or not sec.strip():
         return None
+
+    def _exclusion(text: str) -> bool:
+        """Ausschlusssatz: Ausschlusswort irgendwo oder „Keine andere Datei“ am Zeilenanfang."""
+        low = text.lower()
+        if any(w in low for w in _EXCLUSION_WORDS):
+            return True
+        return any(line.lstrip().startswith(_EXCLUSION_START) for line in low.splitlines())
+
+    def _excluded_lines(lines: list[str]) -> set[int]:
+        """Zeilennummern, die zu einem Ausschlussabsatz oder einer Ausschlusszeile gehören."""
+        excluded: set[int] = set()
+        i, n = 0, len(lines)
+        while i < n:
+            if not lines[i].strip():
+                i += 1
+                continue
+            if _BULLET_RE.match(lines[i]):
+                if _exclusion(lines[i]):
+                    excluded.add(i)
+                i += 1
+                continue
+            j = i
+            while j < n and lines[j].strip() and not _BULLET_RE.match(lines[j]):
+                j += 1
+            if _exclusion("\n".join(lines[i:j])):
+                excluded.update(range(i, j))
+            i = j
+        return excluded
+
+    lines = sec.split("\n")
+    excluded = _excluded_lines(lines)
     files: set[str] = set()
-    for m in _BACKTICK_RE.finditer(sec):
-        p = _path_candidate(m.group(1))
-        if p and not _ACCEPTANCE_PATH_RE.match(p):
-            files.add(p)
-    for line in sec.splitlines():
+    for idx, line in enumerate(lines):
+        if idx in excluded:
+            continue
+        for m in _BACKTICK_RE.finditer(line):
+            p = _path_candidate(m.group(1))
+            if p and not _ACCEPTANCE_PATH_RE.match(p):
+                files.add(p)
+    for idx, line in enumerate(lines):
+        if idx in excluded:
+            continue
         m = _BULLET_RE.match(line)
         if not m:
             continue

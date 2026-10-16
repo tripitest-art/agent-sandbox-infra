@@ -1060,6 +1060,33 @@ def test_parse_affected_files_endungslos_und_verzeichnis():
     assert w.parse_affected_files(body) == {"Dockerfile", "Makefile", "sandbox"}
 
 
+def test_parse_affected_files_ausschlusssatz_zaehlt_nicht():
+    # „Keine andere Datei … bleibt unberührt“ beschreibt, was NICHT angefasst wird (#79).
+    body = ("### Betroffene Dateien\n\n"
+            "- `sandbox/worker_tick.py`\n\n"
+            "Keine andere Datei ändert sich. `install.sh` und `projects.py` bleiben unberührt.\n")
+    assert w.parse_affected_files(body) == {"sandbox/worker_tick.py"}
+
+
+def test_parse_affected_files_ausschlusszeile_zaehlt_nicht():
+    body = ("### Betroffene Dateien\n"
+            "- `sandbox/a.py`\n"
+            "- `install.sh` bleibt unberührt\n"
+            "- `tests/test_a.py`\n")
+    assert w.parse_affected_files(body) == {"sandbox/a.py", "tests/test_a.py"}
+
+
+def test_parse_affected_files_nur_ausschluss_ist_leer_nicht_none():
+    # Die Sektion existiert; bleibt nichts übrig, ist das Ergebnis die leere Menge (#79).
+    body = "### Betroffene Dateien\n\n`install.sh` bleibt unberührt.\n"
+    assert w.parse_affected_files(body) == set()
+
+
+def test_parse_affected_files_prosa_ohne_ausschlusswort_zaehlt_weiter():
+    body = "### Betroffene Dateien\n- `a.py`\n\nZusätzlich wird `b.py` geändert.\n"
+    assert w.parse_affected_files(body) == {"a.py", "b.py"}
+
+
 def test_projects_example_hat_hotspot_fuer_dieses_repo():
     data = json.loads((REPO_ROOT / "sandbox" / "projects.example.json").read_text(encoding="utf-8"))
     infra = next(p for p in data["projects"] if p["name"] == "agent-sandbox-infra")
@@ -1141,6 +1168,85 @@ def test_issue_job_skips_file_overlap(monkeypatch):
     key, task, pr_no, sha = w.issue_job()
     assert key == "issue202"
     assert "Du setzt Issue #202 um" in task
+
+
+def _fake_gh_aktiv_und_kandidaten(active_issue, candidates):
+    def fake_gh(*args):
+        if args[:2] == ("issue", "list"):
+            if "in-arbeit" in args:
+                return [active_issue]
+            return candidates
+        if args[:2] == ("issue", "edit"):
+            return None
+        raise AssertionError(f"unexpected gh: {args}")
+
+    return fake_gh
+
+
+def test_issue_job_ignoriert_ausgeschlossene_dateien_bei_kollision(monkeypatch):
+    """Regel 8: Eine ausdrücklich ausgeschlossene Datei belegt nichts (#79).
+
+    Das aktive Issue schließt `install.sh` ausdrücklich aus. Ein Kandidat, der `install.sh`
+    wirklich ändert, darf deshalb nicht als Kollision übersprungen werden und muss vor dem
+    sauberen Kandidaten zum Zug kommen.
+    """
+    active_issue = {
+        "number": 300,
+        "title": "Rekordbox Phase 1",
+        "labels": [{"name": "in-arbeit"}],
+        "author": {"login": "tripitest-art"},
+        "body": ("### Betroffene Dateien\n\n- `sc_digger/rekordbox.py`\n\n"
+                 "Keine andere Datei ändert sich. `install.sh` bleibt unberührt.\n"),
+    }
+    candidate_install = {
+        "number": 301,
+        "title": "Install-Schritt",
+        "labels": [{"name": "bereit"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `install.sh`\n",
+    }
+    candidate_clean = {
+        "number": 302,
+        "title": "Quality check",
+        "labels": [{"name": "bereit"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `sc_digger/quality.py`\n",
+    }
+
+    monkeypatch.setattr(w, "gh", _fake_gh_aktiv_und_kandidaten(active_issue, [candidate_install, candidate_clean]))
+    key, task, pr_no, sha = w.issue_job()
+    assert key == "issue301"
+    assert "Du setzt Issue #301 um" in task
+
+
+def test_issue_job_kollidiert_bei_echt_genannter_datei(monkeypatch):
+    """Regel 8: Wird dieselbe Datei wirklich genannt, bleibt es bei der Kollision (#79)."""
+    active_issue = {
+        "number": 400,
+        "title": "Install Phase 1",
+        "labels": [{"name": "in-arbeit"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `install.sh`\n",
+    }
+    candidate_install = {
+        "number": 401,
+        "title": "Install Phase 2",
+        "labels": [{"name": "bereit"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `install.sh`\n",
+    }
+    candidate_clean = {
+        "number": 402,
+        "title": "Quality check",
+        "labels": [{"name": "bereit"}],
+        "author": {"login": "tripitest-art"},
+        "body": "### Betroffene Dateien\n- `sc_digger/quality.py`\n",
+    }
+
+    monkeypatch.setattr(w, "gh", _fake_gh_aktiv_und_kandidaten(active_issue, [candidate_install, candidate_clean]))
+    key, task, pr_no, sha = w.issue_job()
+    assert key == "issue402"
+    assert "Du setzt Issue #402 um" in task
 
 
 def test_prepare_workdir_creates_worktree(monkeypatch, tmp_path):
