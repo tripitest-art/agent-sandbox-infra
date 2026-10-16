@@ -37,6 +37,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py liegt daneben
@@ -113,6 +114,13 @@ CLAIM_DIR = os.environ.get("CLAIM_DIR", "/var/lib/worker-claims")
 # weil claim_job keinen Zustand bekommt; der Takt ist ein kurzer Prozess je Auftrag.
 _CLAIM_WARNED: set[str] = set()
 
+# Audit-Log (#85): pro Ereignis eine JSON-Zeile, maschinell auswertbar — anders als der
+# Fließtext in /root/worker.log. audit() liest den Pfad bei jedem Aufruf aus diesem Modulglobal
+# neu, damit Tests ihn belegen können, und legt die Datei bei Bedarf an.
+AUDIT_LOG: str = os.environ.get("AUDIT_LOG", "/root/audit.jsonl")
+# Feldnamen, deren Wert nie im Klartext ins Audit-Log geht (Regel 5); Groß-/Kleinschreibung egal.
+_AUDIT_SECRET_KEYS = frozenset({"password", "secret", "api_key", "authorization", "token"})
+
 # Wie .github/scripts/acceptance_guard.py: Kommentare der Vorlage zählen nicht.
 _LINK_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b", re.I)
 _WORKER_LINE_RE = re.compile(r"^[\s>*_-]*Worker[*_]*\s*:[\s*_]*\w", re.I | re.M)
@@ -188,6 +196,27 @@ def redact(text: str, secrets: Iterable[str] | None = None) -> str:
 def log(msg: str) -> None:
     prefix = f" [{SLOT_TAG}]" if SLOT_TAG else ""
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}{prefix} {msg}", flush=True)
+
+
+def audit(event: str, **fields) -> None:
+    """Hängt eine JSON-Zeile an AUDIT_LOG: ts (UTC, ISO 8601), event, slot (WORKER_SLOT),
+    model (MODEL) und fields.
+
+    Nicht serialisierbare Werte gehen per `str()` hinein. Felder namens password, secret,
+    api_key, authorization oder token erscheinen als „***“ (Regel 5), alle anderen unverändert.
+    Der Pfad wird bei jedem Aufruf aus dem Modulglobal gelesen (#85). Wirft nie: scheitert das
+    Schreiben, kommt eine log()-Zeile „Audit-Log nicht schreibbar: <Fehlerklasse>“ — ohne den
+    Inhalt der Zeile, damit kein Geheimnis über die Fehlermeldung entweicht."""
+    try:
+        zeile: dict[str, object] = {"ts": datetime.now(timezone.utc).isoformat(),
+                                    "event": event, "slot": WORKER_SLOT, "model": MODEL}
+        for name, value in fields.items():
+            zeile[name] = "***" if name.lower() in _AUDIT_SECRET_KEYS else value
+        text = json.dumps(zeile, ensure_ascii=False, default=str)   # erst serialisieren, dann öffnen
+        with open(AUDIT_LOG, "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    except Exception as e:
+        log(f"Audit-Log nicht schreibbar: {type(e).__name__}")
 
 
 def alarm(skey: str, error: BaseException | str) -> None:
@@ -681,12 +710,16 @@ def active_in_progress_issues() -> list[dict] | None:
 def claim_issue(n: int) -> bool:
     """Wechselt die Labels `bereit` → `in-arbeit`.
 
-    True bei Erfolg. False, wenn der gh-Aufruf scheitert (Grund als erste stderr-Zeile im Log);
-    in diesem Fall bleibt das Issue unverändert.
+    True bei Erfolg; dann protokolliert audit() das Ereignis `issue_claimed` (#85). False, wenn
+    der gh-Aufruf scheitert (Grund als erste stderr-Zeile im Log); in diesem Fall bleibt das
+    Issue unverändert und es wird nichts ins Audit-Log geschrieben.
     """
     try:
         gh("issue", "edit", str(n), "--add-label", "in-arbeit", "--remove-label", "bereit")
         log(f"Issue #{n} erfolgreich auf 'in-arbeit' gesetzt.")
+        # Erst nach dem erfolgreichen gh-Aufruf ins Audit-Log (#85); scheitert er, gibt es
+        # nichts zu protokollieren (das Issue bleibt unverändert).
+        audit("issue_claimed", issue=n)
         return True
     except Exception as e:
         # Bei einem gescheiterten gh-Aufruf steht der Grund in stderr, nicht in der Exception.
