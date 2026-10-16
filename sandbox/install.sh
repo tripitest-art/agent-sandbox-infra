@@ -8,6 +8,7 @@
 #   AGENT=opencode bash …                              # OpenCode statt Qwen Code
 #   WAKE_PC=1 TAKT=30min bash …                        # PC bei Arbeit wecken, seltener schauen
 #   REVIEW_POST=1 bash …                               # Review-Takt postet, mergt, entblockt (bleibt bei späteren Läufen)
+#   SKIP_TESTS=1 bash …                                # schneller: ohne den Testlauf von sc-digger am Ende (nur Anzeige)
 #
 # Der GitHub-Zugang wird hier bewusst NICHT eingerichtet: den Token gibt Stephan selbst
 # verdeckt ein (README, Schritt 3). Das Skript prüft nur, ob er da ist.
@@ -513,7 +514,13 @@ elif curl -s -m 10 "$OLLAMA/api/tags" | grep -q "\"$MODEL"; then echo "Ollama: $
 else echo "Ollama: $MODEL nicht erreichbar (PC aus, Bildmodus oder Modell fehlt)"; fi
 # Nur zur Information: rote Tests der Projekte (oft fehlt in CT 112 nur ein Werkzeug) dürfen die
 # Einrichtung nicht abbrechen, sonst bleiben die Timer unberührt (set -e, pipefail).
-(cd "$REPO_DIR" && /root/venv/bin/python -m pytest -q 2>&1 | tail -1) || echo "(Tests von $REPO_DIR nicht grün, siehe oben; Einrichtung läuft weiter)"
+# SKIP_TESTS=1 überspringt den Lauf: Die Suite von sc-digger braucht auf CT 112 rund 5 Minuten (länger, wenn
+# Worker gleichzeitig arbeiten), und die Skripte und Timer sind an dieser Stelle schon installiert.
+if [ "${SKIP_TESTS:-0}" = 1 ]; then
+  echo "(Testlauf von $REPO_DIR übersprungen: SKIP_TESTS=1)"
+else
+  (cd "$REPO_DIR" && /root/venv/bin/python -m pytest -q 2>&1 | tail -1) || echo "(Tests von $REPO_DIR nicht grün, siehe oben; Einrichtung läuft weiter)"
+fi
 
 # Welche Timer laufen, hat der Abschnitt Taktgeber oben entschieden (ein Timer oder Slots).
 # Hier nur noch an/aus nach der Prüfung; nie zusätzlich qwen-worker.timer neben den Slots.

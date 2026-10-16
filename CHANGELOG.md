@@ -11,6 +11,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - AGENTS.md Regel 4: Merge-Modus „manuell“ bleibt Standard, „automatisch“ nur für PRs ohne Dateien aus `manual_paths` (braucht `freigabe-geschützt`, wirkt mit #122 und Serverkonfiguration) (#123).
 
 ### Hinzugefügt
+- `install.sh`: `SKIP_TESTS=1` überspringt den Testlauf von sc-digger am Ende (nur Anzeige, rund 5 Minuten) (#125).
 - `LICENSE` (MIT, Copyright (c) 2026 Stephan Voigt) und `SECURITY.md` mit dem vertraulichen Meldeweg für Sicherheitslücken (GitHub „Private vulnerability reporting“); dazu der README-Abschnitt „Lizenz und Sicherheit“ (#110).
 - Web-Dashboard `sandbox/dashboard.py` (nur lesend, SSE) als Ersatz fürs HA-Dashboard (#104).
 - `install.sh`: Worker-Takt (`TAKT`) und Review-Takt (`REVIEW_TAKT`) laufen standardmäßig alle 2 Minuten statt alle 5 und 10 (#109).
