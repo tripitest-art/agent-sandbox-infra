@@ -138,7 +138,7 @@ Die meiste manuelle Vorbereitungszeit fließt in das Ausformulieren präziser Sc
 | **Stufe 3** | Continuous Deployment (`./update.sh` zum Server) | ⭐⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 4** | Prime-Time- & Budget-Scheduling | ⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🔵 **Geplant** |
-| **Baustein** | Web-Dashboard als Ersatz fürs HA-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | 🟡 **Modul (#104), Dienst im Review**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |
+| **Baustein** | Web-Dashboard als Ersatz fürs HA-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | ✅ **Gemergt (#104, #105)**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |
 | **Baustein** | Mehrere Projekte (Projektliste, Infra-Repo als zweites Projekt) | ⭐⭐⭐⭐ | ✅ **Gemergt (#18, #19, #20)**; Inbetriebnahme auf dem Server: siehe [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) |
 
 ---
