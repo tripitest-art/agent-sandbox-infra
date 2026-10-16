@@ -101,3 +101,27 @@ ensure_projects() {   # klont fehlende Projekte, hält sie auf main und legt ihr
 project_workdirs() {   # nur die Klon-Ordner, je Zeile einer
   project_lines | cut -f3
 }
+
+# --- Ressourcenlimits je Worker-Slot --------------------------------------------------------------
+# Bis zu fünf Slots teilen sich einen Container; ohne Grenze zwischen ihnen reißt ein außer Kontrolle
+# geratener Lauf den RAM aller anderen mit (und Review und Webhook gleich mit). Die Grenzen landen
+# als MemoryMax/TasksMax/CPUQuota in qwen-worker@.service. Leer oder „none“ heißt kein Limit, damit
+# ein bestehender Betrieb sich nicht ändert. Die CPU-Grenze steht als reine Zahl (Prozent) in der
+# Einstellungsdatei, weil conf_save kein „%“ zulässt; das Prozentzeichen setzt slot_limit_lines.
+slot_limits_check() {   # prüft SLOT_MEMORY_MAX, SLOT_TASKS_MAX, SLOT_CPU_PERCENT; 1 bei Unsinn
+  local ok=0
+  [[ ${SLOT_MEMORY_MAX-} =~ ^([1-9][0-9]*[KMGT]?|none)?$ ]] \
+    || { echo "SLOT_MEMORY_MAX=${SLOT_MEMORY_MAX-} ist ungültig (z. B. 1200M, 2G oder none)." >&2; ok=1; }
+  [[ ${SLOT_TASKS_MAX-} =~ ^([1-9][0-9]*|none)?$ ]] \
+    || { echo "SLOT_TASKS_MAX=${SLOT_TASKS_MAX-} ist ungültig (Zahl >= 1 oder none)." >&2; ok=1; }
+  [[ ${SLOT_CPU_PERCENT-} =~ ^([1-9][0-9]*|none)?$ ]] \
+    || { echo "SLOT_CPU_PERCENT=${SLOT_CPU_PERCENT-} ist ungültig (Prozent als Zahl >= 1, z. B. 150, oder none)." >&2; ok=1; }
+  return $ok
+}
+
+slot_limit_lines() {   # Zeilen für den [Service]-Block; nichts für leere Einstellungen und „none“
+  [ -z "${SLOT_MEMORY_MAX-}" ] || [ "$SLOT_MEMORY_MAX" = none ] || echo "MemoryMax=$SLOT_MEMORY_MAX"
+  [ -z "${SLOT_TASKS_MAX-}" ] || [ "$SLOT_TASKS_MAX" = none ] || echo "TasksMax=$SLOT_TASKS_MAX"
+  [ -z "${SLOT_CPU_PERCENT-}" ] || [ "$SLOT_CPU_PERCENT" = none ] || echo "CPUQuota=$SLOT_CPU_PERCENT%"
+  return 0
+}
