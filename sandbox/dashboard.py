@@ -42,6 +42,7 @@ from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # Module liegen nebenan
 import dashboard_notify  # noqa: E402
+import dashboard_stats  # noqa: E402
 import ha_status  # noqa: E402
 import projects  # noqa: E402
 import qwen_webhook  # noqa: E402
@@ -77,14 +78,17 @@ def redact(text: str, env: dict | None = None) -> str:
 class LogBuffer:
     """Hält die letzten Log-Zeilen mit laufender Nummer; liest neue Zeilen nach."""
 
-    def __init__(self, path: str = LOG, limit: int = LOG_LINES):
+    def __init__(self, path: str = LOG, limit: int = LOG_LINES, stats=None):
         self.path = path
+        self.stats = stats
         self.lines: deque[tuple[int, str]] = deque(maxlen=limit)
         self.seq = 0
         self._lock = threading.Lock()
         self._poll_lock = threading.Lock()
         self._add(self._preload())
         self._follower = qwen_webhook.Follower(path)   # ab dem aktuellen Dateiende
+        if stats is not None and self._follower.fh:
+            stats.preload(path, self._follower.fh.tell())   # Statistik: weiter zurück, bis genau hierher
 
     def _preload(self) -> list[str]:
         try:
@@ -107,7 +111,11 @@ class LogBuffer:
 
     def poll(self) -> None:
         with self._poll_lock:   # mehrere SSE-Verbindungen teilen sich einen Follower
-            self._add(self._follower.poll())
+            new = self._follower.poll()
+            if self.stats is not None:
+                for ln in new:
+                    self.stats.feed(ln)
+            self._add(new)
 
     def since(self, seq: int) -> list[tuple[int, str]]:
         with self._lock:
@@ -292,6 +300,8 @@ class Dashboard:
         slots = qwen_webhook.read_slots(self.slot_dir, self.is_pid_alive)
         state = build_state(slots, status, veraltet, self.logbuf.stephan(), self.clock())
         state["schreiben"] = self.writer.enabled   # zeigt den „Limit ändern“-Knopf
+        stats = self.logbuf.stats
+        state["statistik"] = stats.snapshot(self.clock()) if stats is not None else None
         return state
 
     def frames(self, last_seq: int, last_state_json: str | None):
@@ -353,6 +363,7 @@ background:var(--card);color:var(--fg);cursor:pointer}
 <h2>Worker-Slots</h2><div class="grid" id="slots"></div>
 <h2>Braucht Stephan</h2><div id="stephan"></div>
 <h2>Projekte</h2><div class="table-wrap"><table id="projekte"></table></div>
+<h2>Reviews und Merges</h2><div class="table-wrap"><table id="statistik"></table></div>
 <h2>LiteLLM-Budgets</h2><div class="grid" id="budgets"></div>
 <h2>Log <label class="mut"><input type="checkbox" id="nur"> nur ⚠ Stephan</label></h2>
 <pre id="log"></pre>
@@ -361,6 +372,12 @@ const $=id=>document.getElementById(id);
 const el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
 const fmt=s=>s==null?"":(s>=3600?Math.floor(s/3600)+" h ":"")+Math.floor(s%3600/60)+" min";
 let logLines=[];
+function renderStat(st){const t=$("statistik");t.replaceChildren();if(!st)return;
+ const h=el("tr");["","Freigaben","Änderungen nötig","Quote","Gemergt","Merge-Fehler","An Stephan","Worker-Fehler"].forEach(x=>h.append(el("th",null,x)));t.append(h);
+ const row=(name,c)=>{const r=el("tr");r.append(el("td",null,name));
+  [c.freigegeben,c.aenderungen,c.quote==null?"–":c.quote+" %",c.gemergt,c.merge_fehler,c.an_stephan,c.worker_fehler].forEach(x=>r.append(el("td",null,x)));t.append(r)};
+ row("24 Stunden",st["24h"]);row("7 Tage",st["7d"]);
+ Object.entries(st.projekte).forEach(([n,c])=>row("7 Tage · "+n,c))}
 async function setBudget(alias,cur){
  const v=prompt("Neues Limit für "+alias+" in USD (jetzt "+cur+"):",cur);if(v===null)return;
  const num=Number(v.replace(",","."));if(!isFinite(num)||v.trim()===""){alert("Keine Zahl");return}
@@ -399,6 +416,7 @@ function render(s){
   if(p.fehler){const c=el("td",null,"Fehler: "+p.fehler);c.colSpan=7;r.append(c)}
   else[p.issues.bereit,p.issues["in-arbeit"],p.issues.blockiert,p.issues.entwurf,p.prs.offen,p.prs.rot,p.prs.laufend].forEach(x=>r.append(el("td",null,x)));
   t.append(r)});
+ renderStat(s.statistik);
  $("budgets").replaceChildren(...Object.entries(s.budgets).map(([k,b])=>{const d=el("div","card");
   d.append(el("b",null,k));
   if(s.schreiben&&b.max!=null){const bt=el("button",null,"Limit ändern");bt.onclick=()=>setBudget(k,b.max);d.append(" ",bt)}
@@ -503,7 +521,8 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
 
 
 def serve(bind: str = BIND, port: int = PORT) -> ThreadingHTTPServer:
-    dash = Dashboard(StatusCache(default_builder), LogBuffer(), writer=BudgetWriter())
+    stats = dashboard_stats.ReviewStats()
+    dash = Dashboard(StatusCache(default_builder), LogBuffer(stats=stats), writer=BudgetWriter())
     server = ThreadingHTTPServer((bind, port), make_handler(dash))
     server.daemon_threads = True
     notifier = dashboard_notify.Notifier()
