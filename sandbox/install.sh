@@ -64,14 +64,9 @@ REVIEW_TAKT=${REVIEW_TAKT:-10min}               # so oft sucht der Review-Takt e
 REVIEW_MODEL=${REVIEW_MODEL:-coder-glm}         # LiteLLM-Alias (GLM, andere Familie als der Worker)
 REVIEW_MODEL_BIG=${REVIEW_MODEL_BIG:-longctx-lite}   # für sehr große Diffs
 REVIEWER_NAME=${REVIEWER_NAME:-GLM}             # steht als „Reviewer: …“ im Review
-# Limits je Worker-Slot (install-lib.sh): leer oder none = kein Limit. Erst prüfen, dann merken.
-SLOT_MEMORY_MAX=${SLOT_MEMORY_MAX:-$(conf_get SLOT_MEMORY_MAX)}
-SLOT_TASKS_MAX=${SLOT_TASKS_MAX:-$(conf_get SLOT_TASKS_MAX)}
-SLOT_CPU_PERCENT=${SLOT_CPU_PERCENT:-$(conf_get SLOT_CPU_PERCENT)}
-slot_limits_check || { echo "Nichts gemerkt; Einstellung korrigieren oder die Zeile aus $CONF entfernen." >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 # Gleich merken, nicht erst am Ende: Bricht ein späterer Schritt ab, gilt der Wunsch beim nächsten Lauf trotzdem.
-( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS REVIEW_POST REVIEW_AUTO_MERGE SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT ) \
+( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS REVIEW_POST REVIEW_AUTO_MERGE ) \
   && echo "Einstellungen gemerkt ($CONF): MAX_WORKERS=$WORKERS_WANTED REVIEW_POST=$REVIEW_POST REVIEW_AUTO_MERGE=$REVIEW_AUTO_MERGE" \
   || echo "Warnung: Einstellungen konnten nicht gemerkt werden ($CONF)"
 # Alle LiteLLM-Aliase, die der Worker nutzen kann (Hauptmodell zuerst, ohne Doppelte)
@@ -243,7 +238,6 @@ Environment=WAKE_PC=$WAKE_PC
 Environment=LANG=C.UTF-8
 Environment=QWEN_CODE_SUPPRESS_YOLO_WARNING=1
 Environment=WORKER_SLOT=%i
-$(slot_limit_lines)
 ExecStart=/usr/bin/flock -n /run/qwen-worker-w%i.lock /usr/bin/python3 /root/worker_tick.py
 StandardOutput=append:/root/worker.log
 StandardError=append:/root/worker.log
