@@ -128,6 +128,7 @@ bash sandbox/install.sh
 Das Skript fragt fehlende Geheimnisse verdeckt ab (LiteLLM-Key → `/etc/qwen-worker.env`, Reviewer-Key → `/etc/qwen-reviewer.env`, Webhook-URL → `/etc/qwen-webhook.env`, Status-Webhook-URL → `/etc/ha-status.env`, alle Rechte `0600`) und richtet die systemd-Dienste ein:
 - Einstellungen wie `MAX_WORKERS=2`, `REVIEW_POST=1` und `REVIEW_AUTO_MERGE=1` werden dauerhaft in `/etc/agent-sandbox.conf` gespeichert.
 - Der Timer `ha-status.timer` startet `sandbox/ha_status.py` alle 2 Minuten über einen `ha-status.service` und meldet den Projektstand an die Webhook aus `HA_STATUS_URL` (in `/etc/ha-status.env`). Fehlt die URL, bleibt der Timer aus; Worker- und Review-Takt laufen davon unabhängig.
+- Der Dienst `agent-dashboard.service` startet das Web-Dashboard `sandbox/dashboard.py` (nur lesend, ohne Login). Er ist aus, bis `DASHBOARD=1 bash sandbox/install.sh` läuft; `DASHBOARD` und `DASHBOARD_PORT` (Standard 8099) merkt sich `/etc/agent-sandbox.conf`. Die Seite zeigt Slots, Projekt-Matrix, „braucht Stephan“, LiteLLM-Budgets und das Live-Log. Budgets liest er aus `/etc/ha-status.env` und `/etc/qwen-reviewer.env` (wie `ha-status`). Nur im LAN erreichbar machen, nie per Portfreigabe: es gibt keinen Login.
 
 ### 4. Home Assistant anbinden
 1. Webhook-IDs in Home Assistant `secrets.yaml` hinterlegen.
