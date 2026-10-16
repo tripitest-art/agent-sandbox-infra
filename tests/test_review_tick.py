@@ -295,6 +295,53 @@ def test_dry_run_sets_no_review_commit_status(monkeypatch):
     assert status == [] and "posted" not in calls
 
 
+def _cp_error(stderr):
+    return r.subprocess.CalledProcessError(1, "gh", stderr=stderr)
+
+
+def test_gh_http_status_liest_dreistelligen_code():
+    """gh nennt den HTTP-Status im stderr als „(HTTP <ddd>)“; nur die Zahl wird übernommen (Regel 5)."""
+    assert r.gh_http_status(_cp_error("gh: Resource not accessible by personal access token (HTTP 403)")) == 403
+    assert r.gh_http_status(_cp_error("gh: Not Found (HTTP 404)\n")) == 404
+    assert r.gh_http_status(_cp_error("gh: API rate limit exceeded (HTTP 429)")) == 429
+
+
+def test_gh_http_status_none_ohne_beleg():
+    """Ohne dreistelligen Code, ohne str-stderr oder bei fremder Ausnahme: None — und nie ein Text."""
+    assert r.gh_http_status(_cp_error("irgendein Fehler")) is None
+    assert r.gh_http_status(_cp_error("")) is None
+    assert r.gh_http_status(_cp_error(b"(HTTP 403)")) is None
+    assert r.gh_http_status(_cp_error(None)) is None
+    assert r.gh_http_status(_cp_error("(HTTP 99)")) is None
+    assert r.gh_http_status(_cp_error("(HTTP 600)")) is None
+    assert r.gh_http_status(_cp_error("(HTTP 1234)")) is None
+    assert r.gh_http_status(RuntimeError("(HTTP 403)")) is None
+
+
+def test_status_warnung_nennt_http_code(monkeypatch, capsys):
+    """Scheitert der Status mit HTTP-Code, nennt die Warnung den Code, aber nie den gh-Fehlertext."""
+    def gh_text(*args, **kw):
+        raise _cp_error("gh: Resource not accessible by personal access token (HTTP 403)")
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    assert r.post_review_status(SHA, r.VERDICTS[0]) is False
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: Status review für aaaaaaa nicht gesetzt (CalledProcessError, HTTP 403)" in out
+    assert "Resource not accessible" not in out
+
+
+def test_status_warnung_ohne_http_code_wie_bisher(monkeypatch, capsys):
+    """Ohne erkennbaren Code bleibt die Warnung wie bisher: nur der Ausnahmeklassenname."""
+    def gh_text(*args, **kw):
+        raise _cp_error("geheim-im-fehlertext")
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    assert r.post_review_status(SHA, r.VERDICTS[0]) is False
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: Status review für aaaaaaa nicht gesetzt (CalledProcessError)" in out
+    assert "HTTP" not in out and "geheim-im-fehlertext" not in out
+
+
 def test_red_check_needs_no_model_and_counts_a_round(monkeypatch, tmp_path):
     red = [dict(GOOD_CHECKS[0], conclusion="FAILURE")] + GOOD_CHECKS[1:]
     calls = _fake_github(monkeypatch, [_pr(statusCheckRollup=red)])
@@ -882,3 +929,59 @@ def test_multiline_gh_error_lands_single_line_in_the_log(monkeypatch, capsys):
     r.run_once()
     line = next(l for l in capsys.readouterr().out.splitlines() if "GitHub-Abfrage scheitert" in l)
     assert "⚠" not in line and "Stephan" not in line and "\t" not in line
+
+
+# --- Issue #121: PRs mit Label `review-anfordern` auch ohne Worker-Issue prüfen ---
+
+def _label_pr(**kw):
+    """PR wie die von Hand angelegten (#111/#114/#115): Branch ohne issue-<N>."""
+    return _pr(headRefName="feature/dashboard-budget", labels=[{"name": r.REVIEW_REQUEST_LABEL}], **kw)
+
+
+def test_label_pr_mit_roten_pflicht_checks_wird_ohne_modell_zu_aenderungen_noetig(monkeypatch, tmp_path):
+    red = [dict(GOOD_CHECKS[0], conclusion="FAILURE")] + GOOD_CHECKS[1:]
+    calls = _fake_github(monkeypatch, [_label_pr(statusCheckRollup=red)])
+    r.run_once()
+    assert "llm" not in calls                       # rote Pflicht-Checks brauchen kein Modell
+    text = next((tmp_path / "reviews").glob("pr7-*.md")).read_text(encoding="utf-8")
+    assert "**Änderungen nötig**" in text and "`tests` ist nicht grün" in text
+    assert json.loads((tmp_path / "state.json").read_text())["runden"] == {"7": 1}
+
+
+def test_label_pr_zaehlt_die_zweite_runde_wie_ein_worker_pr(monkeypatch, tmp_path):
+    red = [dict(GOOD_CHECKS[0], conclusion="FAILURE")] + GOOD_CHECKS[1:]
+    (tmp_path / "state.json").write_text(json.dumps({"runden": {"7": 1}}))
+    calls = _fake_github(monkeypatch, [_label_pr(statusCheckRollup=red)])
+    r.run_once()
+    assert "llm" not in calls
+    assert json.loads((tmp_path / "state.json").read_text())["runden"] == {"7": 2}
+
+
+def test_label_pr_ohne_worker_zeile_wird_nicht_geprueft(monkeypatch, capsys):
+    calls = _fake_github(monkeypatch, [_label_pr(body="Was und warum\n\nkein Worker-Hinweis\n")])
+    r.run_once()
+    assert "llm" not in calls and "Zeile „Worker: …“ fehlt im PR-Text" in capsys.readouterr().out
+
+
+def test_label_pr_wird_nie_gemergt_und_liegt_bei_stephan(monkeypatch, capsys):
+    """Ohne Worker-Issue gibt es keinen Vertrag und keinen automatischen Merge (Issue #121)."""
+    monkeypatch.setattr(r, "POST", True)
+    monkeypatch.setattr(r, "PROJECT_AUTO_MERGE", True)
+    calls = _fake_github(monkeypatch, [_label_pr()])
+    merged = []
+
+    def gh_text(*args, **kw):
+        if args[:2] == ("pr", "merge"):
+            merged.append(args[2])
+            return ""
+        if args[:2] == ("pr", "edit"):
+            return ""
+        if args[:2] == ("pr", "comment"):
+            return ""
+        return "diff --git a/a.py b/a.py\n+x\n"
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    r.run_once()
+    assert calls.get("posted") == [7]
+    assert merged == []                             # kein Merge ohne Issue, trotz auto_merge
+    assert "kein Worker-Issue" in capsys.readouterr().out

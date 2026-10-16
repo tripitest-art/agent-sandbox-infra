@@ -104,13 +104,16 @@ Voraussetzung ist der Vertrag aus sc-digger:
    ruleset → Import a ruleset). Der Import setzt `tests` und `acceptance-guard` als Pflicht-Checks voraus,
    die Workflows müssen also schon auf `main` liegen.
 4. **Server:** Eintrag in `/etc/agent-projects.json`, dann `bash sandbox/install.sh`.
-5. **Entscheidung `auto_merge`:** `false` für alles, was Betrieb, Server oder die Aufsicht selbst betrifft.
+5. **Entscheidung `auto_merge`:** `false` für alles, was Betrieb, Server oder die Aufsicht selbst betrifft;
+   bei gemischten Repositories `true` mit `manual_paths` für die Betriebs- und Aufsichtsdateien.
 
 ## Die Infrastruktur als Projekt: Sonderregeln
 
 Die Skripte steuern die Agenten, die sie ändern. Deshalb gilt (siehe `AGENTS.md`, Regeln 4 und 6):
 
-- `auto_merge: false`: Stephan prüft und mergt jeden PR.
+- `auto_merge: false`: Stephan prüft und mergt jeden PR. Mit `auto_merge: true` und `manual_paths`
+  (Dateimuster wie `sandbox/*`, `AGENTS.md`) mergt der Takt nur PRs ohne Treffer und nur bei „Merge-Modus:
+  automatisch“ im Issue; alle anderen gehen an Stephan.
 - Kein Agent deployt oder führt `install.sh`, `systemctl` oder Befehle auf dem Server aus. Ein Merge
   wirkt erst, wenn Stephan `git pull && bash sandbox/install.sh` ausführt.
 - Änderungen, die Review, Modellfamilien-Regel, `auto_merge`, Merge-Bedingungen oder `acceptance-guard`
