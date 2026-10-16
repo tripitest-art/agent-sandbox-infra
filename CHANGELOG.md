@@ -8,7 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Hinzugefügt
-- Doku: Backup und Wiederherstellung der Sandbox (`docs/backup.md`) (#PR).
+- Doku: Backup und Wiederherstellung der Sandbox (`docs/backup.md`) (#95).
 
 ### Geändert
 - Review-Takt: Pflicht-Checks kommen aus der Projektliste (`required_checks`), Vorgabe `tests` und `acceptance-guard`; sc-digger nennt CodeQL dort selbst (#78).
