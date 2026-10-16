@@ -1501,6 +1501,7 @@ def _lauf_mit_reihenfolge(monkeypatch, tmp_path, hook):
     monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
     monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
     monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
     monkeypatch.setattr(w, "check_issue_result", lambda k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: schritte.append("workdir"))
@@ -1730,6 +1731,7 @@ def test_main_meldet_absturz_der_auftragsausfuehrung(monkeypatch, capsys):
     monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
     monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
     monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "prepare_workdir", boom)
 
     assert w.main() == 0
@@ -1752,6 +1754,7 @@ def test_main_meldet_nur_die_erste_zeile(monkeypatch, capsys):
     monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
     monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
     monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "prepare_workdir", boom)
 
     assert w.main() == 0
@@ -1883,6 +1886,7 @@ def test_main_belegt_vor_dem_lauf_und_gibt_frei(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "pick_job", lambda state: ("issue59", "Auftrag", None, None))
     monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
     monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "prepare_workdir", lambda: None)
     gesehen = {}
 

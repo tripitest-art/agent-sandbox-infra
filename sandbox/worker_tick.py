@@ -277,7 +277,12 @@ def use_project(p: "projects.Project", first: bool) -> None:
 
 
 def gh(*args: str):
-    out = subprocess.run(["gh", *args, "--repo", REPO], capture_output=True, text=True, check=True, env=ENV)
+    try:
+        out = subprocess.run(["gh", *args, "--repo", REPO], capture_output=True, text=True, check=True, env=ENV)
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == 4 and "GH_TOKEN" in (getattr(exc, "stderr", None) or ""):
+            return None
+        raise
     text = out.stdout.strip()
     if not text:
         return None
