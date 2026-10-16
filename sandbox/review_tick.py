@@ -456,11 +456,33 @@ def review_status(verdict: str) -> tuple[str, str] | None:
     return None
 
 
+_HTTP_STATUS_RE = re.compile(r"\(HTTP (\d{3})\)")
+
+
+def gh_http_status(exc: BaseException) -> int | None:
+    """HTTP-Statuscode aus dem stderr einer fehlgeschlagenen gh-Abfrage.
+
+    Nur bei subprocess.CalledProcessError mit str-stderr, das „(HTTP <ddd>)“ enthält
+    (dreistellig, 100–599): der Code als int. In jedem anderen Fall None.
+    Gibt nie Text aus stderr zurück, nur die Zahl (Regel 5). Reine Funktion, kein Netz."""
+    if not isinstance(exc, subprocess.CalledProcessError):
+        return None
+    stderr = exc.stderr
+    if not isinstance(stderr, str):
+        return None
+    m = _HTTP_STATUS_RE.search(stderr)
+    if m is None:
+        return None
+    code = int(m.group(1))
+    return code if 100 <= code <= 599 else None
+
+
 def post_review_status(sha: str, verdict: str) -> bool:
     """Setzt den Commit-Status 'review' für `sha`: `gh api repos/<REPO>/statuses/<sha>` mit
     -f state=…, -f context=review, -f description=…. True, wenn gesetzt; ohne Status-Urteil
     (review_status -> None) False ohne Aufruf. Ein Fehler bricht den Takt nie ab: Log-Zeile
-    '⚠ Stephan: Status review für <sha[:7]> nicht gesetzt (<ExceptionName>)', Rückgabe False.
+    '⚠ Stephan: Status review für <sha[:7]> nicht gesetzt (<ExceptionName>)', kennt der Fehler
+    einen HTTP-Statuscode aus dem gh-stderr, zusätzlich ', HTTP <Code>'; Rückgabe False.
     Die Meldung enthält nie den Fehlertext von gh (Regel 5: keine Zugangsdaten in Logs)."""
     res = review_status(verdict)
     if res is None:
@@ -471,7 +493,9 @@ def post_review_status(sha: str, verdict: str) -> bool:
                 "-f", "context=review", "-f", f"description={description}", repo=False)
         return True
     except Exception as exc:   # ein Status darf den Takt nie abbrechen
-        log(f"⚠ Stephan: Status review für {sha[:7]} nicht gesetzt ({type(exc).__name__})")
+        code = gh_http_status(exc)
+        zusatz = f", HTTP {code}" if code is not None else ""
+        log(f"⚠ Stephan: Status review für {sha[:7]} nicht gesetzt ({type(exc).__name__}{zusatz})")
         return False
 
 

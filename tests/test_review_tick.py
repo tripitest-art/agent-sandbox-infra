@@ -295,6 +295,53 @@ def test_dry_run_sets_no_review_commit_status(monkeypatch):
     assert status == [] and "posted" not in calls
 
 
+def _cp_error(stderr):
+    return r.subprocess.CalledProcessError(1, "gh", stderr=stderr)
+
+
+def test_gh_http_status_liest_dreistelligen_code():
+    """gh nennt den HTTP-Status im stderr als „(HTTP <ddd>)“; nur die Zahl wird übernommen (Regel 5)."""
+    assert r.gh_http_status(_cp_error("gh: Resource not accessible by personal access token (HTTP 403)")) == 403
+    assert r.gh_http_status(_cp_error("gh: Not Found (HTTP 404)\n")) == 404
+    assert r.gh_http_status(_cp_error("gh: API rate limit exceeded (HTTP 429)")) == 429
+
+
+def test_gh_http_status_none_ohne_beleg():
+    """Ohne dreistelligen Code, ohne str-stderr oder bei fremder Ausnahme: None — und nie ein Text."""
+    assert r.gh_http_status(_cp_error("irgendein Fehler")) is None
+    assert r.gh_http_status(_cp_error("")) is None
+    assert r.gh_http_status(_cp_error(b"(HTTP 403)")) is None
+    assert r.gh_http_status(_cp_error(None)) is None
+    assert r.gh_http_status(_cp_error("(HTTP 99)")) is None
+    assert r.gh_http_status(_cp_error("(HTTP 600)")) is None
+    assert r.gh_http_status(_cp_error("(HTTP 1234)")) is None
+    assert r.gh_http_status(RuntimeError("(HTTP 403)")) is None
+
+
+def test_status_warnung_nennt_http_code(monkeypatch, capsys):
+    """Scheitert der Status mit HTTP-Code, nennt die Warnung den Code, aber nie den gh-Fehlertext."""
+    def gh_text(*args, **kw):
+        raise _cp_error("gh: Resource not accessible by personal access token (HTTP 403)")
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    assert r.post_review_status(SHA, r.VERDICTS[0]) is False
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: Status review für aaaaaaa nicht gesetzt (CalledProcessError, HTTP 403)" in out
+    assert "Resource not accessible" not in out
+
+
+def test_status_warnung_ohne_http_code_wie_bisher(monkeypatch, capsys):
+    """Ohne erkennbaren Code bleibt die Warnung wie bisher: nur der Ausnahmeklassenname."""
+    def gh_text(*args, **kw):
+        raise _cp_error("geheim-im-fehlertext")
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    assert r.post_review_status(SHA, r.VERDICTS[0]) is False
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: Status review für aaaaaaa nicht gesetzt (CalledProcessError)" in out
+    assert "HTTP" not in out and "geheim-im-fehlertext" not in out
+
+
 def test_red_check_needs_no_model_and_counts_a_round(monkeypatch, tmp_path):
     red = [dict(GOOD_CHECKS[0], conclusion="FAILURE")] + GOOD_CHECKS[1:]
     calls = _fake_github(monkeypatch, [_pr(statusCheckRollup=red)])
