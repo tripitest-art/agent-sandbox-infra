@@ -71,11 +71,15 @@ def _repo_workdir(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
     # #172: open_pr legt den PR nach dem Agentenlauf an. Nie im Test ins echte GitHub.
     monkeypatch.setattr(w, "open_pr", lambda n: True)
+    # #183: verwaiste_melden fragt GitHub (issue list, pr list). Im Test nie ins echte GitHub;
+    # Tests, die den Aufruf in main prüfen, setzen `_ECHTE_VERWAISTE_MELDEN` bzw. einen Recorder.
+    monkeypatch.setattr(w, "verwaiste_melden", lambda state, now=None: [])
 
 
 _ECHTE_GIT_HOOKS_DIR = w.git_hooks_dir    # vor dem Autouse-Fixture gesichert (#68)
 _ECHTE_PREPARE_ISSUE_BRANCH = w.prepare_issue_branch  # vor dem Autouse-Fixture gesichert (#171)
 _ECHTE_OPEN_PR = w.open_pr  # vor dem Autouse-Fixture gesichert (#172)
+_ECHTE_VERWAISTE_MELDEN = w.verwaiste_melden  # vor dem Autouse-Fixture gesichert (#183)
 
 
 def _good_body(issue_no=100):
@@ -2314,6 +2318,76 @@ def test_main_meldet_fehler_vor_der_auftragswahl(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "⚠ Stephan: -: Fehler: Zustandsdatei nicht lesbar" in out
     assert "Traceback" not in out
+
+
+def test_main_prueft_verwaiste_einmal_vor_der_auftragswahl(monkeypatch):
+    """#183: main meldet verwaiste Aufträge genau einmal je Lauf und vor der Auftragswahl."""
+    schritte = []
+
+    def merken(state, now=None):
+        schritte.append("verwaist")
+        return []
+
+    monkeypatch.setattr(w, "verwaiste_melden", merken)
+    monkeypatch.setattr(w, "load_state", lambda: {})
+    monkeypatch.setattr(w, "save_state", lambda state: None)
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: schritte.append("wahl") or None)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+
+    assert w.main() == 0
+    assert schritte == ["verwaist", "wahl"]
+
+
+def test_main_fuehrt_nach_fehler_der_verwaistenpruefung_weiter(monkeypatch, capsys):
+    """#183: Ein Fehler der Prüfung beendet den Lauf nicht; die Auftragswahl läuft danach."""
+    def kaputt(state, now=None):
+        raise RuntimeError("gh kaputt")
+
+    monkeypatch.setattr(w, "verwaiste_melden", kaputt)
+    monkeypatch.setattr(w, "load_state", lambda: {})
+    monkeypatch.setattr(w, "save_state", lambda state: None)
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    gewaehlt = []
+    monkeypatch.setattr(w, "pick_job", lambda state: gewaehlt.append(1) or None)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+
+    assert w.main() == 0
+    assert gewaehlt == [1]
+    out = capsys.readouterr().out
+    assert "Warnung: Prüfung auf verwaiste Aufträge fehlgeschlagen (RuntimeError)" in out
+    assert "⚠ Stephan:" not in out
+
+
+def test_main_meldet_verwaistes_issue_und_laesst_fremde_schluessel_stehen(monkeypatch, capsys):
+    """#183: Der echte Aufruf in main meldet ein altes `in-arbeit`-Issue und räumt nur `_verwaist:`."""
+    monkeypatch.setattr(w, "verwaiste_melden", _ECHTE_VERWAISTE_MELDEN)
+    monkeypatch.setattr(w, "WORKER_SLOT", "1")
+    state = {"_pc": "litellm", w.VERWAIST + "999": True, "issue7": {"versuche": 1}}
+    monkeypatch.setattr(w, "load_state", lambda: state)
+    monkeypatch.setattr(w, "save_state", lambda s: None)
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+
+    def fake_gh(*args):
+        if args[:2] == ("issue", "list"):
+            return [{"number": 274, "updatedAt": "2020-01-01T00:00:00Z"}]
+        if args[:2] == ("pr", "list"):
+            return []
+        raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
+
+    monkeypatch.setattr(w, "gh", fake_gh)
+    monkeypatch.setattr(w, "pick_job", lambda s: None)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+
+    assert w.main() == 0
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: -: Fehler: Issue #274 steht seit" in out
+    assert state[w.VERWAIST + "274"] is True
+    assert w.VERWAIST + "999" not in state
+    assert state["issue7"] == {"versuche": 1}
 
 
 # --- Gemeinsame Belegung der Nacharbeit (#59) ---

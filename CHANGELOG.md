@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `worker_tick`: Ein Issue, das seit mindestens 40 Minuten auf `in-arbeit` steht, ohne offenen PR auf seinem Branch und ohne lebende Belegung, meldet der erste Slot einmal als „⚠ Stephan:“-Zeile; der Merker `_verwaist:<N>` verschwindet, sobald das Issue nicht mehr verwaist ist, Labels bleiben unberührt (PR folgt).
 - Tests: `tests/conftest.py` setzt zusätzlich `AGENT_PROJECTS` auf eine Projektliste mit nicht vorhandenem Klonpfad. `worker_tick.main` setzt `WORKDIR` per `use_project()` aus der Projektliste neu; auf dem Server zeigte das auf einen echten Klon, `test_issue_38/39` waren rot und der Auto-Deploy rollte `609fb8c` zurück (PR folgt).
 - Tests: `tests/conftest.py` setzt zusätzlich `AGENT_SETTINGS` auf einen nicht vorhandenen Pfad. Auf dem Server steht in `/etc/agent-settings.json` ein anderes Worker-Modell (`coder-nvidia`); acht Tests (`test_worker_tick.py`, `test_issue_60`) waren dort rot und der Auto-Deploy rollte zurück (PR folgt).
 - Tests: `tests/conftest.py` setzt `WORKDIR` auf einen nicht vorhandenen Pfad. Auf dem Server gibt es den echten Worker-Klon; 13 ältere Tests (`test_issue_39/90/106/178`) liefen dort in `prepare_issue_branch` und der Auto-Deploy rollte `56f7582` zurück (PR folgt).
