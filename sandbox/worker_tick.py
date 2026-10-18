@@ -581,7 +581,7 @@ def build_pr_body(template: str, issue_no: int, worker: str, summary: str) -> st
 
     lines = []
     for line in body.splitlines():
-        if line.startswith("- [ ] `python -m pytest -q`"):
+        if line.startswith("- [ ] `python -m pytest -q` grün"):
             lines.append("- [x] " + line[len("- [ ] "):])
         elif line.startswith("- [ ] Akzeptanztests aus dem Issue zeichengenau"):
             lines.append("- [x] " + line[len("- [ ] "):])
@@ -591,9 +591,8 @@ def build_pr_body(template: str, issue_no: int, worker: str, summary: str) -> st
 
     missing: list[tuple[str, str]] = []
 
-    summary_clean = summary.strip()
-    closes_content = f"Closes #{issue_no}\n\n{summary_clean}" if summary_clean else f"Closes #{issue_no}"
-    closes_re = re.compile(r"^Closes\s*#\s*$", re.M)
+    closes_content = f"Closes #{issue_no}\n\n{summary.strip()}"
+    closes_re = re.compile(r"^Closes #$", re.M)
     if closes_re.search(body):
         body = closes_re.sub(closes_content, body, count=1)
     else:
@@ -1151,13 +1150,19 @@ def open_pr(n: int) -> bool:
     if offen:
         return True
 
+    if not os.path.isdir(WORKDIR):
+        log(f"issue{n}: Arbeitsverzeichnis fehlt, kein PR.")
+        return False
+
     res_count = subprocess.run(
         ["git", "rev-list", "--count", "origin/main..HEAD"],
         cwd=WORKDIR,
         env=ENV,
         check=True,
+        capture_output=True,
+        text=True,
     )
-    count_str = str(getattr(res_count, "stdout", "") or "").strip()
+    count_str = (res_count.stdout or "").strip()
     try:
         count = int(count_str)
     except ValueError:
@@ -1171,8 +1176,10 @@ def open_pr(n: int) -> bool:
         cwd=WORKDIR,
         env=ENV,
         check=False,
+        capture_output=True,
+        text=True,
     )
-    if getattr(res_push, "returncode", None) != 0:
+    if res_push.returncode != 0:
         alarm(f"issue{n}", "Push abgelehnt (Tests rot oder GitHub-Fehler)")
         return False
 
@@ -1181,13 +1188,14 @@ def open_pr(n: int) -> bool:
         cwd=WORKDIR,
         env=ENV,
         check=True,
+        capture_output=True,
+        text=True,
     )
-    raw_msgs = (getattr(res_log, "stdout", "") or "").split("\x00")
+    raw_msgs = (res_log.stdout or "").split("\x00")
     msgs = [m.strip() for m in raw_msgs[1:] if m.strip()]
     summary = "\n\n".join(msgs)
 
-    view = gh("issue", "view", str(n), "--json", "title")
-    title = view["title"] if isinstance(view, dict) and "title" in view else ""
+    title = gh("issue", "view", str(n), "--json", "title")["title"]
     body = build_pr_body(pr_template(), n, WORKER, summary)
     gh("pr", "create", "--title", title, "--body", body, "--head", branch)
     return True
@@ -2261,10 +2269,7 @@ def main() -> int:
         if state.pop(f"_apierr:{skey}", None) is not None:
             save_state(state)   # ein früherer Anbieterfehler ist vorbei
         if n is not None:
-            # #172 / #68: Gibt es WORKDIR nicht (gefaktes prepare_workdir in bestehenden Tests),
-            # entfällt das Anlegen des PRs.
-            if os.path.isdir(WORKDIR):
-                open_pr(n)
+            open_pr(n)
         # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
         if key.startswith("issue"):
             check_issue_result(key)

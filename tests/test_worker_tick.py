@@ -1824,6 +1824,62 @@ def test_main_behandelt_ausnahme_aus_open_pr(monkeypatch, tmp_path, capsys):
     assert "⚠ Stephan: issue7: Fehler: GitHub API kaputt" in out
 
 
+def test_open_pr_verwendet_capture_output_und_text(monkeypatch, tmp_path):
+    """#172: open_pr leitet git rev-list, push und log über capture_output und text um."""
+    monkeypatch.setattr(w, "open_pr", _ECHTE_OPEN_PR)
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    monkeypatch.setattr(w, "gh", lambda *args: [] if args[:2] == ("pr", "list")
+                        else {"title": "Titel"} if args[:2] == ("issue", "view")
+                        else "https://github.com/tripitest-art/agent-sandbox-infra/pull/1")
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((list(cmd), kw))
+        if "rev-list" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "2\n", "")
+        if "push" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "log" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "Akzeptanztests aus #7\n\x00Zusammenfassung\n\x00", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    assert w.open_pr(7) is True
+
+    assert len(calls) == 3
+    for cmd, kw in calls:
+        assert kw.get("capture_output") is True
+        assert kw.get("text") is True
+        assert kw.get("cwd") == str(tmp_path)
+
+
+def test_main_meldet_fehlendes_workdir_in_open_pr_und_prueft_ergebnis(monkeypatch, tmp_path, capsys):
+    """#172: Fehlt WORKDIR (z. B. gefaktes prepare_workdir), loggt open_pr und check_issue_result läuft weiter."""
+    monkeypatch.setattr(w, "open_pr", _ECHTE_OPEN_PR)
+    nicht_existierendes_workdir = str(tmp_path / "nicht_vorhanden")
+    monkeypatch.setattr(w, "WORKDIR", nicht_existierendes_workdir)
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: None)
+    monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
+    monkeypatch.setattr(w, "gh", lambda *args: [] if args[:2] == ("pr", "list") else {})
+
+    assert w.main() == 0
+    out = capsys.readouterr().out
+    assert "issue7: Arbeitsverzeichnis fehlt, kein PR." in out
+    assert "WARNUNG issue7: kein PR von feature/issue-7, Issue nicht erledigt." in out
+
+
 def test_push_regel_nur_im_issue_auftrag(monkeypatch):
     """#68: Der Auftrag für ein neues Issue nennt die Push-Sperre, die Nacharbeit nicht.
 
