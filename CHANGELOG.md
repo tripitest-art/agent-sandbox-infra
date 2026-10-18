@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- README: Regel-8-Dateikollisionsschutz auf tatsächliches Verhalten nach #32 aktualisiert (fail-closed, „unbekannt = blockieren“, Pfaderkennung, Logzeile beim Überspringen), Hotspot-Definition um `sandbox/worker_tick.py` für dieses Repo ergänzt und Review-Modell nach PR #57 auf einheitliches `coder-glm` korrigiert (#145).
 - `review_tick`: Scheitert der Commit-Status `review` mit HTTP 401/403/404/422/429, nennt die „⚠ Stephan“-Zeile zusätzlich einen festen Hinweis zur Ursache (bei 403: dem Token fehlt „Commit statuses: write“); nie Text aus dem gh-Fehler (#146).
 - Dashboard: `--notify-test` liest `/etc/agent-dashboard.env` selbst (kein `set -a` mehr nötig); bei einer Umleitung nennt die Meldung den Zielhost statt nur `HTTP 307` (#143).
 - `review_tick`: Ist die Reviewer-Antwort unbrauchbar (Token-Limit, kein Urteil, Zeichensalat, ungültige Muss/Kann-Zahlen), fragt der Takt im selben Lauf das andere der beiden eingestellten Modelle (`REVIEW_MODEL`/`REVIEW_MODEL_BIG`), sofern dessen Familie unabhängig vom Worker ist; erst wenn beide scheitern, zählt das als ein Fehlversuch. Ein Urteil ohne Sterne oder mit Satzzeichen wird ebenfalls gelesen (`normalize_verdict_line`), Reviewer-Zeile und Entwurf nennen das Modell, das wirklich geantwortet hat (#141).
