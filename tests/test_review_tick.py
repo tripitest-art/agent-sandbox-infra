@@ -131,6 +131,10 @@ def test_worker_family_and_same_family():
     assert r.model_family("Qwen3-Coder 30B") == "qwen"
     assert r.model_family("coder-fast (LiteLLM)") == "deepseek"   # so steht es bei unbekannten Aliasen im PR
     assert r.model_family("Codestral (LiteLLM coder-free)") == "mistral"
+    assert r.model_family("coder-nvidia") == "qwen"
+    assert r.model_family("coder-qwen") == "qwen"
+    assert r.model_family("longctx") == "gemini"
+    assert r.model_family("longctx-lite") == "gemini"
     assert r.model_family("unbekannt") is None
     assert r.worker_from_body("## X\n<!-- Worker: Kommentar -->\n**Worker:** Gemini Flash / Review: x") == "Gemini Flash"
     assert r.worker_from_body("kein Hinweis") is None
@@ -139,9 +143,12 @@ def test_worker_family_and_same_family():
 def test_worker_family_resolves_the_names_from_the_worker_table():
     assert r.worker_family("DeepSeek (LiteLLM coder-fast)") == "deepseek"
     assert r.worker_family("Codestral (LiteLLM coder-free)") == "mistral"
+    assert r.worker_family("Qwen 2.5 Coder (LiteLLM coder-nvidia, NVIDIA NIM)") == "qwen"
+    assert r.worker_family("Qwen 2.5 Coder (LiteLLM coder-qwen)") == "qwen"
     assert r.worker_family("Qwen3-Coder 30B") == "qwen"   # nicht in der Tabelle (BACKEND=ollama)
     assert r.worker_family("Rätselmodell 7") is None
     assert r.worker_family(None) is None and r.worker_family("") is None
+
 
 
 def test_model_family_is_only_called_by_the_family_checks():
