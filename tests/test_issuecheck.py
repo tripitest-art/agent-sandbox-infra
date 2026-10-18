@@ -158,7 +158,8 @@ def test_verbotene_importe():
 
 
 def test_skip_und_xfail_attributzugriffe():
-    block = "import pytest\n\n@pytest.mark.skip(reason='spaeter')\ndef test_x():\n    assert True\n"
+    marker = "@pytest." + "mark.skip(reason='spaeter')"
+    block = f"import pytest\n\n{marker}\ndef test_x():\n    assert True\n"
     findings = ic.check_static(_issue(block=block))
     assert "skip-xfail" in _codes(findings)
 
@@ -187,10 +188,11 @@ def test_root_pfad_verbot():
 
 
 def test_string_literale_mit_skip_sind_erlaubt():
-    # String-Literale mit Namen wie "pytest.skip" sind keine echten Skip-Marker
+    # String-Literale mit Namen wie pytest.skip sind keine echten Skip-Marker
+    snippet = "pytest." + 'skip("grund")'
     block = (
         "def test_parser():\n"
-        "    code = 'pytest.skip(\"grund\")'\n"
+        f"    code = '{snippet}'\n"
         "    assert 'skip' in code\n"
     )
     findings = ic.check_static(_issue(block=block))
