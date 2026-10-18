@@ -1384,18 +1384,73 @@ def job_done_anywhere(skey: str) -> bool:
     return os.path.exists(_claim_done_path(skey))
 
 
+def main_red_sha() -> str | None:
+    """Kurz-Hash (7 Zeichen) des Commits, auf dem der jüngste abgeschlossene Lauf des Workflows
+    `tests` auf `main` rot war; sonst None.
+
+    Rot ist nur conclusion == "failure". Erfolg, abgebrochen, übersprungen, leere Liste, None oder
+    ein Wert ohne die beiden Felder ergeben None. Wirft nie: scheitert der Aufruf, steht die Zeile
+    "Warnung: Zustand von main nicht abfragbar (<Klasse>)." im Log (nie der Text der Ausnahme,
+    Regel 5) und das Ergebnis ist None. Absichtlich nicht „unbekannt = blockieren“ wie bei
+    Regel 8: Ein defektes `gh run list` darf die Pipeline nicht stilllegen.
+    """
+    try:
+        runs = gh("run", "list", "--workflow", "tests", "--branch", "main",
+                  "--status", "completed", "--limit", "1", "--json", "conclusion,headSha")
+    except Exception as e:
+        log(f"Warnung: Zustand von main nicht abfragbar ({type(e).__name__}).")
+        return None
+    if not isinstance(runs, list) or not runs:
+        return None
+    run = runs[0]
+    if not isinstance(run, dict) or run.get("conclusion") != "failure":
+        return None
+    sha = run.get("headSha")
+    if not isinstance(sha, str) or not sha:
+        return None
+    return sha[:7]
+
+
+def main_is_red(state: dict) -> bool:
+    """True, wenn main_red_sha() einen Hash liefert.
+
+    Beim ersten Mal je Hash schreibt die Funktion eine Logzeile, die mit dem Zeitstempel und danach
+    "⚠ Stephan:" beginnt und den Hash und das Wort "main" enthält (Regel 7), und merkt den Hash im
+    Zustand unter dem Schlüssel f"_mainrot:{REPO}" (log_on_change, speichert den Zustand). Derselbe Hash
+    erzeugt keine weitere Zeile. Ist main nicht (mehr) rot, wird der Schlüssel gelöscht und der Zustand
+    gespeichert, sodass ein späteres Rot wieder gemeldet wird.
+    """
+    sha = main_red_sha()
+    key = f"_mainrot:{REPO}"
+    if not sha:
+        if state.pop(key, None) is not None:
+            save_state(state)
+        return False
+    log_on_change(state, key, sha,
+                  f"⚠ Stephan: Workflow tests ist auf main rot (Commit {sha}); keine neuen Issue-Aufträge.")
+    return True
+
+
 def find_job(state: dict):
     """Erster Auftrag, dessen Schlüssel weder geparkt noch von einem anderen Slot belegt oder
     erledigt ist, oder None.
 
     Ein liegengebliebener Auftrag darf den Takt und die weiteren Projekte nicht blockieren.
     Die Belegung gehört allen Slots zusammen (#59), sonst nahmen beide denselben Auftrag an.
+    Ist `main` rot, entfallen neue Issue-Aufträge: Ihre PRs wären ohne Schuld des Workers rot
+    (#168). Nacharbeit und PR-Text laufen weiter, denn eine Nacharbeit kann die Reparatur sein.
     """
     def skip(key: str) -> bool:
         skey = PREFIX + key
         return job_parked(state, key) or claimed_elsewhere(skey) or job_done_anywhere(skey)
 
-    return rework_job(project_done(state), skip) or text_fix_job(skip) or issue_job(skip)
+    job = rework_job(project_done(state), skip) or text_fix_job(skip)
+    if job:
+        return job
+    job = issue_job(skip)
+    if job and main_is_red(state):
+        return None
+    return job
 
 
 def pick_job(state: dict):

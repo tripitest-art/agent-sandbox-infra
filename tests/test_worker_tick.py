@@ -92,10 +92,12 @@ def _pr(number=103, branch="feature/issue-100-camelot-distance", commit="2026-09
 
 
 class FakeGH:
-    def __init__(self, prs=(), labels=("agent-qwen",), issues=(), active=(), fail_active=False):
+    def __init__(self, prs=(), labels=("agent-qwen",), issues=(), active=(), fail_active=False, runs=()):
         self.prs, self.labels, self.issues = list(prs), list(labels), list(issues)
         # Aktive Aufträge (Label `in-arbeit`) getrennt von den Kandidaten; in Tests meist leer.
         self.active, self.fail_active = list(active), fail_active
+        # #168: Die Prüfung auf einen roten `main` fragt `gh run list`; Vorgabe „main grün“.
+        self.runs = list(runs)
         self.calls = []
 
     def __call__(self, *args):
@@ -112,6 +114,8 @@ class FakeGH:
             return self.issues
         if args[:2] == ("issue", "edit"):
             return None
+        if args[:2] == ("run", "list"):
+            return self.runs
         raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
 
 
@@ -408,6 +412,8 @@ def test_geparkter_text_fix_blockiert_das_issue_nicht(monkeypatch, tmp_path):
             return [] if "in-arbeit" in args else [issue]
         if args[:2] == ("issue", "edit"):
             return None
+        if args[:2] == ("run", "list"):
+            return []
         raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
 
     monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
@@ -2208,4 +2214,22 @@ def test_main_meldet_rate_limit_je_slot_nur_einmal(monkeypatch, tmp_path, capsys
     monkeypatch.setattr(w, "gh", _rate_limit_gh())
     assert w.main() == 0
     assert capsys.readouterr().out.count("⚠ Stephan: -: Fehler: GitHub-Rate-Limit erreicht") == 1
+
+
+def test_main_startet_bei_rotem_main_keinen_agenten_und_meldet_einmal(monkeypatch, tmp_path, capsys):
+    """#168: Ein roter `tests`-Lauf auf main kostet keine Versuche; gemeldet wird je Commit einmal."""
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    fake = FakeGH(issues=[_issue()], runs=[{"conclusion": "failure", "headSha": "abcdef1234567890"}])
+    monkeypatch.setattr(w, "gh", fake)
+    monkeypatch.setattr(w, "ollama_free", lambda *a, **k: True)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: pytest.fail("Agent trotz rotem main gestartet"))
+
+    assert w.main() == 0
+    zeilen = [z for z in capsys.readouterr().out.splitlines() if "⚠ Stephan:" in z]
+    assert len(zeilen) == 1 and "abcdef1" in zeilen[0] and "main" in zeilen[0]
+    assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8")).get(
+        f"_mainrot:{w.REPO}") == "abcdef1"
+
+    assert w.main() == 0      # zweiter Lauf, derselbe rote Commit: keine zweite Zeile
+    assert [z for z in capsys.readouterr().out.splitlines() if "⚠ Stephan:" in z] == []
 
