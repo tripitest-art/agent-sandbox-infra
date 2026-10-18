@@ -38,6 +38,11 @@ def _isolated(monkeypatch, tmp_path):
     # der Statusbau (`default_builder`) in jedem Test durch einen Fake ersetzt wird.
     monkeypatch.setattr(d, "LOG", str(tmp_path / "worker.log"))
     monkeypatch.setattr(d, "SLOT_DIR", str(tmp_path / "slots"))
+    # Auch die Einstellungsdatei kommt nur aus tmp_path, nie vom Server.
+    monkeypatch.setenv("AGENT_SETTINGS", str(tmp_path / "agent-settings.json"))
+    monkeypatch.delenv("DASHBOARD_WRITE_TOKEN", raising=False)
+    for var in ("REVIEW_MAX_TOKENS", "REVIEW_LLM_TIMEOUT", "REVIEW_MODEL_BIG"):
+        monkeypatch.delenv(var, raising=False)
 
 
 def _slot(tmp_path, n, **data):
@@ -364,6 +369,42 @@ def test_antworten_und_state_enthalten_keine_geheimnisse(served):
     for text in texte:
         for geheim in (TOKEN, "sk-master-geheim", "sk-worker-geheim", "sk-review-geheim"):
             assert geheim not in text
+
+
+# --- Einstellungen ändern ----------------------------------------------------------------------
+
+def test_einstellungen_state_zeigt_knopf_nur_mit_schreiben(tmp_path):
+    (tmp_path / "agent-settings.json").write_text(json.dumps({"MAX_ROUNDS": 3}), encoding="utf-8")
+    dash = _dash(tmp_path)
+    e = dash.state()["einstellungen"]
+    assert e["schreiben"] is False
+    assert e["werte"]["MAX_ROUNDS"] == {"wert": 3, "quelle": "datei"}
+    assert 'if(e.schreiben){const b=el("button",null,"Ändern")' in d.PAGE
+    assert "gilt ab dem nächsten Takt" in d.PAGE
+    dash.settings_writer = d.SettingsWriter(env={"DASHBOARD_WRITE_TOKEN": TOKEN})
+    assert dash.state()["einstellungen"]["schreiben"] is True
+
+
+def test_settings_writer_braucht_nur_den_token():
+    assert d.SettingsWriter(env={"DASHBOARD_WRITE_TOKEN": TOKEN}).enabled
+    assert not d.SettingsWriter(env={}).enabled
+    assert not d.SettingsWriter(env={"DASHBOARD_WRITE_TOKEN": "kurz"}).enabled
+    assert d.SettingsWriter(env={"DASHBOARD_WRITE_TOKEN": TOKEN}).token_ok(TOKEN)
+    assert not d.SettingsWriter(env={"DASHBOARD_WRITE_TOKEN": TOKEN}).token_ok("falsch")
+
+
+def test_set_value_meldet_oserror_als_500_ohne_pfad(tmp_path, monkeypatch):
+    dash = _dash(tmp_path)
+    dash.settings_writer = d.SettingsWriter(env={"DASHBOARD_WRITE_TOKEN": TOKEN})
+
+    def kaputt(werte):
+        raise OSError("Permission denied: '/geheimer/pfad/agent-settings.json'")
+
+    monkeypatch.setattr(d.agent_settings, "save", kaputt)
+    with pytest.raises(d.BudgetError) as err:
+        dash.settings_writer.set_value("MAX_ROUNDS", 3)
+    assert err.value.status == 500
+    assert "OSError" in str(err.value) and "geheimer" not in str(err.value)
 
 
 # --- Push (dashboard_notify) --------------------------------------------------------------------

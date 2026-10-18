@@ -7,15 +7,18 @@ Issues, PRs, „braucht-stephan“ und LiteLLM-Budgets (`build_status`) und den 
 von `/root/worker.log`. Die Seite holt den Stand über Server-Sent-Events (`/events`).
 
 Endpunkte: `/` (Seite), `/api/state` (JSON), `/events` (SSE), `/healthz`,
-`POST /api/budget` (Limit eines LiteLLM-Keys ändern, nur mit Schreib-Token) und
-`POST /api/wake` (Takt sofort über den Wake-Listener starten, nur mit Schreib-Token).
+`POST /api/budget` (Limit eines LiteLLM-Keys ändern, nur mit Schreib-Token),
+`POST /api/settings` (unkritische Einstellung in `agent_settings`-Datei ändern, nur mit
+Schreib-Token) und `POST /api/wake` (Takt sofort über den Wake-Listener starten, nur mit
+Schreib-Token).
 
 Push-Meldungen über ntfy (`NTFY_URL`): siehe `dashboard_notify.py`.
 
-Ausnahmen vom „nur lesend“: das Budget-Limit und der Takt-Start. Für beides braucht der Dienst
-`DASHBOARD_WRITE_TOKEN`; das Budget zusätzlich `LITELLM_MASTER_KEY`, das Wecken
-`WAKE_PUBLISH_URL` (alle nur in `/etc/agent-dashboard.env`, Modus 600). Fehlt eines, ist die
-Funktion aus und die Seite zeigt keinen Knopf. Geändert wird nur `max_budget`.
+Ausnahmen vom „nur lesend“: das Budget-Limit, die Einstellungsdatei und der Takt-Start. Für alle
+drei braucht der Dienst `DASHBOARD_WRITE_TOKEN`; das Budget zusätzlich `LITELLM_MASTER_KEY`, das
+Wecken `WAKE_PUBLISH_URL` (alle nur in `/etc/agent-dashboard.env`, Modus 600). Fehlt eines, ist die
+Funktion aus und die Seite zeigt keinen Knopf. Geändert wird nur `max_budget` bzw. ein Wert aus der
+festen Liste in `agent_settings.SPECS`; Env-Dateien und Units bleiben unberührt.
 
 Kein Login: Der Dienst gehört ins LAN und nie hinter eine Portfreigabe. Deshalb liefert er
 nur aufbereitete Felder; Fehler erscheinen als Name der Exception-Klasse, Log-Zeilen laufen
@@ -45,6 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # Module liegen nebenan
+import agent_settings  # noqa: E402
 import dashboard_notify  # noqa: E402
 import dashboard_stats  # noqa: E402
 import projects  # noqa: E402
@@ -434,6 +438,37 @@ class BudgetWriter:
         return value
 
 
+class SettingsWriter:
+    """Schreibt einen Wert aus der festen Liste in die Einstellungsdatei (`agent_settings`).
+
+    Der Schreib-Token genügt; ein Master-Key ist nicht nötig. Geschrieben wird nur die Datei,
+    nie eine Env-Datei oder Unit. Fehlertexte nennen weder Token noch Pfad.
+    """
+
+    def __init__(self, env: dict | None = None):
+        env = dict(os.environ if env is None else env)
+        self.token = env.get("DASHBOARD_WRITE_TOKEN", "")
+        self.fail_delay = FAIL_DELAY
+
+    @property
+    def enabled(self) -> bool:
+        return len(self.token) >= MIN_TOKEN_LEN
+
+    def token_ok(self, supplied: str) -> bool:
+        return self.enabled and hmac.compare_digest(supplied.encode("utf-8"), self.token.encode("utf-8"))
+
+    def set_value(self, name: object, value: object):
+        """Prüft Name und Wert und ergänzt die Datei; Rückgabe ist der gesetzte Wert."""
+        try:
+            agent_settings.validate(name, value)
+            agent_settings.save({name: value})
+        except agent_settings.SettingError as exc:
+            raise BudgetError(str(exc)) from None
+        except OSError as exc:
+            raise BudgetError(f"Einstellungsdatei nicht schreibbar ({type(exc).__name__})", 500) from None
+        return value
+
+
 class WakeError(Exception):
     """Fehler beim Wecken; die Meldung ist für die Anzeige gedacht (nie URL oder Token)."""
 
@@ -571,6 +606,7 @@ class Dashboard:
         self.is_pid_alive, self.clock = is_pid_alive, clock
         self.writer = writer or BudgetWriter(env={})   # ohne Angabe: Ändern aus
         self.waker = waker or WakeSender(env={})       # ohne Angabe: Wecken aus
+        self.settings_writer = SettingsWriter()        # ohne Token in der Umgebung: Ändern aus
 
     def set_budget(self, alias: object, value: object) -> float:
         new = self.writer.set_budget(alias, value)
@@ -583,6 +619,13 @@ class Dashboard:
         state = build_state(slots, status, veraltet, self.logbuf.stephan(), self.clock())
         state["schreiben"] = self.writer.enabled   # zeigt den „Limit ändern“-Knopf
         state["wecken"] = self.waker.enabled       # zeigt den Knopf „Takt starten“
+        state["einstellungen"] = {
+            "schreiben": self.settings_writer.enabled,
+            "werte": agent_settings.aktuelle_werte(),
+            "spezifikation": {name: {k: v for k, v in spec.items()
+                                     if k in ("text", "min", "max", "erlaubt", "vorgabe")}
+                              for name, spec in agent_settings.SPECS.items()},
+        }
         stats = self.logbuf.stats
         state["statistik"] = stats.snapshot(self.clock()) if stats is not None else None
         return state
@@ -648,6 +691,8 @@ background:var(--card);color:var(--fg);cursor:pointer}
 <h2>Projekte</h2><div class="table-wrap"><table id="projekte"></table></div>
 <h2>Reviews und Merges</h2><div class="table-wrap"><table id="statistik"></table></div>
 <h2>LiteLLM-Budgets</h2><div class="grid" id="budgets"></div>
+<h2>Einstellungen <span class="mut">gilt ab dem nächsten Takt</span></h2>
+<div class="table-wrap"><table id="einstellungen"></table></div>
 <h2>Log <label class="mut"><input type="checkbox" id="nur"> nur ⚠ Stephan</label></h2>
 <pre id="log"></pre>
 <script>
@@ -681,6 +726,28 @@ async function wecken(){
  if(r.ok){try{sessionStorage.setItem("wt",tok)}catch(e){}alert("Takt gestartet")}
  else{if(r.status===403){try{sessionStorage.removeItem("wt")}catch(e){}}alert(j.fehler||"Fehler "+r.status)}
 }
+async function setSetting(name,cur,erlaubt){
+ const v=prompt("Neuer Wert für "+name+":",cur==null?"":cur);if(v===null)return;
+ let wert=v.trim();
+ if(!erlaubt){const num=Number(wert.replace(",","."));
+  if(wert===""||!isFinite(num)||!Number.isInteger(num)){alert("Wert muss eine ganze Zahl sein");return}
+  wert=num}
+ let tok="";try{tok=sessionStorage.getItem("wt")||""}catch(e){}
+ if(!tok){tok=prompt("Schreib-Token:")||"";if(!tok)return}
+ const r=await fetch("api/settings",{method:"POST",headers:{"Content-Type":"application/json","X-Dashboard-Token":tok},
+  body:JSON.stringify({name:name,value:wert})});
+ const j=await r.json().catch(()=>({}));
+ if(r.ok){try{sessionStorage.setItem("wt",tok)}catch(e){}alert("Einstellung "+j.name+" auf "+j.value+" gesetzt")}
+ else{if(r.status===403){try{sessionStorage.removeItem("wt")}catch(e){}}alert(j.fehler||"Fehler "+r.status)}
+}
+function renderEinstellungen(e){
+ const t=$("einstellungen");t.replaceChildren();
+ const h=el("tr");["Name","Beschreibung","Wert","Quelle",""].forEach(x=>h.append(el("th",null,x)));t.append(h);
+ Object.keys(e.werte).sort().forEach(n=>{const w=e.werte[n],sp=e.spezifikation[n]||{},r=el("tr");
+  r.append(el("td",null,n),el("td",null,sp.text||""),el("td",null,w.wert==null?"–":w.wert),el("td",null,w.quelle));
+  const c=el("td");
+  if(e.schreiben){const b=el("button",null,"Ändern");b.onclick=()=>setSetting(n,w.wert,!!sp.erlaubt);c.append(b)}
+  r.append(c);t.append(r)})}
 function renderWake(s){const b=$("wake");b.replaceChildren();if(!s.wecken)return;const t=el("button",null,"Takt starten");t.onclick=wecken;b.append(t)}
 function renderLog(){const l=$("log"),nur=$("nur").checked,
  stick=l.scrollTop+l.clientHeight>=l.scrollHeight-20;
@@ -711,6 +778,7 @@ function render(s){
   else[p.issues.bereit,p.issues["in-arbeit"],p.issues.blockiert,p.issues.entwurf,p.prs.offen,p.prs.rot,p.prs.laufend].forEach(x=>r.append(el("td",null,x)));
   t.append(r)});
  renderStat(s.statistik);
+ renderEinstellungen(s.einstellungen);
  $("budgets").replaceChildren(...Object.entries(s.budgets).map(([k,b])=>{const d=el("div","card");
   d.append(el("b",null,k));
   if(s.schreiben&&b.max!=null){const bt=el("button",null,"Limit ändern");bt.onclick=()=>setBudget(k,b.max);d.append(" ",bt)}
@@ -763,6 +831,9 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
             if path == "/api/wake":
                 self._wake()
                 return
+            if path == "/api/settings":
+                self._settings()
+                return
             if path != "/api/budget":
                 self._send(404, b"nicht gefunden", "text/plain; charset=utf-8")
                 return
@@ -795,6 +866,41 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
                 return
             print(f"dashboard: Budget-Limit {data['alias']} auf {value} gesetzt", flush=True)
             self._json(200, {"ok": True, "alias": data["alias"], "max_budget": value})
+
+        def _settings(self) -> None:
+            writer = dash.settings_writer
+            # Wie beim Budget: kein Login, aber der Header X-Dashboard-Token löst bei fremden
+            # Seiten einen Preflight aus, den dieser Dienst nie beantwortet (kein CORS).
+            if not writer.enabled:
+                self._json(403, {"fehler": "Einstellungen ändern ist nicht eingerichtet"})
+                return
+            if not writer.token_ok(self.headers.get("X-Dashboard-Token", "")):
+                time.sleep(writer.fail_delay)
+                print("dashboard: Einstellungen ändern mit falschem Token abgelehnt",
+                      file=sys.stderr, flush=True)
+                self._json(403, {"fehler": "Token falsch"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 1024:
+                    raise ValueError
+                data = json.loads(self.rfile.read(length).decode("utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError
+            except (ValueError, UnicodeDecodeError):
+                print("dashboard: Einstellung ändern fehlgeschlagen: Ungültige Anfrage",
+                      file=sys.stderr, flush=True)
+                self._json(400, {"fehler": "Ungültige Anfrage"})
+                return
+            try:
+                value = writer.set_value(data.get("name"), data.get("value"))
+            except BudgetError as exc:
+                print(f"dashboard: Einstellung ändern fehlgeschlagen: {exc}",
+                      file=sys.stderr, flush=True)
+                self._json(exc.status, {"fehler": str(exc)})
+                return
+            print(f"dashboard: Einstellung {data['name']} auf {value} gesetzt", flush=True)
+            self._json(200, {"ok": True, "name": data["name"], "value": value})
 
         def _wake(self) -> None:
             waker = dash.waker
