@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `worker_tick`: Branch und Akzeptanztest-Commit legt der Takt vor dem Agentenlauf an; der Auftragstext nennt den fertigen Branch und verlangt kein Kopieren mehr, fehlt der Akzeptanztest-Block im Issue, bricht der Takt mit Alarm ab (#184).
 - `worker_tick`: Ein LiteLLM-Ausfall über 20 Minuten erscheint im ersten Slot als einmalige „⚠ Stephan:“-Zeile („LiteLLM seit N Minuten nicht erreichbar; Worker und Review stehen“); die Rückkehr steht nach einem Alarm ohne „⚠“ im Log, ein kurzer Aussetzer bleibt still (#182).
 - `worker_tick`/`review_tick`: Das Audit-Log nennt die Modellkosten je Lauf (`run_started`/`run_finished`, `run_cost` aus der Spend-Differenz von `GET /key/info` — bei Überlappung mit einem anderen Slot als Obergrenze markiert) und je gepostetem Review (`review_posted` mit `kosten` aus `usage["cost"]`, Modellliste und Token-Zahlen) (#181).
 - `issuecheck`: Der Preflight-Akzeptanztest läuft in `tests/acceptance/` (falls vorhanden), wird auch bei Zeitüberschreitung gelöscht, und ein echter Sammlungsfehler (`ERROR collecting`) ist der Befund `sammlungsfehler` statt „valide und bereit“ (#179).

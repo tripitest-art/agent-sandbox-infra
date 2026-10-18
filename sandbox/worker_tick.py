@@ -38,6 +38,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py liegt daneben
@@ -943,6 +944,123 @@ def issue_branch(n: int) -> str:
     return f"feature/issue-{n}"
 
 
+_ACCEPTANCE_HEADING_RE = re.compile(r"^(#{1,6})\s*(.*?)\s*#*\s*$")
+_ACCEPTANCE_FENCE_RE = re.compile(r"^(`{3,}|~{3,})[^\n]*\n(.*?)\n?^\1[ \t]*$", re.M | re.S)
+
+
+def _normalize_acceptance_code(code: str) -> str:
+    """Zeilenenden und Leerraum am Zeilen-/Dateiende sind keine inhaltliche Änderung."""
+    lines = [ln.rstrip() for ln in code.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return "\n".join(lines).strip("\n")
+
+
+def acceptance_block(issue_body: str | None) -> str | None:
+    """Code-Block unter der Überschrift „Akzeptanztests“ oder None.
+
+    Für jeden Text (auch None und leer) dasselbe Ergebnis wie
+    extract_acceptance_block in .github/scripts/acceptance_guard.py. Der Takt kann diese Datei nicht
+    importieren (Deploy-Klon und Projekt-Klone liegen getrennt), also steht die Regel hier noch einmal;
+    ein Test vergleicht beide."""
+    lines = (issue_body or "").replace("\r\n", "\n").split("\n")
+    start = level = None
+    for i, line in enumerate(lines):
+        m = _ACCEPTANCE_HEADING_RE.match(line)
+        if m and m.group(2).lower().startswith("akzeptanztests"):
+            start, level = i + 1, len(m.group(1))
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    in_fence = False
+    for i in range(start, len(lines)):
+        if re.match(r"^(`{3,}|~{3,})", lines[i]):
+            in_fence = not in_fence
+        m = None if in_fence else _ACCEPTANCE_HEADING_RE.match(lines[i])
+        if m and len(m.group(1)) <= level:
+            end = i
+            break
+    section = "\n".join(lines[start:end])
+    fence = _ACCEPTANCE_FENCE_RE.search(section)
+    if not fence:
+        return None
+    code = _normalize_acceptance_code(fence.group(2))
+    return code or None
+
+
+def prepare_issue_branch(n: int) -> bool:
+    """Legt in WORKDIR den Branch issue_branch(n) an und sichert den Akzeptanztest als eigenen Commit.
+
+    Holt das Issue mit gh("issue", "view", str(n), "--json", "body") (Feld "body"); liefert
+    acceptance_block(...) None, ist das Ergebnis False und es lief kein git-Befehl.
+
+    Sonst, jeweils mit cwd=WORKDIR, env=ENV, check=True (nur die zwei rev-parse mit check=False),
+    in genau dieser Reihenfolge:
+      1. ["git", "fetch", "-q", "origin"]
+      2. ["git", "rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}"]
+      3. nur wenn 2. Exit != 0: ["git", "rev-parse", "--verify", "-q", f"refs/heads/{branch}"]
+      4. Checkout, je nach Fund:
+         - Zweig auf origin vorhanden: ["git", "checkout", "-q", "-B", branch, f"origin/{branch}"]
+         - sonst lokaler Zweig vorhanden: ["git", "checkout", "-q", branch]
+         - sonst: ["git", "checkout", "-q", "-B", branch, "origin/main"]
+      5. Die Datei tests/acceptance/test_issue_<n>.py (Ordner wird bei Bedarf angelegt) bekommt als Inhalt
+         den Block plus ein abschließendes "\\n" (UTF-8, Zeilenenden LF, auch unter Windows). Hat sie diesen
+         Inhalt Byte für Byte schon, folgt nichts mehr.
+         Sonst: ["git", "add", "tests/acceptance/test_issue_<n>.py"], dann
+         ["git", "commit", "-q", "-m", f"Akzeptanztests aus #{n}"].
+    Ergebnis True. branch ist issue_branch(n). Ein Fehler eines Befehls (CalledProcessError) wird nicht
+    gefangen; main() meldet ihn wie jeden anderen Fehler."""
+    data = gh("issue", "view", str(n), "--json", "body")
+    body = (data or {}).get("body") if isinstance(data, dict) else None
+    block = acceptance_block(body)
+    if block is None:
+        return False
+
+    branch = issue_branch(n)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=WORKDIR, env=ENV, check=True)
+    res_remote = subprocess.run(
+        ["git", "rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}"],
+        cwd=WORKDIR,
+        env=ENV,
+        check=False,
+    )
+    if res_remote.returncode == 0:
+        subprocess.run(["git", "checkout", "-q", "-B", branch, f"origin/{branch}"],
+                       cwd=WORKDIR, env=ENV, check=True)
+    else:
+        res_local = subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", f"refs/heads/{branch}"],
+            cwd=WORKDIR,
+            env=ENV,
+            check=False,
+        )
+        if res_local.returncode == 0:
+            subprocess.run(["git", "checkout", "-q", branch],
+                           cwd=WORKDIR, env=ENV, check=True)
+        else:
+            subprocess.run(["git", "checkout", "-q", "-B", branch, "origin/main"],
+                           cwd=WORKDIR, env=ENV, check=True)
+
+    datei_rel = f"tests/acceptance/test_issue_{n}.py"
+    datei_abs = Path(WORKDIR) / datei_rel
+    erwarteter_inhalt = (block + "\n").encode("utf-8")
+
+    schon_da = False
+    if datei_abs.exists():
+        try:
+            schon_da = datei_abs.read_bytes() == erwarteter_inhalt
+        except OSError:
+            schon_da = False
+
+    if not schon_da:
+        datei_abs.parent.mkdir(parents=True, exist_ok=True)
+        datei_abs.write_bytes(erwarteter_inhalt)
+        subprocess.run(["git", "add", datei_rel], cwd=WORKDIR, env=ENV, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", f"Akzeptanztests aus #{n}"],
+                       cwd=WORKDIR, env=ENV, check=True)
+
+    return True
+
+
 def issue_job(skip: Callable[[str], bool] | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
 
@@ -1031,11 +1149,8 @@ def issue_job(skip: Callable[[str], bool] | None = None):
 Das Issue steht unten; es ist der Vertrag. Gehe genau diese Schritte durch und führe jeden als Befehl aus:
 
 1. `gh issue edit {n} --add-label in-arbeit --remove-label bereit`
-2. `git checkout -b {branch}` (du bist auf main; ab jetzt nur auf diesem Branch arbeiten).
-3. Kopiere den Code-Block unter „### Akzeptanztests“ zeichengenau nach
-   tests/acceptance/test_issue_{n}.py, dann
-   `git add tests/acceptance/test_issue_{n}.py && git commit -m "Akzeptanztests aus #{n}"`.
-   Diese Datei danach nie mehr ändern.
+2. Der Takt hat den Branch {branch} ausgecheckt und den Akzeptanztest bereits als Commit gesichert.
+3. Die Datei tests/acceptance/test_issue_{n}.py darf der Agent nie ändern.
 4. Setze das Issue um, nur in den Dateien unter „### Betroffene Dateien“. Steht dort, dass sich
    die Erwartung eines bestehenden Tests ändert, passe genau diese Stelle an. Ergänze die Tests
    aus „### Fertig, wenn“.
@@ -1952,6 +2067,13 @@ def main() -> int:
         # Jeder Lauf startet auf sauberem main; Reste eines abgebrochenen Laufs stören sonst.
         prepare_workdir()
         ensure_pre_push_hook()   # #68: vor dem Agenten, damit schon sein erster Push geprüft wird
+        if n is not None:
+            # #171 / #68: Gibt es WORKDIR nicht (gefaktes prepare_workdir in bestehenden Tests),
+            # entfällt die Vorbereitung des Branches vor dem Agentenlauf.
+            if os.path.isdir(WORKDIR) and not prepare_issue_branch(n):
+                alarm(skey, "Akzeptanztest-Block im Issue nicht lesbar")
+                slot_status("idle", project=PROJECT)
+                return 0
 
         prompt = (f"{task}\n\n"
                   "WICHTIGE REGELN FÜR DIESEN LAUF:\n"
