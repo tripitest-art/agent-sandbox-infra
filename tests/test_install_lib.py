@@ -361,3 +361,62 @@ def test_unit_kopie_unter_systemd_nennt_die_slot_limits():
     # Auskommentiert: ohne Einstellung gilt weiter kein Limit.
     zeilen = [z for z in unit.splitlines() if z.startswith(("MemoryMax=", "TasksMax=", "CPUQuota="))]
     assert zeilen == []
+
+
+# ---- Logrotation für worker.log und audit.jsonl (#169) ----
+
+LOGROTATE_VORGABE = [
+    "/root/worker.log /root/audit.jsonl {",
+    "    size 50M",
+    "    rotate 4",
+    "    compress",
+    "    delaycompress",
+    "    copytruncate",
+    "    missingok",
+    "    notifempty",
+    "}",
+]
+
+
+def logrotate_step():
+    """Der neue Schritt aus install.sh, vom Echo bis zur Meldungszeile."""
+    return install_sh_slice(
+        'echo "== Logrotation"',
+        'echo "Logrotation: $LOGROTATE_DIR/agent-sandbox '
+        '(size ${LOG_ROTATE_SIZE:-50M}, 4 Rotationen)"')
+
+
+def test_logrotate_conf_gibt_die_vorgabe_aus(tmp_path):
+    r = sh("logrotate_conf", tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == LOGROTATE_VORGABE
+
+
+def test_logrotate_conf_uebernimmt_nur_die_groesse(tmp_path):
+    r = sh("LOG_ROTATE_SIZE=200M; logrotate_conf", tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == [z.replace("50M", "200M") for z in LOGROTATE_VORGABE]
+
+
+def test_logrotate_conf_lehnt_ungueltige_groesse_ab(tmp_path):
+    r = sh("LOG_ROTATE_SIZE=viel; logrotate_conf", tmp_path)
+    assert r.returncode != 0
+    assert r.stdout == ""
+    assert "LOG_ROTATE_SIZE=viel" in r.stderr
+
+
+def test_logrotate_schritt_schreibt_die_datei_ins_ziel(tmp_path):
+    ziel = tmp_path / "logrotate.d"
+    r = sh(logrotate_step(), tmp_path, LOGROTATE_DIR=str(ziel))
+    assert r.returncode == 0, r.stderr
+    datei = ziel / "agent-sandbox"
+    assert datei.read_text().splitlines() == LOGROTATE_VORGABE
+    assert stat.S_IMODE(datei.stat().st_mode) == 0o644
+    assert "Logrotation:" in r.stdout
+
+
+def test_logrotate_schritt_bricht_bei_ungueltiger_groesse_ab(tmp_path):
+    ziel = tmp_path / "logrotate.d"
+    r = sh(logrotate_step(), tmp_path, LOGROTATE_DIR=str(ziel), LOG_ROTATE_SIZE="viel")
+    assert r.returncode != 0
+    assert not (ziel / "agent-sandbox").exists()

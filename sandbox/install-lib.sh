@@ -125,3 +125,24 @@ slot_limit_lines() {   # Zeilen für den [Service]-Block; nichts für leere Eins
   [ -z "${SLOT_CPU_PERCENT-}" ] || [ "$SLOT_CPU_PERCENT" = none ] || echo "CPUQuota=$SLOT_CPU_PERCENT%"
   return 0
 }
+
+# --- Logrotation ---------------------------------------------------------------------------------
+# worker.log (alle Takte) und audit.jsonl wachsen ohne Grenze; das Dashboard liest beim Start nur das
+# Ende der Datei, die Platte des Containers ist klein. copytruncate ist nötig, weil systemd
+# worker.log über StandardOutput=append: offen hält und ein Umbenennen nicht mitbekäme.
+logrotate_conf() {   # gibt die logrotate-Einstellung auf stdout aus; $LOG_ROTATE_SIZE (Vorgabe 50M)
+  local size=${LOG_ROTATE_SIZE:-50M}
+  [[ $size =~ ^[1-9][0-9]*[kMG]$ ]] \
+    || { echo "LOG_ROTATE_SIZE=$size ist ungültig (Zahl >= 1 mit k, M oder G, z. B. 50M)." >&2; return 1; }
+  cat <<CONF
+/root/worker.log /root/audit.jsonl {
+    size $size
+    rotate 4
+    compress
+    delaycompress
+    copytruncate
+    missingok
+    notifempty
+}
+CONF
+}

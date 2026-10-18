@@ -96,7 +96,7 @@ LITELLM_ALL=$(printf '%s\n' "$LITELLM_MODEL" ${LITELLM_FALLBACKS//,/ } | awk 'NF
 echo "== Pakete"
 apt-get update -qq
 apt-get install -y -qq git curl ca-certificates python3 python3-venv python3-pip ffmpeg \
-  libsndfile1 libchromaprint-tools tmux >/dev/null   # tmux: install.sh übersteht geschlossene Konsole
+  libsndfile1 libchromaprint-tools tmux logrotate >/dev/null   # tmux: install.sh übersteht geschlossene Konsole
 # gh aus dem Paketarchiv von GitHub, nicht von Debian: Debians 2.23 fragt bei `gh pr edit` und
 # `gh pr view` noch „Projects (classic)“ ab und bricht mit einem GraphQL-Fehler ab. Qwen hielt
 # das für Erfolg; der PR-Text von #103 kam zweimal nicht an.
@@ -108,6 +108,16 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubc
   > /etc/apt/sources.list.d/github-cli.list
 apt-get update -qq
 apt-get install -y -qq gh >/dev/null
+
+echo "== Logrotation"
+# worker.log und audit.jsonl wachsen ohne Grenze (Platte: 21 GB), das Dashboard liest nur das Ende.
+# LOGROTATE_DIR überschreibt das Ziel nur in Tests, damit kein Lauf nach /etc schreibt (wie UNIT_DIR).
+LOGROTATE_DIR=${LOGROTATE_DIR:-/etc/logrotate.d}
+logrotate_text=$(logrotate_conf)
+install -d -m 755 "$LOGROTATE_DIR"
+printf '%s\n' "$logrotate_text" > "$LOGROTATE_DIR/agent-sandbox"
+chmod 644 "$LOGROTATE_DIR/agent-sandbox"
+echo "Logrotation: $LOGROTATE_DIR/agent-sandbox (size ${LOG_ROTATE_SIZE:-50M}, 4 Rotationen)"
 
 echo "== Repo und Python-Umgebung"
 git config --global user.name >/dev/null || git config --global user.name "Stephan (Sandbox-Agent)"
