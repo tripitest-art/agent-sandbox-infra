@@ -2715,3 +2715,172 @@ def test_main_startet_bei_rotem_main_keinen_agenten_und_meldet_einmal(monkeypatc
     assert w.main() == 0      # zweiter Lauf, derselbe rote Commit: keine zweite Zeile
     assert [z for z in capsys.readouterr().out.splitlines() if "⚠ Stephan:" in z] == []
 
+
+# ---- #187: Parkmarken erledigter Aufträge räumen, übersprungene Kandidaten in der Telemetrie ----
+
+
+def _kandidat(nummer, dateien=None):
+    """Issue-Kandidat; ohne `dateien` fehlt die belegte Dateiliste (Regel 8 nicht beurteilbar)."""
+    body = "### Ziel\n\nEtwas.\n\n"
+    if dateien is not None:
+        body += "### Betroffene Dateien\n\n" + "".join(f"- `{d}`\n" for d in dateien)
+    return {"number": nummer, "title": f"Issue {nummer}", "body": body,
+            "author": {"login": "tripitest-art"}, "labels": [{"name": "bereit"}]}
+
+
+def _aktiver_auftrag(nummer=300, dateien=("sandbox/worker_tick.py",)):
+    body = "### Betroffene Dateien\n\n" + "".join(f"- `{d}`\n" for d in dateien)
+    return {"number": nummer, "title": f"Aktiv {nummer}", "body": body,
+            "author": {"login": "tripitest-art"}, "labels": [{"name": "in-arbeit"}]}
+
+
+@pytest.mark.parametrize("skey, aufruf, zustand, offen", [
+    ("pr277@2026-10-14T09:12:00Z", ("pr", "view", "277", "--json", "state"), "MERGED", False),
+    ("pr277@2026-10-14T09:12:00Z", ("pr", "view", "277", "--json", "state"), "CLOSED", False),
+    ("pr277@2026-10-14T09:12:00Z", ("pr", "view", "277", "--json", "state"), "OPEN", True),
+    ("text42@abc1234", ("pr", "view", "42", "--json", "state"), "CLOSED", False),
+    ("issue14", ("issue", "view", "14", "--json", "state"), "CLOSED", False),
+    ("issue14", ("issue", "view", "14", "--json", "state"), "OPEN", True),
+])
+def test_job_still_open_fragt_pr_bzw_issue(monkeypatch, skey, aufruf, zustand, offen):
+    calls = []
+
+    def fake_gh(*args, repo=None):
+        calls.append((args, repo))
+        return {"state": zustand}
+
+    monkeypatch.setattr(w, "gh", fake_gh)
+    assert w.job_still_open(skey) is offen
+    assert calls == [(aufruf, w.REPO)]
+
+
+def test_job_still_open_waehlt_repository_ueber_projektvorsatz(monkeypatch):
+    """Der Zustandsschlüssel `db/pr1@abc` gehört zum Projekt `db`, nicht zum aktiven Projekt."""
+    db = w.projects.Project(name="db", repo="tripitest-art/db", workdir="/root/db")
+    monkeypatch.setattr(w, "PROJECTS", [w.PROJECTS[0], db])
+    calls = []
+
+    def fake_gh(*args, repo=None):
+        calls.append((args, repo))
+        return {"state": "MERGED"}
+
+    monkeypatch.setattr(w, "gh", fake_gh)
+    assert w.job_still_open("db/pr1@abc") is False
+    assert calls == [(("pr", "view", "1", "--json", "state"), "tripitest-art/db")]
+    # Unbekannter Vorsatz: Repository unklar, also nichts aufräumen und niemanden fragen.
+    assert w.job_still_open("fremd/pr1@abc") is True
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("skey", ["vorgang17", "pr", "pr277", "issue17@abc", "main"])
+def test_job_still_open_laesst_unbekanntes_format_offen(monkeypatch, skey):
+    monkeypatch.setattr(w, "gh", lambda *a, **k: pytest.fail(f"gh gefragt für {skey}"))
+    assert w.job_still_open(skey) is True
+
+
+def test_job_still_open_bleibt_bei_gh_fehler_offen(monkeypatch):
+    """Netz weg, Rate-Limit: im Zweifel geparkt lassen (Regel 7), nicht die Marke verlieren."""
+    def kaputt(*args, **kwargs):
+        raise RuntimeError("gh nicht erreichbar")
+
+    monkeypatch.setattr(w, "gh", kaputt)
+    assert w.job_still_open("pr277@abc") is True
+
+
+@pytest.mark.parametrize("antwort", [None, [], "OPEN", {"state": ""}, {"state": "UNKNOWN"}])
+def test_job_still_open_bleibt_bei_unlesbarer_antwort_offen(monkeypatch, antwort):
+    monkeypatch.setattr(w, "gh", lambda *a, **k: antwort)
+    assert w.job_still_open("pr277@abc") is True
+
+
+def test_issue_job_sammelt_gruende_der_uebersprungenen_kandidaten(monkeypatch):
+    """#187: Die Gründe stehen bisher nur im Log; die Telemetrie soll sie im Leerlauf nennen."""
+    monkeypatch.setattr(w, "gh", FakeGH(
+        active=[_aktiver_auftrag()],
+        issues=[_kandidat(329, ["sandbox/worker_tick.py"]), _kandidat(330),
+                _kandidat(331, ["sandbox/review_tick.py"])]))
+    key, task, _, _ = w.issue_job()
+    assert key == "issue331" and "Du setzt Issue #331 um" in task
+    assert w.SKIPPED == [
+        "#329: Datei-Kollision mit aktivem Auftrag auf sandbox/worker_tick.py",
+        "#330: keine belegte Dateiliste",
+    ]
+
+
+def test_issue_job_nennt_hotspot_konflikt(monkeypatch):
+    monkeypatch.setattr(w, "gh", FakeGH(
+        active=[_aktiver_auftrag(300, ["sc_digger/main.py"])],
+        issues=[_kandidat(349, ["sc_digger/main.py"]), _kandidat(350, ["sc_digger/quality.py"])]))
+    key, _, _, _ = w.issue_job()
+    assert key == "issue350"
+    assert w.SKIPPED == [
+        "#349: berührt sc_digger/main.py, während bereits ein Auftrag an sc_digger/main.py in Arbeit ist",
+    ]
+
+
+def test_issue_job_leert_uebersprungene_je_aufruf(monkeypatch):
+    """Ein Lauf ohne Kandidaten darf die Gründe des vorigen Laufs nicht weiterreichen."""
+    monkeypatch.setattr(w, "gh", FakeGH(active=[_aktiver_auftrag()],
+                                        issues=[_kandidat(329, ["sandbox/worker_tick.py"])]))
+    assert w.issue_job() is None
+    assert w.SKIPPED == ["#329: Datei-Kollision mit aktivem Auftrag auf sandbox/worker_tick.py"]
+    monkeypatch.setattr(w, "gh", FakeGH())
+    assert w.issue_job() is None
+    assert w.SKIPPED == []
+
+
+def test_main_entfernt_parkmarke_erledigter_auftraege(monkeypatch, tmp_path, capsys):
+    """#187: PR 277 war längst gemergt, der Slot meldete trotzdem ewig „wartet auf Stephan“."""
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"pr277@abc": w.MAX_TRIES, "_park:pr277@abc": "geparkt"}))
+    monkeypatch.setattr(w, "STATE", str(state))
+    leer = FakeGH()
+
+    def fake_gh(*args, repo=None):
+        if args[:2] == ("pr", "view"):
+            return {"state": "MERGED"}
+        return leer(*args)
+
+    monkeypatch.setattr(w, "gh", fake_gh)
+    monkeypatch.setattr(w, "SLOT_DIR", str(tmp_path / "slots"))
+    assert w.main() == 0
+    danach = json.loads(state.read_text(encoding="utf-8"))
+    assert "pr277@abc" not in danach and "_park:pr277@abc" not in danach
+    assert "pr277@abc: erledigt, Parkmarke entfernt." in capsys.readouterr().out
+    data = json.loads(Path(w.SLOT_DIR, "slot-1.json").read_text(encoding="utf-8"))
+    assert data["status"] == "idle" and data["message"] == "Warte auf nächsten Takt"
+
+
+def test_main_behaelt_parkmarke_offener_auftraege(monkeypatch, tmp_path, capsys):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"issue14": w.MAX_TRIES, "_park:issue14": "geparkt"}))
+    monkeypatch.setattr(w, "STATE", str(state))
+    leer = FakeGH()
+
+    def fake_gh(*args, repo=None):
+        if args[:2] == ("issue", "view"):
+            return {"state": "OPEN"}
+        return leer(*args)
+
+    monkeypatch.setattr(w, "gh", fake_gh)
+    monkeypatch.setattr(w, "SLOT_DIR", str(tmp_path / "slots"))
+    assert w.main() == 0
+    danach = json.loads(state.read_text(encoding="utf-8"))
+    assert danach["_park:issue14"] == "geparkt" and danach["issue14"] == w.MAX_TRIES
+    assert "Parkmarke entfernt" not in capsys.readouterr().out
+    data = json.loads(Path(w.SLOT_DIR, "slot-1.json").read_text(encoding="utf-8"))
+    assert data["message"] == "issue14: wartet auf Stephan"
+
+
+def test_main_nennt_uebersprungene_kandidaten_in_der_slot_telemetrie(monkeypatch, tmp_path):
+    """#187: Ohne Job nur „Warte auf nächsten Takt“ verdeckte, dass Regel 8 den Kandidaten hielt."""
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "gh", FakeGH(active=[_aktiver_auftrag()],
+                                        issues=[_kandidat(329, ["sandbox/worker_tick.py"])]))
+    monkeypatch.setattr(w, "SLOT_DIR", str(tmp_path / "slots"))
+    assert w.main() == 0
+    data = json.loads(Path(w.SLOT_DIR, "slot-1.json").read_text(encoding="utf-8"))
+    assert data["status"] == "idle"
+    assert data["message"] == (
+        "Übersprungen (1): #329: Datei-Kollision mit aktivem Auftrag auf sandbox/worker_tick.py")
+
