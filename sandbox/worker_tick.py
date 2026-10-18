@@ -113,6 +113,9 @@ LAST_PC, LAST_WORK = "_pc", "_arbeit"
 # (`/root/worker-state-w<N>.json`), nur die Belegung gehört allen zusammen. Ohne sie nahmen beide
 # Slots denselben Nacharbeits-Auftrag an (15.10.: sc-digger pr287 um 10:36 in w1 und w2).
 CLAIM_DIR = os.environ.get("CLAIM_DIR", "/var/lib/worker-claims")
+# Ab diesem Alter räumt cleanup_claims() auf (#170). Bewusst lang: Eine .done-Marke verhindert
+# sonst, dass dieselbe Nacharbeit in einem anderen Slot erneut anläuft (#59).
+CLAIM_MAX_AGE_DAYS = 30
 # Verzeichnisse, für die claim_job schon eine „⚠ Stephan:“-Zeile geschrieben hat. Eigener Merker,
 # weil claim_job keinen Zustand bekommt; der Takt ist ein kurzer Prozess je Auftrag.
 _CLAIM_WARNED: set[str] = set()
@@ -1311,6 +1314,43 @@ def _pid_alive(pid: int | None) -> bool:
     return True
 
 
+def cleanup_claims(max_age_days: int = CLAIM_MAX_AGE_DAYS, now: float | None = None) -> int:
+    """Löscht in CLAIM_DIR veraltete Dateien und gibt zurück, wie viele es waren.
+
+    Gelöscht wird eine Datei, deren Änderungszeit mehr als max_age_days Tage vor `now` liegt
+    (`now` in Sekunden seit der Epoche; Vorgabe time.time()), und zwar nur:
+    - eine Datei mit Endung `.done`, immer;
+    - eine Datei mit Endung `.claim`, wenn ihr Besitzer nicht mehr lebt: die PID in der Datei ist
+      nicht lesbar oder `_pid_alive(pid)` ist False. Eine alte `.claim`-Datei eines lebenden
+      Prozesses bleibt.
+    Alles andere bleibt: Dateien mit anderer Endung, Unterverzeichnisse, junge Dateien.
+    Fehlt CLAIM_DIR, ist das Ergebnis 0 und das Verzeichnis wird nicht angelegt. Schlägt das Löschen
+    einer Datei mit OSError fehl, wird sie übersprungen und nicht mitgezählt. Wirft nie.
+    """
+    jetzt = time.time() if now is None else now
+    grenze = jetzt - max_age_days * 86400
+    entfernt = 0
+    try:
+        eintraege = list(os.scandir(CLAIM_DIR))
+    except OSError:
+        return 0
+    for eintrag in eintraege:
+        try:
+            if not eintrag.is_file() or eintrag.stat().st_mtime >= grenze:
+                continue
+            if eintrag.name.endswith(".claim"):
+                pid = _claim_owner(eintrag.path)
+                if pid is not None and _pid_alive(pid):
+                    continue
+            elif not eintrag.name.endswith(".done"):
+                continue
+            os.remove(eintrag.path)
+            entfernt += 1
+        except OSError:
+            continue            # gesperrt oder inzwischen weg: nicht zählen, Lauf nicht abbrechen
+    return entfernt
+
+
 def claimed_elsewhere(skey: str) -> bool:
     """True, wenn ein anderer lebender Prozess den Auftrag belegt hat (#59).
 
@@ -1633,6 +1673,10 @@ def main() -> int:
     skey = "-"          # Regel 7: vor der Auftragswahl meldet der Takt „-“
     gh_fehler = False   # True: der Lauf endete in der Ausnahmebehandlung, _gherr bleibt gemerkt
     try:
+        # #170: einmal je Lauf veraltete Belegungen aufräumen, bevor Arbeit gewählt wird.
+        aufgeraeumt = cleanup_claims()
+        if aufgeraeumt:
+            log(f"{aufgeraeumt} alte Belegungsdateien aufgeräumt.")
         state = load_state()
         if BACKEND != "litellm" and WORKER_SLOT and WORKER_SLOT not in ("1", "w1", ""):
             log_on_change(state, LAST_PC, "ollama_single_slot",

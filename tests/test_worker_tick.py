@@ -1648,6 +1648,26 @@ def test_main_writes_idle_when_no_work(monkeypatch, tmp_path):
     assert data["status"] == "idle" and data["message"] == "Warte auf nächsten Takt"
 
 
+@pytest.mark.parametrize("anzahl, zeile", [(0, False), (3, True)])
+def test_main_raeumt_belegungen_einmal_auf(monkeypatch, tmp_path, capsys, anzahl, zeile):
+    """#170: cleanup_claims läuft einmal je Lauf, auch ohne Arbeit; die Logzeile nur bei > 0."""
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "gh", FakeGH())
+    monkeypatch.setattr(w.urllib.request, "urlopen", _fake_urlopen([], PC_CHAT))
+    monkeypatch.setattr(w, "SLOT_DIR", str(tmp_path / "slots"))
+    aufrufe = []
+
+    def cleanup():
+        aufrufe.append(1)
+        return anzahl
+
+    monkeypatch.setattr(w, "cleanup_claims", cleanup)
+    assert w.main() == 0
+    out = capsys.readouterr().out
+    assert len(aufrufe) == 1
+    assert (f"{anzahl} alte Belegungsdateien aufgeräumt." in out) is zeile
+
+
 def test_main_writes_idle_when_waiting_for_stephan(monkeypatch, tmp_path):
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"issue102": w.MAX_TRIES}))
