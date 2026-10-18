@@ -954,6 +954,13 @@ def _run_pr_review() -> int:
 
     issue: dict | None = None
     no_model = False   # True: rote Checks, das Review kam ohne Modellaufruf zustande
+    # #178: Kosten je gepostetem Review. LiteLLM nennt sie als usage["cost"]; fehlt sie bei allen
+    # Aufrufen, bleibt kosten None. Ein Review ohne Modellaufruf (rote Checks) kostet 0.0, ein
+    # nachgeholter Entwurf None — bezahlt wurde der Lauf, der den Entwurf geschrieben hat.
+    kosten: list[float] = []
+    modelle: list[str] = []
+    letztes_modell: str | None = None
+    prompt_tokens = completion_tokens = 0
     draft = pending_draft(pr) if POST else None
     if draft:   # schon geprüft (REVIEW_POST=0), jetzt nur noch posten; die Runde ist bereits gezählt
         text, count_round = draft, False
@@ -1018,6 +1025,17 @@ def _run_pr_review() -> int:
                 except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
                     log(f"PR #{n}: Modell {model} antwortet nicht ({type(exc).__name__}), nächster Takt.")
                     return 0
+                # #178: Jeder Aufruf zählt, auch der unbrauchbare, der das Ausweichen auslöst.
+                modelle.append(model)
+                letztes_modell = model
+                if isinstance(usage, dict):
+                    wert = usage.get("cost")
+                    if isinstance(wert, (int, float)) and not isinstance(wert, bool):
+                        kosten.append(float(wert))
+                    if isinstance(usage.get("prompt_tokens"), int):
+                        prompt_tokens += usage["prompt_tokens"]
+                    if isinstance(usage.get("completion_tokens"), int):
+                        completion_tokens += usage["completion_tokens"]
                 raw = normalize_verdict_line(raw)
                 verdict, _, _, problem = parse_review(raw)
                 bad = suspicious_output(raw, usage)
@@ -1051,6 +1069,14 @@ def _run_pr_review() -> int:
     if POST:
         post_review(n, text)
         post_review_status(pr["headRefOid"], verdict)
+        # #178: Erst nach dem Posten steht fest, dass dieses Review Ausgaben verursacht hat.
+        # Ohne cost-Angabe bleibt kosten None; rote Checks ohne Aufruf kosten 0.0.
+        gesamt = round(sum(kosten), 8) if kosten else (0.0 if no_model else None)
+        worker_tick.audit("review_posted", slot="review", model=letztes_modell,
+                          active_model=letztes_modell, pr=n, projekt=REPO,
+                          urteil=verdict.strip("*"), kosten=gesamt, modelle=modelle,
+                          ohne_modell=no_model, prompt_tokens=prompt_tokens,
+                          completion_tokens=completion_tokens)
         state.setdefault("gepostet", []).append(key)
         del state["gepostet"][:-500]
         reviewer = NO_MODEL if no_model else reviewer_in_text(text)   # die Dashboard-Statistik zählt danach

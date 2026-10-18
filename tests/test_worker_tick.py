@@ -1848,6 +1848,55 @@ def test_claim_issue_scheitert_ohne_audit_eintrag(tmp_path, monkeypatch):
     assert not f.exists()
 
 
+# ---- Laufkosten: Überlappung und Abrechnung (#178) ----
+
+def _laeufe(*paare):
+    """Audit-Ereignisse aus (slot, start, ende)-Tripeln; `ende=None` heißt: läuft noch."""
+    ev = []
+    for slot, start, ende in paare:
+        ev.append({"ts": start, "event": "run_started", "slot": slot})
+        if ende is not None:
+            ev.append({"ts": ende, "event": "run_finished", "slot": slot})
+    return ev
+
+
+def test_run_overlap_zaehlt_beruehrende_raender_als_ueberlappung():
+    """Geschlossene Intervalle: Ein fremder Lauf, der genau am Start endet oder genau am Ende
+    beginnt, teilt sich den Abrechnungszeitraum mit dem eigenen (#178)."""
+    ende_davor = _laeufe(("1", "2026-10-18T09:00:00+00:00", "2026-10-18T10:00:00+00:00"))
+    start_danach = _laeufe(("1", "2026-10-18T10:00:00+00:00", "2026-10-18T10:30:00+00:00"))
+    assert w.run_overlap(ende_davor, "2", "2026-10-18T10:00:00+00:00", "2026-10-18T10:20:00+00:00") is True
+    assert w.run_overlap(start_danach, "2", "2026-10-18T09:30:00+00:00", "2026-10-18T10:00:00+00:00") is True
+    assert w.run_overlap(ende_davor, "2", "2026-10-18T10:00:01+00:00", "2026-10-18T10:20:00+00:00") is False
+
+
+def test_run_overlap_zaehlt_einen_offenen_fremden_lauf():
+    """Ohne run_finished gilt ein fremder Lauf als noch laufend; der eigene Slot zählt nie (#178)."""
+    offen = _laeufe(("1", "2026-10-18T09:00:00+00:00", None), ("2", "2026-10-18T09:00:00+00:00", None))
+    assert w.run_overlap(offen, "2", "2026-10-18T10:00:00+00:00", "2026-10-18T10:05:00+00:00") is True
+    assert w.run_overlap(offen[:1], "2", "2026-10-18T08:59:00+00:00", "2026-10-18T09:00:00+00:00") is True
+    assert w.run_overlap(offen[1:], "2", "2026-10-18T10:00:00+00:00", "2026-10-18T10:05:00+00:00") is False
+
+
+def test_settle_pending_ohne_slot_zaehlt_eigene_laeufe_nicht_als_parallel(tmp_path, monkeypatch):
+    """Fehlt `slot` in `_kosten_offen`, gilt der eigene Slot; sonst zählte der eigene Lauf als
+    Überlappung und die Kosten wären fälschlich eine Obergrenze (#178)."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(w, "AUDIT_LOG", str(f))
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "WORKER_SLOT", "2")
+    jetzt = datetime.now(w.timezone.utc)
+    start, ende = jetzt - timedelta(minutes=5), jetzt
+    w.audit("run_started", slot="2", ts=start.isoformat())
+    w.audit("run_finished", slot="2", ts=ende.isoformat())
+    state = {"_kosten_offen": {"key": "issue1", "spend_vorher": 2.0,
+                               "start": start.isoformat(), "ende": ende.isoformat()}}
+    assert w.settle_pending(state, {"spend": 2.5}) is True
+    z = _audit_zeilen(f)[-1]
+    assert z["event"] == "run_cost" and z["kosten"] == 0.5 and z["parallel"] is False
+    assert "_kosten_offen" not in state
+
+
 def test_alarm_hat_feste_form_und_klasse(capsys):
     """Regel 7: genau eine Zeile „⚠ Stephan: <skey>: <Klasse>: <Text>“."""
     w.alarm("pr103 @abc", ValueError("kaputt"))

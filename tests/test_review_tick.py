@@ -58,6 +58,8 @@ def _env(monkeypatch, tmp_path):
     # Servereinstellung REVIEW_POST=1/REVIEW_AUTO_MERGE=1: Vorgabe ist der Entwurfslauf ohne Merge.
     monkeypatch.setattr(r, "POST", False)
     monkeypatch.setattr(r, "AUTO_MERGE", True)
+    # #178: review_posted schreibt ins Audit-Log; je Test nach tmp_path, nie in /root/audit.jsonl.
+    monkeypatch.setattr(r.worker_tick, "AUDIT_LOG", str(tmp_path / "audit.jsonl"))
 
     def no_network(*a, **k):
         raise urllib.error.URLError("kein Netz im Test")
@@ -1027,6 +1029,21 @@ def test_draft_from_dry_run_is_posted_later_without_new_model_call(monkeypatch, 
     assert "ohne neuen Modellaufruf" in capsys.readouterr().out
     r.run_once()                                    # danach nichts mehr
     assert calls["posted"] == [7] and calls["llm"] == 1
+
+
+def test_entwurf_nachgeholt_meldet_kosten_none(monkeypatch, tmp_path):
+    """#178: Beim Posten eines Entwurfs fällt in diesem Takt kein Modellaufruf an; das Ereignis
+    nennt kosten None (nicht 0.0) — bezahlt wurde der Lauf, der den Entwurf geschrieben hat."""
+    calls = _github_with_merge(monkeypatch)
+    r.run_once()                                   # REVIEW_POST=0: nur Entwurf
+    monkeypatch.setattr(r, "POST", True)
+    r.run_once()
+    assert calls["posted"] == [7] and calls["llm"] == 1   # kein zweiter Modellaufruf
+    zeilen = [json.loads(z) for z in (tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    ev = [z for z in zeilen if z["event"] == "review_posted"]
+    assert len(ev) == 1
+    assert ev[0]["kosten"] is None and ev[0]["ohne_modell"] is False and ev[0]["modelle"] == []
+    assert ev[0]["pr"] == 7 and ev[0]["urteil"] == "Freigegeben"
 
 
 def test_draft_with_problem_is_not_reused(monkeypatch, tmp_path):

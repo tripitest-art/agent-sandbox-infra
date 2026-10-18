@@ -124,6 +124,9 @@ _CLAIM_WARNED: set[str] = set()
 # Fließtext in /root/worker.log. audit() liest den Pfad bei jedem Aufruf aus diesem Modulglobal
 # neu, damit Tests ihn belegen können, und legt die Datei bei Bedarf an.
 AUDIT_LOG: str = os.environ.get("AUDIT_LOG", "/root/audit.jsonl")
+# So viele Zeilen liest read_audit_tail() für run_overlap(): Beide Slots schreiben höchstens
+# wenige Ereignisse je Takt, 400 Zeilen decken die offene Laufzeit sicher ab (#178).
+AUDIT_TAIL_LINES = 400
 # Feldnamen, deren Wert nie im Klartext ins Audit-Log geht (Regel 5); Groß-/Kleinschreibung egal.
 _AUDIT_SECRET_KEYS = frozenset({"password", "secret", "api_key", "authorization", "token"})
 
@@ -229,6 +232,127 @@ def audit(event: str, **fields) -> None:
             fh.write(text + "\n")
     except Exception as e:
         log(f"Audit-Log nicht schreibbar: {type(e).__name__}")
+
+
+def spend_of(info) -> float | None:
+    """`info["spend"]` als float, wenn `info` ein dict mit einer Zahl (kein bool) ist, sonst None.
+
+    Reine Funktion. bool ist in Python eine Zahl, als Verbrauch aber unsinnig; ein fehlendes
+    oder unlesbares spend lässt den Lauf offen, statt Kosten zu raten (#178)."""
+    if not isinstance(info, Mapping):
+        return None
+    spend = info.get("spend")
+    if isinstance(spend, bool) or not isinstance(spend, (int, float)):
+        return None
+    return float(spend)
+
+
+def run_cost(vorher, nachher) -> float | None:
+    """nachher - vorher, auf sechs Stellen gerundet.
+
+    None, wenn einer der Werte keine Zahl (oder bool) ist oder nachher < vorher. Auf sechs
+    Stellen, weil LiteLLM sechs Nachkommastellen liefert; ohne Rundung stünde dort
+    0.19999999999999998 statt 0.2. Reine Funktion (#178)."""
+    for wert in (vorher, nachher):
+        if isinstance(wert, bool) or not isinstance(wert, (int, float)):
+            return None
+    if nachher < vorher:
+        return None
+    return round(float(nachher) - float(vorher), 6)
+
+
+def read_audit_tail(limit: int = AUDIT_TAIL_LINES) -> list[dict]:
+    """Die letzten `limit` Zeilen von AUDIT_LOG als dicts.
+
+    Kaputte Zeilen und Nicht-Objekte werden übersprungen, eine fehlende oder unlesbare Datei
+    ergibt []. Das Audit-Log ist Beiwerk: Sein Zustand darf den Takt nie aufhalten (#178)."""
+    try:
+        with open(AUDIT_LOG, encoding="utf-8") as fh:
+            zeilen = fh.readlines()
+    except OSError:
+        return []
+    ereignisse = []
+    for zeile in zeilen[-limit:]:
+        zeile = zeile.strip()
+        if not zeile:
+            continue
+        try:
+            wert = json.loads(zeile)
+        except ValueError:
+            continue
+        if isinstance(wert, dict):
+            ereignisse.append(wert)
+    return ereignisse
+
+
+def _zeitpunkt(value) -> datetime | None:
+    """ISO-8601-Text als datetime mit Zeitzone; None bei fehlendem oder kaputtem Wert.
+
+    Ohne Zeitzone gilt UTC, damit ein Vergleich nie an naiven und bewussten Zeitpunkten scheitert."""
+    if not isinstance(value, str):
+        return None
+    try:
+        zeit = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return zeit if zeit.tzinfo else zeit.replace(tzinfo=timezone.utc)
+
+
+def run_overlap(events: list[dict], slot: str, start: str, ende: str) -> bool:
+    """True, wenn ein anderer Slot im Zeitraum [start, ende] (ISO-8601) einen Lauf hatte.
+
+    Nur run_started und run_finished zählen (review_posted nie). Ein Lauf reicht von seinem
+    run_started bis zum nächsten run_finished desselben Slots; ohne run_finished läuft er noch.
+    Die Grenzen sind einschließlich: Ein Lauf, der genau bei `start` endet oder genau bei `ende`
+    beginnt, überlappt. Reine Funktion (#178)."""
+    von, bis = _zeitpunkt(start), _zeitpunkt(ende)
+    if von is None or bis is None:
+        return False
+    sortiert = []
+    for ev in events:
+        if not isinstance(ev, Mapping):
+            continue
+        zeit = _zeitpunkt(ev.get("ts"))
+        if zeit is not None:
+            sortiert.append((zeit, ev))
+    offen: dict[str, datetime] = {}
+    for zeit, ev in sorted(sortiert, key=lambda paar: paar[0]):
+        art, eigener = ev.get("event"), str(ev.get("slot"))
+        if art == "run_started":
+            offen[eigener] = zeit
+        elif art == "run_finished" and eigener in offen:
+            anfang = offen.pop(eigener)
+            if eigener != slot and anfang <= bis and zeit >= von:
+                return True
+    # Ohne run_finished läuft der Lauf noch: als Ende zählt unendlich.
+    return any(anfang <= bis for anderer, anfang in offen.items() if anderer != slot)
+
+
+def settle_pending(state: dict, info) -> bool:
+    """Rechnet den offenen Lauf (state["_kosten_offen"]) ab, wenn spend_of(info) lesbar ist.
+
+    Schreibt audit("run_cost", …) mit dem Unterschied vorher/nachher, `parallel=True`, wenn im
+    Zeitraum ein anderer Slot lief (bei gemeinsamem Key steckt dessen Geld im Unterschied),
+    entfernt den Eintrag, speichert den Zustand und gibt True. Ohne offenen Lauf oder ohne
+    lesbaren Spend: False, nichts geschrieben, der Lauf bleibt offen (#178).
+
+    Der Eintrag ohne `slot` (ältere Zustandsdateien) zählt als Lauf dieses Slots."""
+    eintrag = state.get("_kosten_offen")
+    if not isinstance(eintrag, dict):
+        return False
+    nachher = spend_of(info)
+    if nachher is None:
+        return False
+    vorher = eintrag.get("spend_vorher")
+    slot = eintrag.get("slot") or WORKER_SLOT
+    start, jetzt = eintrag.get("start"), datetime.now(timezone.utc).isoformat()
+    audit("run_cost", key=eintrag.get("key"), spend_vorher=vorher, spend_nachher=nachher,
+          kosten=run_cost(vorher, nachher),
+          parallel=run_overlap(read_audit_tail(), str(slot), str(start), jetzt),
+          run_ende=eintrag.get("ende"))
+    state.pop("_kosten_offen", None)
+    save_state(state)
+    return True
 
 
 def alarm(skey: str, error: BaseException | str) -> None:
@@ -1701,6 +1825,10 @@ def main() -> int:
                 state.pop(LAST_WORK, None)   # Ergebnis der ersten Suche wieder zeigen
         job = pick_job(state)
         if not job:
+            # #178: Ohne Auftrag rechnet der Takt den offenen Lauf ab — /key/info liefert dabei
+            # den Spend, den LiteLLM inzwischen gebucht hat. Ohne offenen Lauf keine Abfrage.
+            if state.get("_kosten_offen"):
+                settle_pending(state, key_info())
             log_on_change(state, LAST_WORK, "keine", "Keine Arbeit.")
             parked = parked_job(state)
             slot_status("idle", project=PROJECT,
@@ -1711,12 +1839,17 @@ def main() -> int:
         if BACKEND != "litellm" and not ollama_free(
                 status, say=lambda m: log_on_change(state, LAST_WORK, f"{skey} belegt", m)):
             return 0
+        spend_vorher: float | None = None
         if BACKEND == "litellm":
             # #90: Zuerst das Tagesbudget des eigenen Keys. Ein leerer Key beantwortet auch die
             # Ausweichmodelle mit 429; ohne diese Prüfung verbrauchte der Lauf einen Versuch und
             # der Auftrag stünde nach MAX_TRIES bei Stephan. Ohne Arbeit kostet die Abfrage
             # nichts, und ohne Versuch läuft der Auftrag nach dem Reset von selbst weiter.
             info = key_info()
+            # #178: Dieselbe Antwort rechnet den vorigen Lauf ab (LiteLLM bucht gebündelt) und
+            # liefert den Startwert für diesen. Keine zusätzliche Abfrage.
+            spend_vorher = spend_of(info)
+            settle_pending(state, info)
             problem = budget_problem(info)
             if problem:
                 reset = str((info or {}).get("budget_reset_at") or "unbekannt")[:16]
@@ -1781,13 +1914,24 @@ def main() -> int:
         if pr_no is not None:
             info["pr"] = pr_no
         slot_status("running", **info)
+        # #178: Anfang und Ende jedes Laufs ins Audit-Log. Die Kosten selbst schreibt erst der
+        # nächste Takt (settle_pending): LiteLLM bucht gebündelt, direkt nach dem Lauf fehlt
+        # sonst der letzte Teil.
+        lauf_start, begonnen = datetime.now(timezone.utc), time.monotonic()
+        audit("run_started", key=skey, spend_vorher=spend_vorher)
         LAST_AGENT_ERROR = None   # log_stream_line setzt ihn nur bei einem Anbieterfehler
         rc = run_agent(prompt)
+        lauf_ende, dauer = datetime.now(timezone.utc), round(time.monotonic() - begonnen, 1)
         if rc == 124:
             log(f"{skey}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
         else:
             log(f"{skey}: {name} beendet (Exit {rc}).")
         slot_status("idle", message="Takt beendet", project=PROJECT)
+        audit("run_finished", key=skey, exit_code=rc, dauer_s=dauer,
+              anbieterfehler=bool(LAST_AGENT_ERROR))
+        state["_kosten_offen"] = {"key": skey, "slot": WORKER_SLOT, "spend_vorher": spend_vorher,
+                                  "start": lauf_start.isoformat(), "ende": lauf_ende.isoformat()}
+        save_state(state)
         err = LAST_AGENT_ERROR
         if err:
             # Scheitert der Lauf schon am Anbieter (429/401/5xx), ist das nicht die Schuld des
