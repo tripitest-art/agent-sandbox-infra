@@ -77,7 +77,8 @@ def test_state_zeigt_werte_quellen_und_spezifikation(tmp_path):
     assert sorted(e["werte"]) == sorted(e["spezifikation"])
     spec = e["spezifikation"]["REVIEW_MAX_TOKENS"]
     assert spec["min"] == 1000 and spec["max"] == 100000 and spec["text"]
-    assert e["spezifikation"]["REVIEW_MODEL_BIG"]["erlaubt"] == ["coder-glm", "longctx-lite"]
+    assert e["spezifikation"]["REVIEW_MODEL_BIG"]["erlaubt"] == ["coder-glm", "longctx-lite", "longctx"]
+    assert "coder-nvidia" in e["spezifikation"]["LITELLM_MODEL"]["erlaubt"]
     json.dumps(e)                                              # alles JSON-fähig, keine Python-Typen darin
 
 

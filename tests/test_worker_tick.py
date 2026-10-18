@@ -1148,6 +1148,8 @@ def test_main_litellm_zaehlt_bei_leerem_budget_keinen_versuch(monkeypatch, tmp_p
 def test_worker_names():
     assert w.worker_name("coder") == "DeepSeek (LiteLLM coder)"
     assert w.worker_name("coder-glm") == "GLM 5.3 Flash (LiteLLM coder-glm)"
+    assert w.worker_name("coder-qwen") == "Qwen 2.5 Coder (LiteLLM coder-qwen)"
+    assert w.worker_name("coder-nvidia") == "Qwen 2.5 Coder (LiteLLM coder-nvidia, NVIDIA NIM)"
     assert w.worker_name("neu") == "neu (LiteLLM)"
 
 

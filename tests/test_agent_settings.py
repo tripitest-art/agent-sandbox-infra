@@ -62,3 +62,22 @@ def test_save_laesst_die_datei_bei_schreibfehler_unveraendert(datei, monkeypatch
         agent_settings.save({"REVIEW_MAX_TOKENS": 32000})
     assert datei.read_text(encoding="utf-8") == vorher
     assert [p.name for p in datei.parent.iterdir()] == [datei.name]
+
+
+def test_validate_models():
+    assert agent_settings.validate("REVIEW_MODEL_BIG", "longctx-lite") == "longctx-lite"
+    assert agent_settings.validate("REVIEW_MODEL_BIG", "longctx") == "longctx"
+    assert agent_settings.validate("LITELLM_MODEL", "coder") == "coder"
+    assert agent_settings.validate("LITELLM_MODEL", "coder-nvidia") == "coder-nvidia"
+    assert agent_settings.validate("LITELLM_MODEL", "coder-qwen") == "coder-qwen"
+    with pytest.raises(agent_settings.SettingError):
+        agent_settings.validate("LITELLM_MODEL", "unbekannt")
+
+
+def test_value_litellm_model(datei, monkeypatch):
+    assert agent_settings.value("LITELLM_MODEL", "coder") == "coder"
+    monkeypatch.setenv("LITELLM_MODEL", "coder-nvidia")
+    assert agent_settings.value("LITELLM_MODEL", "coder") == "coder-nvidia"
+    agent_settings.save({"LITELLM_MODEL": "coder-qwen"})
+    assert agent_settings.value("LITELLM_MODEL", "coder") == "coder-qwen"
+
