@@ -50,11 +50,12 @@ def _slot(tmp_path, n, **data):
     (tmp_path / "slots" / f"slot-{n}.json").write_text(json.dumps({"slot": str(n), **data}), encoding="utf-8")
 
 
-def _dash(tmp_path, builder=lambda: STATUS, alive=lambda pid: True):
+def _dash(tmp_path, builder=lambda: STATUS, alive=lambda pid: True, infra_dir=None):
     log = tmp_path / "worker.log"
     log.touch()
     return d.Dashboard(d.StatusCache(builder, ttl=60), d.LogBuffer(str(log)),
-                       slot_dir=str(tmp_path / "slots"), is_pid_alive=alive, clock=lambda: NOW)
+                       slot_dir=str(tmp_path / "slots"), infra_dir=infra_dir or str(tmp_path),
+                       is_pid_alive=alive, clock=lambda: NOW)
 
 
 def test_tote_pid_wird_idle_und_loest_banner_aus(tmp_path):
@@ -103,6 +104,34 @@ def test_kopfzahlen_und_projekte_aus_status(tmp_path):
     assert state["projekte"][1]["fehler"] == "CalledProcessError"
     assert state["budgets"]["reviewer"] == {"fehler": "nicht erreichbar"}
     assert state["veraltet"] is False
+
+
+def test_version_leer_ohne_autodeploy(tmp_path):
+    assert d.read_version(str(tmp_path)) == {}
+    assert _dash(tmp_path).state()["version"] == {}
+
+
+def test_version_aus_deploy_state(tmp_path):
+    (tmp_path / ".deploy-state.json").write_text(
+        json.dumps({"last_good": "c0ffee1", "last_good_at": "2026-10-18T20:00:00", "bad": None}),
+        encoding="utf-8")
+    version = d.read_version(str(tmp_path))
+    assert version == {"commit": "c0ffee1", "zeit": "2026-10-18T20:00:00", "fehlerhaft": None}
+    state = _dash(tmp_path).state()
+    assert state["version"] == version
+    assert state["alerts"] == []
+
+
+def test_fehlgeschlagener_autodeploy_loest_banner_aus(tmp_path):
+    (tmp_path / ".deploy-state.json").write_text(
+        json.dumps({"last_good": "1111111", "bad": "2222222"}), encoding="utf-8")
+    state = _dash(tmp_path).state()
+    assert any(a["art"] == "deploy" and "2222222" in a["text"] for a in state["alerts"])
+
+
+def test_kaputte_deploy_state_datei_wird_ignoriert(tmp_path):
+    (tmp_path / ".deploy-state.json").write_text("{kaputt", encoding="utf-8")
+    assert d.read_version(str(tmp_path)) == {}
 
 
 def test_status_cache_nutzt_ttl_und_behaelt_alten_stand_bei_fehler():

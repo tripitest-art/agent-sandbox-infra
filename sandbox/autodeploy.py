@@ -112,6 +112,7 @@ def deploy_once(
     is_busy: Callable[[], bool] = is_worker_or_review_active,
     test_cmd: Sequence[str] = ("python", "-m", "pytest", "-q"),
     install_cmd: Sequence[str] = ("bash", "sandbox/install.sh"),
+    now: Callable[[], str] = lambda: time.strftime("%Y-%m-%dT%H:%M:%S"),
 ) -> DeployResult:
     """Führt einen Deploy-Prüfzyklus aus:
     1. is_busy() aktiv -> 'uebersprungen' (kein Eingriff in laufende Worker/Reviews).
@@ -125,8 +126,8 @@ def deploy_once(
     7. install_cmd ausführen.
        - Scheitert install_cmd: git reset --hard old + install_cmd (Rollback),
          state['bad'] = new, '⚠ Stephan:'-Meldung, Rückgabe 'zurueckgerollt'.
-    8. Erfolg: state['last_good'] = new, state['bad'] = None, Benachrichtigung,
-       Rückgabe 'ausgerollt'.
+    8. Erfolg: state['last_good'] = new, state['last_good_at'] = now(), state['bad'] = None,
+       Benachrichtigung, Rückgabe 'ausgerollt' (last_good_at fürs Dashboard).
     """
     repo = Path(repo)
     if is_busy():
@@ -208,6 +209,7 @@ def deploy_once(
         return finish(detail)
 
     state["last_good"] = new
+    state["last_good_at"] = now()
     state["bad"] = None
     state["last_error"] = None
     state["dirty_notified"] = None

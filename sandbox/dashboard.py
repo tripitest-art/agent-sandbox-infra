@@ -26,7 +26,10 @@ durch `redact` (Regel 5: Geheimnisse nie ausgeben).
 
 Einstellungen (Umgebung): DASHBOARD_BIND (Standard 0.0.0.0), DASHBOARD_PORT (8099),
 DASHBOARD_STATUS_TTL (Sekunden, in denen `gh`/LiteLLM-Antworten wiederverwendet werden, 90),
-WORKER_LOG, SLOT_DIR, LITELLM sowie die Budget-Keys.
+WORKER_LOG, SLOT_DIR, INFRA_DIR, LITELLM sowie die Budget-Keys.
+
+Version/letzter Deploy: liest `.deploy-state.json` aus INFRA_DIR (schreibt `sandbox/autodeploy.py`);
+ohne Autodeploy oder vor dem ersten Lauf bleibt das Feld leer, kein Fehler.
 """
 from __future__ import annotations
 
@@ -58,6 +61,7 @@ if __name__ in sys.modules:
 
 LOG: str = os.environ.get("WORKER_LOG", "/root/worker.log")
 SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
+INFRA_DIR: str = os.environ.get("INFRA_DIR", "/root/agent-sandbox-infra")
 BIND: str = os.environ.get("DASHBOARD_BIND", "0.0.0.0")
 PORT: int = int(os.environ.get("DASHBOARD_PORT", "8099"))
 STATUS_TTL: float = float(os.environ.get("DASHBOARD_STATUS_TTL", "90"))
@@ -141,6 +145,23 @@ def read_slots(slot_dir: str = SLOT_DIR, is_pid_alive=pid_is_active) -> dict[str
             data = {**data, "status": "idle", "message": DEAD_MESSAGE}
         slots[slot] = data
     return slots
+
+
+def read_version(infra_dir: str = INFRA_DIR) -> dict:
+    """Letzter Autodeploy-Stand aus `.deploy-state.json` (sandbox/autodeploy.py).
+
+    Leer, solange Autodeploy nie gelaufen ist oder die Datei fehlt/kaputt ist (AUTODEPLOY=0
+    ist der Normalfall auf dem Server) - das Dashboard zeigt dann einfach keine Version an.
+    """
+    try:
+        with open(os.path.join(infra_dir, ".deploy-state.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {"commit": data.get("last_good"), "zeit": data.get("last_good_at"),
+            "fehlerhaft": data.get("bad")}
 
 
 class Follower:
@@ -572,15 +593,19 @@ def _slot_sort(item: tuple[str, dict]) -> tuple[int, str]:
 
 
 def build_state(slots: dict[str, dict], status: dict | None, veraltet: bool,
-                stephan_lines: list[str], now: datetime) -> dict:
+                stephan_lines: list[str], now: datetime, version: dict | None = None) -> dict:
     """Gesamtstand für `/api/state` und die SSE-Ereignisse (ohne Log-Zeilen)."""
     views = [slot_view(s, d, now) for s, d in sorted(slots.items(), key=_slot_sort)]
     projekte = (status or {}).get("projekte", [])
     issues = sum(sum(p.get("issues", {}).values()) for p in projekte)
     prs = sum(p.get("prs", {}).get("offen", 0) for p in projekte)
+    version = version or {}
     alerts = [{"art": "slot", "text": f"Slot {v['slot']}: Prozess beendet, ohne sich abzumelden"}
               for v in views if v["tot"]]
     alerts += [{"art": "stephan", "text": ln} for ln in stephan_lines]
+    if version.get("fehlerhaft"):
+        alerts.append({"art": "deploy",
+                        "text": f"Auto-Deploy: Stand {version['fehlerhaft']} fehlgeschlagen, zurückgerollt"})
     return {
         "zeit": now.isoformat(timespec="seconds"),
         "slots": views,
@@ -591,6 +616,7 @@ def build_state(slots: dict[str, dict], status: dict | None, veraltet: bool,
         "budgets": (status or {}).get("budgets", {}),
         "stand": (status or {}).get("zeit"),
         "veraltet": veraltet or status is None,
+        "version": version,
         "alerts": alerts,
     }
 
@@ -599,10 +625,10 @@ class Dashboard:
     """Bündelt Quellen und liefert Zustand sowie SSE-Rahmen; testbar ohne HTTP."""
 
     def __init__(self, cache: StatusCache, logbuf: LogBuffer, slot_dir: str = SLOT_DIR,
-                 is_pid_alive=pid_is_active,
+                 infra_dir: str = INFRA_DIR, is_pid_alive=pid_is_active,
                  clock: Callable[[], datetime] = lambda: datetime.now(),
                  writer: BudgetWriter | None = None, waker: WakeSender | None = None):
-        self.cache, self.logbuf, self.slot_dir = cache, logbuf, slot_dir
+        self.cache, self.logbuf, self.slot_dir, self.infra_dir = cache, logbuf, slot_dir, infra_dir
         self.is_pid_alive, self.clock = is_pid_alive, clock
         self.writer = writer or BudgetWriter(env={})   # ohne Angabe: Ändern aus
         self.waker = waker or WakeSender(env={})       # ohne Angabe: Wecken aus
@@ -616,7 +642,8 @@ class Dashboard:
     def state(self) -> dict:
         status, veraltet = self.cache.get()
         slots = read_slots(self.slot_dir, self.is_pid_alive)
-        state = build_state(slots, status, veraltet, self.logbuf.stephan(), self.clock())
+        version = read_version(self.infra_dir)
+        state = build_state(slots, status, veraltet, self.logbuf.stephan(), self.clock(), version)
         state["schreiben"] = self.writer.enabled   # zeigt den „Limit ändern“-Knopf
         state["wecken"] = self.waker.enabled       # zeigt den Knopf „Takt starten“
         state["einstellungen"] = {
@@ -757,8 +784,9 @@ $("nur").onchange=renderLog;
 function render(s){
  const al=$("alerts");al.replaceChildren(...s.alerts.map(a=>el("div","banner",a.text)));
  $("veraltet").replaceChildren(...(s.veraltet?[el("div","warn","GitHub-/Budgetdaten veraltet oder nicht erreichbar")]:[]));
+ const ver=(s.version&&s.version.commit)?s.version.commit+(s.version.zeit?" ("+s.version.zeit.slice(0,16).replace("T"," ")+")":""):"–";
  $("kopf").replaceChildren(...[["Aktive Slots",s.kopf.aktive_slots],["Offene Issues",s.kopf.offene_issues],
-  ["Offene PRs",s.kopf.offene_prs],["Stand",(s.stand||"–").slice(11,19)]].map(([k,v])=>{
+  ["Offene PRs",s.kopf.offene_prs],["Stand",(s.stand||"–").slice(11,19)],["Version",ver]].map(([k,v])=>{
   const d=el("div","kpi");d.append(el("span","mut",k),el("b",null,v));return d}));
  renderWake(s);
  $("slots").replaceChildren(...s.slots.map(v=>{const d=el("div","card");
