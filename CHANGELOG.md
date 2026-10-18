@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `worker_tick`: Räumt zu Beginn jedes Laufs `.done`-Marken und `.claim`-Dateien beendeter Prozesse in `CLAIM_DIR` auf, sobald sie älter als `CLAIM_MAX_AGE_DAYS` (30 Tage) sind; junge Dateien und Belegungen lebender Prozesse bleiben (#177).
 - `install.sh`: installiert `logrotate` und legt `/etc/logrotate.d/agent-sandbox` an; `/root/worker.log` und `/root/audit.jsonl` werden ab 50 MB (`LOG_ROTATE_SIZE`) rotiert, vier komprimierte Rotationen, `copytruncate` für die von systemd offen gehaltene Logdatei (#174).
 - `worker_tick`: Ist der jüngste abgeschlossene Lauf des Workflows `tests` auf `main` rot, entstehen keine neuen Issue-Aufträge; der Takt meldet das einmal je Commit als `⚠ Stephan:`-Zeile, Nacharbeit und PR-Text laufen weiter (#173).
 - `worker_tick`/`review_tick`: Ein gescheiterter `gh`-Aufruf nennt den Grund als festen Klartext (Rate-Limit, Token ungültig, nicht erreichbar), nie den `gh`-Text; der Worker meldet denselben Grund je Slot nur einmal, bis wieder ein Lauf ohne Fehler durchläuft, ein Rate-Limit beendet den Review-Lauf statt die übrigen Projekte abzufragen (#162).
