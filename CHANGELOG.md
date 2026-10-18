@@ -9,7 +9,9 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 
 ### Geändert
 - README (Wake-Listener): `WAKE_URL` ist die JSON-Strom-Adresse `https://ntfy.sh/<Wake-Thema>/json`, getrenntes Thema vom Dashboard, Prüfung per `curl` und Fehlerbild `HTTPError`/`404` (#150).
+- README: Regel-8-Dateikollisionsschutz auf tatsächliches Verhalten nach #32 aktualisiert (fail-closed, „unbekannt = blockieren“, Pfaderkennung, Logzeile beim Überspringen), Hotspot-Definition um `sandbox/worker_tick.py` für dieses Repo ergänzt und Review-Modell nach PR #57 auf einheitliches `coder-glm` korrigiert (#145).
 - `review_tick`: Scheitert der Commit-Status `review` mit HTTP 401/403/404/422/429, nennt die „⚠ Stephan“-Zeile zusätzlich einen festen Hinweis zur Ursache (bei 403: dem Token fehlt „Commit statuses: write“); nie Text aus dem gh-Fehler (#146).
+- `review_tick`: Ein Pflicht-Check, der noch nicht im `statusCheckRollup` steht, gilt bis zehn Minuten nach dem Start des ersten Eintrags als laufend; danach als `FEHLT` und rot. Ein verspätet startender `tests`-Lauf löst so kein falsches „Änderungen nötig“ mehr aus, ohne Zeitstempel gibt es keine Kulanzzeit (#148).
 - Dashboard: `--notify-test` liest `/etc/agent-dashboard.env` selbst (kein `set -a` mehr nötig); bei einer Umleitung nennt die Meldung den Zielhost statt nur `HTTP 307` (#143).
 - `review_tick`: Ist die Reviewer-Antwort unbrauchbar (Token-Limit, kein Urteil, Zeichensalat, ungültige Muss/Kann-Zahlen), fragt der Takt im selben Lauf das andere der beiden eingestellten Modelle (`REVIEW_MODEL`/`REVIEW_MODEL_BIG`), sofern dessen Familie unabhängig vom Worker ist; erst wenn beide scheitern, zählt das als ein Fehlversuch. Ein Urteil ohne Sterne oder mit Satzzeichen wird ebenfalls gelesen (`normalize_verdict_line`), Reviewer-Zeile und Entwurf nennen das Modell, das wirklich geantwortet hat (#141).
 - `review_tick`: PRs ohne Worker-Issue (Label `review-anfordern`) werden nach „Freigegeben“ ebenfalls gemergt, wenn ihr PR-Text „Merge-Modus: automatisch“ sagt (Zeile oder Abschnitt `### Merge-Modus`); `auto_merge: false` und `manual_paths` des Projekts gelten weiter, sonst liegt der PR wie bisher bei Stephan (#138).
@@ -23,6 +25,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - Merge-Modus: „automatisch“ ist der Standard für Worker-Issues, manuell nur für Aufsichtsdateien (`manual_paths`); braucht `freigabe-geschützt`, wirkt nach Serverkonfiguration (#133).
 
 ### Hinzugefügt
+- Planer-Preflight: Skript `scripts/issuecheck.py` prüft Issue-Text, Formatierung und Akzeptanztests vor dem Einstellen, führt isolierte pytest-Rot-Läufe durch; neuer Skill `skills/agent-sandbox-planner/SKILL.md` und Dokumentation in `docs/planer-ablauf.md` (Stufe 5, #17).
 - `worker_tick`: Audit-Log (`AUDIT_LOG`, Vorgabe `/root/audit.jsonl`) — je Ereignis eine JSON-Zeile mit UTC-Zeitstempel, `event`, Slot, Modell und den übergebenen Feldern (Werte wie `token` oder `api_key` nur als `***`); den Anfang macht die Übernahme eines Issues (`issue_claimed`, Funktion `audit()`), Schreibfehler brechen den Lauf nicht ab (#136).
 - `wake_listener`: Dienst `agent-wake` startet Takt-Units sofort bei ntfy-Nachrichten (`WAKE_URL`), periodische Timer bleiben als Sicherheitsnetz (#132).
 - Dashboard: Abschnitt „Reviews und Merges“ (Freigabequote, Merges, Übergaben an Stephan, 24 h und 7 Tage, je Projekt und je Reviewer-Modell) aus `worker.log` (`dashboard_stats.py`) (#115).
