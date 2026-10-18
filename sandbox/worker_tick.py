@@ -130,6 +130,10 @@ VERWAIST = "_verwaist:"      # Vorsatz der Schlüssel im Zustand: f"_verwaist:{n
 # Verzeichnisse, für die claim_job schon eine „⚠ Stephan:“-Zeile geschrieben hat. Eigener Merker,
 # weil claim_job keinen Zustand bekommt; der Takt ist ein kurzer Prozess je Auftrag.
 _CLAIM_WARNED: set[str] = set()
+# Gründe der im letzten Takt von issue_job übersprungenen Kandidaten (#187). main() zeigt sie in
+# der Slot-Telemetrie im Leerlauf, weil sie bisher nur im Log standen und den echten Grund der
+# Untätigkeit verdeckten. issue_job leert die Liste zu Beginn jedes Aufrufs.
+SKIPPED: list[str] = []
 
 # Audit-Log (#85): pro Ereignis eine JSON-Zeile, maschinell auswertbar — anders als der
 # Fließtext in /root/worker.log. audit() liest den Pfad bei jedem Aufruf aus diesem Modulglobal
@@ -509,9 +513,14 @@ def use_project(p: "projects.Project", first: bool) -> None:
     WORKDIR = f"{projects.worktrees_dir(p)}/w{WORKER_SLOT}" if WORKER_SLOT else p.workdir
 
 
-def gh(*args: str):
+def gh(*args: str, repo: str | None = None):
+    """gh mit JSON-Ausgabe; `repo` wählt ein anderes Repository als das aktive Projekt (#187).
+
+    Ohne `repo` gilt REPO (das Projekt, auf das use_project() zuletzt geschaltet hat). Die
+    Projektvorsätze im Zustand (`<projekt>/prN@…`) brauchen die ausdrückliche Angabe, weil sie
+    nicht zum gerade aktiven Projekt gehören müssen."""
     try:
-        out = subprocess.run(["gh", *args, "--repo", REPO], capture_output=True, text=True, check=True, env=ENV)
+        out = subprocess.run(["gh", *args, "--repo", repo or REPO], capture_output=True, text=True, check=True, env=ENV)
     except subprocess.CalledProcessError as exc:
         if exc.returncode == 4 and "GH_TOKEN" in (getattr(exc, "stderr", None) or ""):
             return None
@@ -1227,6 +1236,7 @@ def issue_job(skip: Callable[[str], bool] | None = None):
     nächste Aufgabe nach AGENTS.md“ übersprang Qwen Label, Branch und Akzeptanz-Commit, arbeitete
     auf main und hörte beim ersten roten Test auf (#102, erster Lauf).
     """
+    SKIPPED.clear()
     issues = gh("issue", "list", "--state", "open", "--label", "worker-task", "--label", "bereit",
                 "--label", LABEL, "--search", "sort:created-asc -label:blockiert",
                 "--json", "number,title,body,author,labels")
@@ -1265,12 +1275,15 @@ def issue_job(skip: Callable[[str], bool] | None = None):
         cand_files = parse_affected_files(cand_body)
         if cand_files is None:
             log(f"Issue #{cand_no} übersprungen: keine belegte Dateiliste (Regel 8).")
+            SKIPPED.append(f"#{cand_no}: keine belegte Dateiliste")
             continue
 
         # Regel 8: Keine zwei Agenten an main.py
         if cand_touches_main and active_touches_main:
             log(f"Issue #{cand_no} übersprungen: berührt {HOTSPOT}, während bereits ein Auftrag "
                 f"an {HOTSPOT} in Arbeit ist (Regel 8).")
+            SKIPPED.append(f"#{cand_no}: berührt {HOTSPOT}, während bereits ein Auftrag "
+                           f"an {HOTSPOT} in Arbeit ist")
             continue
 
         # Regel 8: Keine zwei Agenten in denselben Dateien
@@ -1280,6 +1293,8 @@ def issue_job(skip: Callable[[str], bool] | None = None):
         if overlap:
             log(f"Issue #{cand_no} übersprungen: Datei-Kollision mit aktivem Auftrag auf "
                 f"{', '.join(sorted(overlap))} (Regel 8).")
+            SKIPPED.append(f"#{cand_no}: Datei-Kollision mit aktivem Auftrag auf "
+                           f"{', '.join(sorted(overlap))}")
             continue
 
         selected = cand
@@ -1699,6 +1714,94 @@ def parked_job(state: dict) -> str | None:
         if key.startswith("_park:"):
             return key[len("_park:"):]
     return None
+
+
+def prune_parked(state: dict, still_open: Callable[[str], bool]) -> list[str]:
+    """Entfernt zu jedem Schlüssel `_park:<skey>` im Zustand die Marke und den Zähler `state[skey]`,
+    wenn `still_open(skey)` False liefert. Gibt die entfernten `skey` zurück (Reihenfolge wie im
+    Zustand). Wirft `still_open`, bleibt die Marke (im Zweifel geparkt). Speichert nicht.
+    """
+    entfernt: list[str] = []
+    for key in list(state):
+        if not key.startswith("_park:"):
+            continue
+        skey = key[len("_park:"):]
+        try:
+            offen = still_open(skey)
+        except Exception:
+            continue    # unklare Lage: im Zweifel geparkt lassen (Regel 7)
+        if offen:
+            continue
+        state.pop(key, None)
+        state.pop(skey, None)
+        entfernt.append(skey)
+    return entfernt
+
+
+_PR_JOB_KEY_RE = re.compile(r"^(?:pr|text)(\d+)\s*@")
+_ISSUE_JOB_KEY_RE = re.compile(r"^issue(\d+)$")
+
+
+def _job_repo(skey: str) -> str | None:
+    """Repository eines Zustandsschlüssels; None bei unbekanntem Projektvorsatz.
+
+    Ohne Vorsatz gehört der Schlüssel dem ersten Projekt (so waren die Zustandsdateien vor der
+    Projektliste). Mit `<projekt>/` zählt die Projektliste, nicht das gerade aktive Projekt."""
+    if "/" not in skey:
+        return PROJECTS[0].repo
+    name = skey.split("/", 1)[0]
+    for p in PROJECTS:
+        if p.name == name:
+            return p.repo
+    return None
+
+
+def job_still_open(skey: str) -> bool:
+    """True, wenn der Auftrag noch offen ist. `skey` = PREFIX + Schlüssel:
+    `pr<N> @<sha>` / `text<N> @<sha>` -> PR N offen (state OPEN); `issue<N>` -> Issue N offen.
+    Projektvorsatz (`<projekt>/`) wählt das Repository. Unbekanntes Format oder gh-Fehler -> True.
+    """
+    repo = _job_repo(skey)
+    if repo is None:
+        return True
+    key = skey.split("/", 1)[1] if "/" in skey else skey
+    m = _PR_JOB_KEY_RE.match(key)
+    if m:
+        art, nummer = "pr", m.group(1)
+    else:
+        m = _ISSUE_JOB_KEY_RE.match(key)
+        if not m:
+            return True     # unbekanntes Format: nicht aufräumen
+        art, nummer = "issue", m.group(1)
+    try:
+        antwort = gh(art, "view", nummer, "--json", "state", repo=repo)
+    except Exception:
+        return True         # gh-Fehler: im Zweifel geparkt lassen (Regel 7)
+    if not isinstance(antwort, Mapping):
+        return True
+    zustand = str(antwort.get("state") or "").upper()
+    if zustand == "OPEN":
+        return True
+    if zustand in ("CLOSED", "MERGED"):
+        return False
+    return True             # unlesbare Antwort: nichts entfernen
+
+
+def idle_message(parked: str | None, skipped: list[str]) -> str:
+    """Text der Leerlauf-Telemetrie. Ohne beides: "Warte auf nächsten Takt".
+    Nur parked: "<parked>: wartet auf Stephan". Mit skipped: "Übersprungen (N): a; b; c"
+    (höchstens 3 Einträge, bei mehr "; +K weitere"); ist zusätzlich parked gesetzt, hängt
+    " | <parked>: wartet auf Stephan" an."""
+    text = ""
+    if skipped:
+        gezeigt = "; ".join(skipped[:3])
+        weitere = len(skipped) - 3
+        text = f"Übersprungen ({len(skipped)}): {gezeigt}"
+        if weitere > 0:
+            text += f"; +{weitere} weitere"
+    if parked:
+        text = f"{text} | {parked}: wartet auf Stephan" if text else f"{parked}: wartet auf Stephan"
+    return text or "Warte auf nächsten Takt"
 
 
 def _claim_name(skey: str) -> str:
@@ -2244,6 +2347,13 @@ def main() -> int:
             verwaiste_melden(state)
         except Exception as e:
             log(f"Warnung: Prüfung auf verwaiste Aufträge fehlgeschlagen ({type(e).__name__})")
+        # #187: Einen erledigten Auftrag (PR gemergt/geschlossen, Issue geschlossen) nicht ewig
+        # als „wartet auf Stephan“ führen. Vor der Wahl, damit der Zustand danach sauber ist.
+        entfernt = prune_parked(state, job_still_open)
+        if entfernt:
+            save_state(state)
+            for erledigt in entfernt:
+                log(f"{erledigt}: erledigt, Parkmarke entfernt.")
         job = pick_job(state)
         if not job:
             # #178: Ohne Auftrag rechnet der Takt den offenen Lauf ab — /key/info liefert dabei
@@ -2252,8 +2362,7 @@ def main() -> int:
                 settle_pending(state, key_info())
             log_on_change(state, LAST_WORK, "keine", "Keine Arbeit.")
             parked = parked_job(state)
-            slot_status("idle", project=PROJECT,
-                        message=f"{parked}: wartet auf Stephan" if parked else "Warte auf nächsten Takt")
+            slot_status("idle", project=PROJECT, message=idle_message(parked, SKIPPED))
             return 0
         key, task, pr_no, before = job
         skey = PREFIX + key          # im Zustand und im Log mit Projektvorsatz (beim ersten Projekt leer)
