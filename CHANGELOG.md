@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `worker_tick`/`review_tick`: Das Audit-Log nennt die Modellkosten je Lauf (`run_started`/`run_finished`, `run_cost` aus der Spend-Differenz von `GET /key/info` — bei Überlappung mit einem anderen Slot als Obergrenze markiert) und je gepostetem Review (`review_posted` mit `kosten` aus `usage["cost"]`, Modellliste und Token-Zahlen) (#178).
 - `worker_tick`: Räumt zu Beginn jedes Laufs `.done`-Marken und `.claim`-Dateien beendeter Prozesse in `CLAIM_DIR` auf, sobald sie älter als `CLAIM_MAX_AGE_DAYS` (30 Tage) sind; junge Dateien und Belegungen lebender Prozesse bleiben (#177).
 - `install.sh`: installiert `logrotate` und legt `/etc/logrotate.d/agent-sandbox` an; `/root/worker.log` und `/root/audit.jsonl` werden ab 50 MB (`LOG_ROTATE_SIZE`) rotiert, vier komprimierte Rotationen, `copytruncate` für die von systemd offen gehaltene Logdatei (#174).
 - `worker_tick`: Ist der jüngste abgeschlossene Lauf des Workflows `tests` auf `main` rot, entstehen keine neuen Issue-Aufträge; der Takt meldet das einmal je Commit als `⚠ Stephan:`-Zeile, Nacharbeit und PR-Text laufen weiter (#173).
