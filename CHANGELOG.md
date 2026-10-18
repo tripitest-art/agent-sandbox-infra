@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `install.sh`: fragt im Web-Dashboard-Abschnitt nur noch `DASHBOARD_WRITE_TOKEN` und `NTFY_URL` ab; die Abfrage des `LITELLM_MASTER_KEY` und der Hinweis darauf in der Unit entfallen. Wer den Budget-Weg braucht, trägt den Key von Hand in `/etc/agent-dashboard.env` ein (PR folgt).
 - `worker_tick`: Ein Issue, das seit mindestens 40 Minuten auf `in-arbeit` steht, ohne offenen PR auf seinem Branch und ohne lebende Belegung, meldet der erste Slot einmal als „⚠ Stephan:“-Zeile; der Merker `_verwaist:<N>` verschwindet, sobald das Issue nicht mehr verwaist ist, Labels bleiben unberührt (PR folgt).
 - Tests: `tests/conftest.py` setzt zusätzlich `AGENT_PROJECTS` auf eine Projektliste mit nicht vorhandenem Klonpfad. `worker_tick.main` setzt `WORKDIR` per `use_project()` aus der Projektliste neu; auf dem Server zeigte das auf einen echten Klon, `test_issue_38/39` waren rot und der Auto-Deploy rollte `609fb8c` zurück (PR folgt).
 - Tests: `tests/conftest.py` setzt zusätzlich `AGENT_SETTINGS` auf einen nicht vorhandenen Pfad. Auf dem Server steht in `/etc/agent-settings.json` ein anderes Worker-Modell (`coder-nvidia`); acht Tests (`test_worker_tick.py`, `test_issue_60`) waren dort rot und der Auto-Deploy rollte zurück (PR folgt).
