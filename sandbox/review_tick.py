@@ -617,12 +617,30 @@ def gh_http_status(exc: BaseException) -> int | None:
     return code if 100 <= code <= 599 else None
 
 
+_HTTP_HINWEISE = {
+    401: "Token ungültig oder abgelaufen",
+    403: "Token darf keinen Commit-Status schreiben (Fine-grained-Token: "
+         "„Commit statuses: Read and write“, klassisches Token: Scope „repo:status“) "
+         "oder das Rate-Limit greift",
+    404: "Repository oder Commit für dieses Token nicht sichtbar",
+    422: "GitHub kennt den Commit nicht (Branch neu gepusht?)",
+    429: "Rate-Limit erreicht",
+}
+
+
+def gh_http_hinweis(code: int | None) -> str:
+    """Feste Erklärung zu einem HTTP-Statuscode, damit die Logzeile sagt, was zu tun ist.
+    Nie Text aus gh-stderr (Regel 5), nur eigene Texte; unbekannter Code oder None: ''."""
+    return _HTTP_HINWEISE.get(code, "") if code is not None else ""
+
+
 def post_review_status(sha: str, verdict: str) -> bool:
     """Setzt den Commit-Status 'review' für `sha`: `gh api repos/<REPO>/statuses/<sha>` mit
     -f state=…, -f context=review, -f description=…. True, wenn gesetzt; ohne Status-Urteil
     (review_status -> None) False ohne Aufruf. Ein Fehler bricht den Takt nie ab: Log-Zeile
     '⚠ Stephan: Status review für <sha[:7]> nicht gesetzt (<ExceptionName>)', kennt der Fehler
-    einen HTTP-Statuscode aus dem gh-stderr, zusätzlich ', HTTP <Code>'; Rückgabe False.
+    einen HTTP-Statuscode aus dem gh-stderr, zusätzlich ', HTTP <Code>' und, wenn bekannt, ein
+    fester Hinweis zur Ursache (gh_http_hinweis); Rückgabe False.
     Die Meldung enthält nie den Fehlertext von gh (Regel 5: keine Zugangsdaten in Logs)."""
     res = review_status(verdict)
     if res is None:
@@ -635,7 +653,9 @@ def post_review_status(sha: str, verdict: str) -> bool:
     except Exception as exc:   # ein Status darf den Takt nie abbrechen
         code = gh_http_status(exc)
         zusatz = f", HTTP {code}" if code is not None else ""
-        log(f"⚠ Stephan: Status review für {sha[:7]} nicht gesetzt ({type(exc).__name__}{zusatz})")
+        hinweis = gh_http_hinweis(code)
+        hinweis = f": {hinweis}" if hinweis else ""
+        log(f"⚠ Stephan: Status review für {sha[:7]} nicht gesetzt ({type(exc).__name__}{zusatz}){hinweis}")
         return False
 
 

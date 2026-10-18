@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `review_tick`: Scheitert der Commit-Status `review` mit HTTP 401/403/404/422/429, nennt die „⚠ Stephan“-Zeile zusätzlich einen festen Hinweis zur Ursache (bei 403: dem Token fehlt „Commit statuses: write“); nie Text aus dem gh-Fehler (#146).
 - `review_tick`: Ein Pflicht-Check, der noch nicht im `statusCheckRollup` steht, gilt bis zehn Minuten nach dem Start des ersten Eintrags als laufend; danach als `FEHLT` und rot. Ein verspätet startender `tests`-Lauf löst so kein falsches „Änderungen nötig“ mehr aus, ohne Zeitstempel gibt es keine Kulanzzeit (#148).
 - Dashboard: `--notify-test` liest `/etc/agent-dashboard.env` selbst (kein `set -a` mehr nötig); bei einer Umleitung nennt die Meldung den Zielhost statt nur `HTTP 307` (#143).
 - `review_tick`: Ist die Reviewer-Antwort unbrauchbar (Token-Limit, kein Urteil, Zeichensalat, ungültige Muss/Kann-Zahlen), fragt der Takt im selben Lauf das andere der beiden eingestellten Modelle (`REVIEW_MODEL`/`REVIEW_MODEL_BIG`), sofern dessen Familie unabhängig vom Worker ist; erst wenn beide scheitern, zählt das als ein Fehlversuch. Ein Urteil ohne Sterne oder mit Satzzeichen wird ebenfalls gelesen (`normalize_verdict_line`), Reviewer-Zeile und Entwurf nennen das Modell, das wirklich geantwortet hat (#141).
