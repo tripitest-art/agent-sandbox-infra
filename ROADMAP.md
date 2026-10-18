@@ -50,15 +50,15 @@ Umgesetzt in PR [#11](https://github.com/tripitest-art/agent-sandbox-infra/pull/
 
 ---
 
-### ✅ Stufe 2: Strukturierte Slot-Telemetrie in Home Assistant (Abgeschlossen)
+### ✅ Stufe 2: Strukturierte Slot-Telemetrie & Web-Dashboard (Abgeschlossen)
 
-Umgesetzt in PR [#48](https://github.com/tripitest-art/agent-sandbox-infra/pull/48).
+Umgesetzt in PR [#48](https://github.com/tripitest-art/agent-sandbox-infra/pull/48) und erweitert in PR [#114](https://github.com/tripitest-art/agent-sandbox-infra/pull/114), [#151](https://github.com/tripitest-art/agent-sandbox-infra/pull/155) und [#158](https://github.com/tripitest-art/agent-sandbox-infra/pull/158).
 
-Bisher sendete `qwen_webhook.py` rohe Textzeilen aus `worker.log` an Home Assistant. Ziel war es, für die parallelen Worker-Slots strukturierte Entitäten in Home Assistant bereitzustellen.
+Ziel war es, für die parallelen Worker-Slots strukturierte Telemetrie, ein autarkes Web-Dashboard sowie zuverlässige Push-Meldungen bereitzustellen.
 
 #### Kernpunkte:
 1. **JSON-Payload mit strukturiertem Slot-Status:**
-   `worker_tick.py` pflegt atomare Statusdateien (`slot-1.json`, `slot-2.json`) unter `/run/worker-slots/` oder `/root/worker-slots/`. `qwen_webhook.py` liest diese aus und sendet bei Zustandsänderungen strukturierte Metadaten:
+   `worker_tick.py` pflegt atomare Statusdateien (`slot-1.json`, `slot-2.json`) unter `/run/worker-slots/` oder `/root/worker-slots/`. Das Dashboard liest diese aus und zeigt Zustandsänderungen sowie tote Prozesse strukturiert an:
    ```json
    {
      "slots": {
@@ -74,16 +74,15 @@ Bisher sendete `qwen_webhook.py` rohe Textzeilen aus `worker.log` an Home Assist
          "status": "idle",
          "message": "Warte auf nächsten Takt"
        }
-     },
-     "lines": "..."
+     }
    }
    ```
-2. **Home Assistant Template-Sensoren:**
-   - `sensor.worker_slot_1_status` (`running`, `idle`, `waiting_user`)
-   - `sensor.worker_slot_1_issue` / `sensor.worker_slot_1_title`
-   - Entsprechende Entitäten für Slot 2.
-3. **Lovelace Dashboard-Karte:**
-   Mushroom-Tiles mit Live-Status pro Slot (Task, Modell, Laufzeit, aktueller Git-Branch).
+2. **Autarkes Web-Dashboard (`dashboard.py`):**
+   - Live-Slot-Karten (Task, Modell, Laufzeit, Projekt, Status)
+   - Multi-Projekt-Matrix und „Wartet auf Stephan“-Übersicht
+   - LiteLLM-Budget-Tracking und Review-Statistiken
+3. **Push-Benachrichtigungen via ntfy (`dashboard_notify.py`):**
+   - Push bei neuen „⚠ Stephan:“-Zeilen, toten Slot-Prozessen und Budgets ab 90 %
 
 ---
 
@@ -94,7 +93,7 @@ Nach dem Merge in `main` muss derzeit auf dem Musik-Server manuell `/root/sc-dig
 #### Kernpunkte:
 1. **Automatischer Deploy-Mechanismus:**
    - **Option A (Pull/Timer):** Ein leichtgewichtiger systemd-Timer auf dem Musik-Server prüft alle 15–30 Minuten `origin/main` auf neue Commits und führt bei Differenz `./update.sh` aus.
-   - **Option B (Event/Webhook):** Home Assistant oder GitHub Actions triggern nach erfolgreichem Auto-Merge per SSH oder Webhook das Update-Skript.
+   - **Option B (Event/Webhook):** GitHub Actions oder ntfy triggern nach erfolgreichem Auto-Merge per Webhook das Update-Skript.
 2. **Sicherheits-Leitplanken:**
    - Deploy erfolgt ausschließlich nach grünem CI und Squash-Merge auf `main`.
    - Bei Fehlschlag des Builds oder Neustarts erfolgt eine Benachrichtigung via Telegram (`health.py`).
@@ -135,11 +134,11 @@ Die meiste manuelle Vorbereitungszeit fließt in das Ausformulieren präziser Sc
 | Stufe | Feature | Nutzen | Status |
 |---|---|---|:---:|
 | **Stufe 1** | Auto-Merge & `Wartet auf:` Auto-Unblock | ⭐⭐⭐⭐⭐ | ✅ **Gemergt (#11, #12)** |
-| **Stufe 2** | Strukturierte Slot-Telemetrie in Home Assistant | ⭐⭐⭐⭐ | ✅ **Gemergt (#48)** |
+| **Stufe 2** | Strukturierte Slot-Telemetrie & Web-Dashboard | ⭐⭐⭐⭐ | ✅ **Gemergt (#48, #114)** |
 | **Stufe 3** | Continuous Deployment (`autodeploy.py`, Pull-Timer auf CT 112) | ⭐⭐⭐⭐ | ✅ **Gemergt (#15)** |
 | **Stufe 4** | Prime-Time- & Budget-Scheduling | ⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🟡 **In Umsetzung (#17)** |
-| **Baustein** | Web-Dashboard als Ersatz fürs HA-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | ✅ **Gemergt (#104, #105)**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |
+| **Baustein** | Web-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | ✅ **Gemergt (#104, #105, #114)**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |
 | **Baustein** | Mehrere Projekte (Projektliste, Infra-Repo als zweites Projekt) | ⭐⭐⭐⭐ | ✅ **Gemergt (#18, #19, #20)**; Inbetriebnahme auf dem Server: siehe [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) |
 
 ---

@@ -37,7 +37,7 @@ eine „⚠ Stephan:“-Zeile, aber nur einmal je Fehlertext, nicht alle 15 Minu
 
 - Zustand: `/root/agent-sandbox-infra/.deploy-state.json` (`last_good`, `bad`, `last_error`, `dirty_notified`),
   atomar geschrieben, nicht im Repo (nur verfolgte Dateien zählen für „lokale Änderungen“).
-- Log: `/root/worker.log`, Zeilen mit `[deploy]`. „⚠ Stephan:“-Zeilen gehen wie alle anderen an Home Assistant.
+- Log: `/root/worker.log`, Zeilen mit `[deploy]`. „⚠ Stephan:“-Zeilen gehen wie alle anderen über das Dashboard und ntfy an Stephan.
   Gemeldet wird nie rohe Ausgabe von pytest oder `install.sh`, nur der Exit-Code (Regel 5).
 - Sofort anstoßen: `systemctl start agent-sandbox-deploy.service`. Zurücksetzen eines vermerkten
   `bad`-Stands: `.deploy-state.json` löschen.
