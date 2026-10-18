@@ -390,6 +390,24 @@ def test_status_warnung_nennt_http_code(monkeypatch, capsys):
     assert "Resource not accessible" not in out
 
 
+def test_status_warnung_403_nennt_fehlendes_recht(monkeypatch, capsys):
+    """Bei 403 steht ein fester Hinweis auf das fehlende Token-Recht in der Zeile."""
+    def gh_text(*args, **kw):
+        raise _cp_error("gh: Resource not accessible by personal access token (HTTP 403)")
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    r.post_review_status(SHA, r.VERDICTS[0])
+    out = capsys.readouterr().out
+    assert "HTTP 403): Token darf keinen Commit-Status schreiben" in out
+    assert "Resource not accessible" not in out
+
+
+def test_gh_http_hinweis():
+    assert "Commit-Status" in r.gh_http_hinweis(403)
+    assert r.gh_http_hinweis(None) == ""
+    assert r.gh_http_hinweis(500) == ""
+
+
 def test_status_warnung_ohne_http_code_wie_bisher(monkeypatch, capsys):
     """Ohne erkennbaren Code bleibt die Warnung wie bisher: nur der Ausnahmeklassenname."""
     def gh_text(*args, **kw):
