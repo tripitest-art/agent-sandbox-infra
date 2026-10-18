@@ -69,7 +69,7 @@ LABEL = "agent-qwen"
 OWNER = "tripitest-art"
 BACKEND = os.environ.get("BACKEND", "ollama")   # oder "litellm"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
-LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "coder")
+LITELLM_MODEL = agent_settings.value("LITELLM_MODEL", os.environ.get("LITELLM_MODEL", "coder"))
 # Ausweichmodelle (Aliase im LiteLLM-Proxy, der Key »worker« muss sie dürfen), durch Komma getrennt.
 LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "coder-or,coder-free").split(",") if m.strip()]
 PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT", "45"))   # Sekunden je Probe

@@ -38,7 +38,7 @@ def _schreibe(p: Path, werte) -> None:
 
 def test_die_feste_liste_der_einstellungen():
     s = _load("agent_settings")
-    assert sorted(s.SPECS) == ["MAX_ROUNDS", "MAX_TRIES", "MISSING_CHECK_GRACE_S",
+    assert sorted(s.SPECS) == ["LITELLM_MODEL", "MAX_ROUNDS", "MAX_TRIES", "MISSING_CHECK_GRACE_S",
                                "REVIEW_LLM_TIMEOUT", "REVIEW_MAX_TOKENS", "REVIEW_MODEL_BIG"]
     for name, spec in s.SPECS.items():
         assert "vorgabe" in spec and "text" in spec, name
@@ -48,7 +48,8 @@ def test_die_feste_liste_der_einstellungen():
     ("REVIEW_MAX_TOKENS", 32000), ("REVIEW_MAX_TOKENS", 1000), ("REVIEW_MAX_TOKENS", 100000),
     ("MAX_ROUNDS", 1), ("MAX_ROUNDS", 5), ("MAX_TRIES", 3), ("REVIEW_LLM_TIMEOUT", 600),
     ("MISSING_CHECK_GRACE_S", 60), ("MISSING_CHECK_GRACE_S", 3600),
-    ("REVIEW_MODEL_BIG", "coder-glm"), ("REVIEW_MODEL_BIG", "longctx-lite"),
+    ("REVIEW_MODEL_BIG", "coder-glm"), ("REVIEW_MODEL_BIG", "longctx-lite"), ("REVIEW_MODEL_BIG", "longctx"),
+    ("LITELLM_MODEL", "coder"), ("LITELLM_MODEL", "coder-nvidia"), ("LITELLM_MODEL", "coder-qwen"),
 ])
 def test_validate_nimmt_gueltige_werte(name, wert):
     s = _load("agent_settings")

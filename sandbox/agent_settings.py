@@ -46,7 +46,16 @@ SPECS: dict[str, dict] = {
     },
     "REVIEW_MODEL_BIG": {
         "text": "Modell-Alias des Reviewers für große Diffs",
-        "vorgabe": None, "erlaubt": ["coder-glm", "longctx-lite"], "umgebung": True,
+        "vorgabe": None, "erlaubt": ["coder-glm", "longctx-lite", "longctx"], "umgebung": True,
+    },
+    "LITELLM_MODEL": {
+        "text": "Primäres Worker-Modell (LiteLLM-Alias)",
+        "vorgabe": "coder",
+        "erlaubt": [
+            "coder", "coder-pro", "coder-fast", "coder-or",
+            "coder-free", "coder-glm", "coder-qwen", "coder-nvidia",
+        ],
+        "umgebung": True,
     },
 }
 
