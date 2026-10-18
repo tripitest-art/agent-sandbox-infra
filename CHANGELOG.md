@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- Doku und Beispiel: `tests/acceptance/*` steht nicht mehr in den `manual_paths` von agent-sandbox-infra, das Muster träfe jeden Worker-PR (neuer `test_issue_<N>.py`) und verhinderte den Auto-Merge (#).
 - Doku: Home-Assistant-Rückbau redaktionell abgeschlossen; Architekturdiagramm, README, ROADMAP, autodeploy.md und Review-Skill auf Web-Dashboard und ntfy aktualisiert (#154).
 - Home Assistant: Obsolete Module (`ha_status.py`, `qwen_webhook.py`), Konfigurationen (`homeassistant/`), zugehörige Tests und Doku-Links gelöscht (#153).
 - `install.sh`: Home-Assistant-Dienste (`qwen-webhook.service`, `ha-status.service`/`timer`) und Secret-Abfragen entfernt (#152).
@@ -28,6 +29,8 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ### Geändert
 - review_tick: Token-Limit der Reviewer-Antwort 16000 statt 6000, einstellbar mit `REVIEW_MAX_TOKENS` (GLM zählt Denk-Tokens mit) (#135).
 - Merge-Modus: „automatisch“ ist der Standard für Worker-Issues, manuell nur für Aufsichtsdateien (`manual_paths`); braucht `freigabe-geschützt`, wirkt nach Serverkonfiguration (#133).
+
+### Geändert
 
 ### Hinzugefügt
 - Planer-Preflight: Skript `scripts/issuecheck.py` prüft Issue-Text, Formatierung und Akzeptanztests vor dem Einstellen, führt isolierte pytest-Rot-Läufe durch; neuer Skill `skills/agent-sandbox-planner/SKILL.md` und Dokumentation in `docs/planer-ablauf.md` (Stufe 5, #17).
