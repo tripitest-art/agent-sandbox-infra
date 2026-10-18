@@ -30,6 +30,7 @@ LITELLM_FALLBACKS=${LITELLM_FALLBACKS:-coder-or,coder-free}
 OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
 AGENT=${AGENT:-qwen-code}                       # oder opencode
+TAKT=${TAKT:-$(conf_get TAKT)}
 TAKT=${TAKT:-2min}                              # so oft sucht der Worker Arbeit (ohne Arbeit kostet ein Takt nur GitHub-Abfragen, kein Modell)
 # Wo die Unit-Dateien und die aktivierten Timer liegen. Nur für Tests überschreibbar (dort zeigen
 # beide auf ein Ersatzverzeichnis, damit kein Lauf auf /etc/systemd/system zugreift; Regel 4).
@@ -76,7 +77,12 @@ if ! [[ $AUTODEPLOY =~ ^[01]$ ]]; then
   echo "AUTODEPLOY muss 0 oder 1 sein. Nichts gemerkt." >&2
   exit 1
 fi
+REVIEW_TAKT=${REVIEW_TAKT:-$(conf_get REVIEW_TAKT)}
 REVIEW_TAKT=${REVIEW_TAKT:-2min}                # so oft sucht der Review-Takt einen PR (Modellaufruf nur für einen neuen Commit)
+if ! [[ $TAKT =~ ^[1-9][0-9]*(s|sec|m|min|h|d)?$ ]] || ! [[ $REVIEW_TAKT =~ ^[1-9][0-9]*(s|sec|m|min|h|d)?$ ]]; then
+  echo "TAKT und REVIEW_TAKT müssen gültige Zeitangaben sein (z. B. 2min, 5min). Nichts gemerkt." >&2
+  exit 1
+fi
 REVIEW_MODEL=${REVIEW_MODEL:-coder-glm}         # LiteLLM-Alias (GLM, andere Familie als der Worker)
 REVIEW_MODEL_BIG=${REVIEW_MODEL_BIG:-longctx-lite}   # für sehr große Diffs
 REVIEWER_NAME=${REVIEWER_NAME:-GLM}             # steht als „Reviewer: …“ im Review
@@ -87,8 +93,8 @@ SLOT_CPU_PERCENT=${SLOT_CPU_PERCENT:-$(conf_get SLOT_CPU_PERCENT)}
 slot_limits_check || { echo "Nichts gemerkt; Einstellung korrigieren oder die Zeile aus $CONF entfernen." >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 # Gleich merken, nicht erst am Ende: Bricht ein späterer Schritt ab, gilt der Wunsch beim nächsten Lauf trotzdem.
-( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS REVIEW_POST REVIEW_AUTO_MERGE SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT DASHBOARD DASHBOARD_PORT AUTODEPLOY ) \
-  && echo "Einstellungen gemerkt ($CONF): MAX_WORKERS=$WORKERS_WANTED REVIEW_POST=$REVIEW_POST REVIEW_AUTO_MERGE=$REVIEW_AUTO_MERGE" \
+( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS REVIEW_POST REVIEW_AUTO_MERGE SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT DASHBOARD DASHBOARD_PORT AUTODEPLOY TAKT REVIEW_TAKT ) \
+  && echo "Einstellungen gemerkt ($CONF): MAX_WORKERS=$WORKERS_WANTED REVIEW_POST=$REVIEW_POST REVIEW_AUTO_MERGE=$REVIEW_AUTO_MERGE TAKT=$TAKT REVIEW_TAKT=$REVIEW_TAKT" \
   || echo "Warnung: Einstellungen konnten nicht gemerkt werden ($CONF)"
 # Alle LiteLLM-Aliase, die der Worker nutzen kann (Hauptmodell zuerst, ohne Doppelte)
 LITELLM_ALL=$(printf '%s\n' "$LITELLM_MODEL" ${LITELLM_FALLBACKS//,/ } | awk 'NF && !seen[$0]++')
