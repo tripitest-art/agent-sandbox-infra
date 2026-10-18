@@ -1712,11 +1712,28 @@ def test_audit_schreibt_ereignis_mit_utc_zeit(tmp_path, monkeypatch):
     monkeypatch.setattr(w, "AUDIT_LOG", str(f))
     monkeypatch.setattr(w, "WORKER_SLOT", "2")
     monkeypatch.setattr(w, "MODEL", "test-modell")
+    monkeypatch.setattr(w, "BACKEND", "ollama")   # model ist der Ollama-Name, unabhängig von der Umgebung
     w.audit("ereignis", issue=5)
     z = _audit_zeilen(f)[0]
     assert z["event"] == "ereignis" and z["issue"] == 5
     assert z["slot"] == "2" and z["model"] == "test-modell"
     assert datetime.fromisoformat(z["ts"]).utcoffset() == timedelta(0)
+
+
+def test_audit_nimmt_backend_und_aktives_modell_je_aufruf_neu(tmp_path, monkeypatch):
+    """BACKEND und ACTIVE_MODEL liest audit() bei jedem Aufruf: erst lokal, dann über den Proxy (#147)."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(w, "AUDIT_LOG", str(f))
+    monkeypatch.setattr(w, "MODEL", "ollama-name")
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "BACKEND", "ollama")
+    w.audit("lokal")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    w.audit("proxy")
+    lokal, proxy = _audit_zeilen(f)
+    assert lokal["active_model"] == "ollama-name"
+    assert proxy["active_model"] == "coder"
+    assert lokal["model"] == proxy["model"] == "ollama-name"
 
 
 def test_audit_maskiert_nur_die_geheimnamen(tmp_path, monkeypatch):
@@ -1781,6 +1798,7 @@ def test_claim_issue_protokolliert_den_auftrag(tmp_path, monkeypatch):
     monkeypatch.setattr(w, "AUDIT_LOG", str(f))
     monkeypatch.setattr(w, "WORKER_SLOT", "3")
     monkeypatch.setattr(w, "MODEL", "test-modell")
+    monkeypatch.setattr(w, "BACKEND", "ollama")   # model ist der Ollama-Name, unabhängig von der Umgebung
     monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: _Done("https://github.com/o/r/issues/12\n"))
     assert w.claim_issue(12) is True
     z = _audit_zeilen(f)

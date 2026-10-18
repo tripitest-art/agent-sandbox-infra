@@ -200,7 +200,12 @@ def log(msg: str) -> None:
 
 def audit(event: str, **fields) -> None:
     """Hängt eine JSON-Zeile an AUDIT_LOG: ts (UTC, ISO 8601), event, slot (WORKER_SLOT),
-    model (MODEL) und fields.
+    model (MODEL), active_model und fields.
+
+    model ist der Ollama-Name; active_model ist das tatsächlich genutzte Modell: ACTIVE_MODEL
+    mit BACKEND=litellm (nach use_model() also ein Ausweichmodell), sonst MODEL (#147). Beide
+    Globalen werden bei jedem Aufruf neu gelesen, damit ein Ausweichen sofort im Log steht.
+    Das Feld steht vor fields und ist damit wie die übrigen Grundfelder überschreibbar.
 
     Nicht serialisierbare Werte gehen per `str()` hinein. Felder namens password, secret,
     api_key, authorization oder token erscheinen als „***“ (Regel 5), alle anderen unverändert.
@@ -209,7 +214,8 @@ def audit(event: str, **fields) -> None:
     Inhalt der Zeile, damit kein Geheimnis über die Fehlermeldung entweicht."""
     try:
         zeile: dict[str, object] = {"ts": datetime.now(timezone.utc).isoformat(),
-                                    "event": event, "slot": WORKER_SLOT, "model": MODEL}
+                                    "event": event, "slot": WORKER_SLOT, "model": MODEL,
+                                    "active_model": ACTIVE_MODEL if BACKEND == "litellm" else MODEL}
         for name, value in fields.items():
             zeile[name] = "***" if name.lower() in _AUDIT_SECRET_KEYS else value
         text = json.dumps(zeile, ensure_ascii=False, default=str)   # erst serialisieren, dann öffnen
