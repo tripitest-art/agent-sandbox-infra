@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- Tests: `tests/conftest.py` setzt zusätzlich `AGENT_SETTINGS` auf einen nicht vorhandenen Pfad. Auf dem Server steht in `/etc/agent-settings.json` ein anderes Worker-Modell (`coder-nvidia`); acht Tests (`test_worker_tick.py`, `test_issue_60`) waren dort rot und der Auto-Deploy rollte zurück (PR folgt).
 - Tests: `tests/conftest.py` setzt `WORKDIR` auf einen nicht vorhandenen Pfad. Auf dem Server gibt es den echten Worker-Klon; 13 ältere Tests (`test_issue_39/90/106/178`) liefen dort in `prepare_issue_branch` und der Auto-Deploy rollte `56f7582` zurück (PR folgt).
 - `dashboard`: Die Kopfzeile zeigt jetzt Kurz-Hash und Zeitpunkt des zuletzt deployten Stands (`.deploy-state.json`, neues Feld `last_good_at` in `autodeploy.py`); ein zurückgerollter Stand erscheint zusätzlich als Banner (#188).
 - `worker_tick`: Push und Pull Request legt der Takt nach dem Agentenlauf an; der PR-Text entsteht aus Vorlage und Commit-Nachrichten, ein abgelehnter Push alarmiert (#185).
