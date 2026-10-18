@@ -28,8 +28,8 @@ postet REVIEW_POST=1 ihn ohne neuen Modellaufruf.
 
 Mit REVIEW_POST=1 zusätzlich: Freigegebene PRs mit Merge-Modus „automatisch“ werden gemergt; scheitert
 der Merge (z. B. noch nicht mergebar), versucht der nächste Takt es erneut (MERGE_RETRIES). Ein PR mit
-Label `review-anfordern`, zu dem es kein Worker-Issue gibt, wird nie gemergt (kein Vertrag): er liegt
-nach dem Review bei Stephan.
+Label `review-anfordern`, zu dem es kein Worker-Issue gibt, hat keinen Vertrag: dort entscheidet der
+PR-Text („Merge-Modus: automatisch“), sonst liegt er nach dem Review bei Stephan.
 Nach dem geposteten Review setzt der Takt auf den geprüften Commit den Status `review`
 (success bei „Freigegeben“, failure bei „Änderungen nötig“), damit Stephan ihn in `main-schutz`
 als Pflicht-Check eintragen kann; ohne Review bleibt der Status aus.
@@ -935,21 +935,26 @@ def _run_pr_review() -> int:
             log(f"PR #{n}: Freigegeben, aber REVIEW_AUTO_MERGE=0; kein Merge.")
             return 0
         if pr["issue_no"] is None:
-            # Ohne Worker-Issue gibt es keinen Vertrag und keinen automatischen Merge: immer Stephan.
-            log(f"PR #{n}: Freigegeben, aber kein Worker-Issue; liegt bei Stephan.")
-            to_stephan(n, key, "Freigegeben, kein Worker-Issue: bitte prüfen und mergen.", state)
-            return 0
-        if not PROJECT_AUTO_MERGE:
-            log(f"PR #{n}: Freigegeben, aber {REPO} ist auf manuellen Merge gestellt (auto_merge=false).")
-            to_stephan(n, key, "Freigegeben; in diesem Projekt mergt immer Stephan: bitte prüfen und mergen.", state)
-            return 0
-        if issue is None:
-            # Beim Posten eines bestehenden Entwurfs wurde das Issue oben nicht geladen.
-            try:
-                issue = gh_json("issue", "view", str(pr["issue_no"]), "--json", "number,title,body")
-            except subprocess.CalledProcessError:
-                issue = None
-        if issue and is_auto_merge(issue.get("body")):
+            # Ohne Worker-Issue fehlt der Vertrag: der Merge-Modus steht dann im PR-Text.
+            if not PROJECT_AUTO_MERGE or not is_auto_merge(pr.get("body")):
+                log(f"PR #{n}: Freigegeben, aber kein Worker-Issue; liegt bei Stephan.")
+                to_stephan(n, key, "Freigegeben, kein Worker-Issue: bitte prüfen und mergen.", state)
+                return 0
+            auto = True
+        else:
+            if not PROJECT_AUTO_MERGE:
+                log(f"PR #{n}: Freigegeben, aber {REPO} ist auf manuellen Merge gestellt (auto_merge=false).")
+                to_stephan(n, key, "Freigegeben; in diesem Projekt mergt immer Stephan: bitte prüfen und mergen.", state)
+                return 0
+            if issue is None:
+                # Beim Posten eines bestehenden Entwurfs wurde das Issue oben nicht geladen.
+                try:
+                    issue = gh_json("issue", "view", str(pr["issue_no"]), "--json", "number,title,body")
+                except subprocess.CalledProcessError:
+                    issue = None
+            # Beim Worker-PR gilt der Issue-Text, nicht der PR-Text: dort steht der Vertrag.
+            auto = bool(issue and is_auto_merge(issue.get("body")))
+        if auto:
             if PROJECT_MANUAL_PATHS:
                 # Frische Abfrage: Zwischen Review und Merge kann der PR weitergeschoben worden sein.
                 paths = pr_files(n)

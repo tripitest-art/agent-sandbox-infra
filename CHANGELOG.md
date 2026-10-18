@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `review_tick`: PRs ohne Worker-Issue (Label `review-anfordern`) werden nach „Freigegeben“ ebenfalls gemergt, wenn ihr PR-Text „Merge-Modus: automatisch“ sagt (Zeile oder Abschnitt `### Merge-Modus`); `auto_merge: false` und `manual_paths` des Projekts gelten weiter, sonst liegt der PR wie bisher bei Stephan (#138).
 - README (Dashboard): Master-Key gehört nicht auf CT 112 (Worker laufen als root), Budgets im LiteLLM-Dashboard ändern; korrigierter Aufruf für `--notify-test` (Umgebungsdatei laden) und Hinweise zu `HTTP 307` und leerem Eingabefeld bei der ntfy-URL (#140).
 - `review_tick`: Je Check-Name zählt nur der neueste Lauf (ein von `acceptance-guard` abgebrochener älterer Lauf ist kein rotes Ergebnis mehr), und ein gerade nicht prüfbarer PR blockiert die jüngeren nicht mehr: der Takt überspringt ihn und prüft den nächsten Kandidaten, die Zeile zur fehlenden `Worker:`-Zeile kommt nur einmal je Commit (#137).
 - AGENTS.md Regel 4: Merge-Modus „manuell“ bleibt Standard, „automatisch“ nur für PRs ohne Dateien aus `manual_paths` (braucht `freigabe-geschützt`, wirkt mit #122 und Serverkonfiguration) (#123).
