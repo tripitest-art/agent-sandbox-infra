@@ -563,6 +563,73 @@ def pr_template() -> str:
     return _TEMPLATE_CACHE
 
 
+def build_pr_body(template: str, issue_no: int, worker: str, summary: str) -> str:
+    """Füllt die PR-Vorlage (Text von .github/pull_request_template.md).
+
+    - Die Zeile "Closes #" (genau so, ohne Nummer) unter "## Was und warum" wird zu f"Closes #{issue_no}",
+      gefolgt von einer Leerzeile und `summary` (getrimmt).
+    - Die Kästchen "- [ ] `python -m pytest -q` grün" und "- [ ] Akzeptanztests aus dem Issue zeichengenau"
+      (Zeilenanfang bis zum Wortlaut genügt) werden "- [x] …"; alle anderen Zeilen bleiben unverändert,
+      auch die HTML-Kommentare der Vorlage.
+    - Unter "## Offene Punkte / Abweichungen vom Issue" folgt nach der Überschrift und dem Kommentar die Zeile
+      "keine".
+    - Unter "## Umgesetzt von / Review durch" folgt nach der Überschrift und dem Kommentar die Zeile
+      f"Worker: {worker}".
+    Reine Funktion. Fehlt eine dieser Stellen in `template`, wird sie am Ende als eigener Abschnitt
+    angehängt (Überschrift, Leerzeile, Inhalt), statt zu werfen."""
+    body = (template or "").replace("\r\n", "\n")
+
+    lines = []
+    for line in body.splitlines():
+        if line.startswith("- [ ] `python -m pytest -q`"):
+            lines.append("- [x] " + line[len("- [ ] "):])
+        elif line.startswith("- [ ] Akzeptanztests aus dem Issue zeichengenau"):
+            lines.append("- [x] " + line[len("- [ ] "):])
+        else:
+            lines.append(line)
+    body = "\n".join(lines)
+
+    missing: list[tuple[str, str]] = []
+
+    summary_clean = summary.strip()
+    closes_content = f"Closes #{issue_no}\n\n{summary_clean}" if summary_clean else f"Closes #{issue_no}"
+    closes_re = re.compile(r"^Closes\s*#\s*$", re.M)
+    if closes_re.search(body):
+        body = closes_re.sub(closes_content, body, count=1)
+    else:
+        was_re = re.compile(r"^##\s*Was und warum\s*$", re.M)
+        if was_re.search(body):
+            body = was_re.sub(rf"## Was und warum\n\n{closes_content}", body, count=1)
+        else:
+            missing.append(("## Was und warum", closes_content))
+
+    offene_re = re.compile(r"^##\s*Offene Punkte\s*/\s*Abweichungen vom Issue\s*$", re.M)
+    m_offene = offene_re.search(body)
+    if m_offene:
+        start_pos = m_offene.end()
+        comment_m = re.compile(r"\s*<!--.*?-->", re.S).match(body, start_pos)
+        insert_pos = comment_m.end() if comment_m else start_pos
+        body = body[:insert_pos] + "\n\nkeine\n" + body[insert_pos:]
+    else:
+        missing.append(("## Offene Punkte / Abweichungen vom Issue", "keine"))
+
+    umgesetzt_re = re.compile(r"^##\s*Umgesetzt von\s*/\s*Review durch\s*$", re.M)
+    m_umgesetzt = umgesetzt_re.search(body)
+    worker_line = f"Worker: {worker}"
+    if m_umgesetzt:
+        start_pos = m_umgesetzt.end()
+        comment_m = re.compile(r"\s*<!--.*?-->", re.S).match(body, start_pos)
+        insert_pos = comment_m.end() if comment_m else start_pos
+        body = body[:insert_pos] + f"\n\n{worker_line}\n" + body[insert_pos:]
+    else:
+        missing.append(("## Umgesetzt von / Review durch", worker_line))
+
+    for heading, content in missing:
+        body = body.rstrip() + f"\n\n{heading}\n\n{content}\n"
+
+    return body
+
+
 def pr_text_problems(body: str | None, issue_no: int) -> list[str]:
     """Was im PR-Text fehlt: `Closes #N`, Worker-Zeile, Überschriften der Vorlage."""
     text = _HTML_COMMENT_RE.sub("", body or "")
@@ -1061,6 +1128,71 @@ def prepare_issue_branch(n: int) -> bool:
     return True
 
 
+def open_pr(n: int) -> bool:
+    """Legt nach dem Agentenlauf den PR zu Issue n an. True, wenn es danach einen offenen PR von
+    issue_branch(n) gibt, sonst False.
+
+    1. gh("pr", "list", "--state", "open", "--head", branch, "--json", "number"): nicht leer -> True,
+       sonst nichts weiter (kein Push, kein Anlegen).
+    2. ["git", "rev-list", "--count", "origin/main..HEAD"] (cwd=WORKDIR, env=ENV, check=True): Zahl <= 1
+       (nur der Akzeptanztest-Commit oder weniger) -> False, nichts weiter; Logzeile
+       f"issue{n}: keine Änderungen über den Akzeptanztest hinaus, kein PR."
+    3. ["git", "push", "-u", "origin", branch] (cwd=WORKDIR, env=ENV, check=False): Exit != 0 -> False,
+       keine weitere Aktion, Zeile alarm(f"issue{n}", "Push abgelehnt (Tests rot oder GitHub-Fehler)").
+       Der Ausgabetext des Befehls kommt nie ins Log (Regel 5).
+    4. ["git", "log", "--reverse", "--format=%B%x00", "origin/main..HEAD"] (cwd=WORKDIR, env=ENV,
+       check=True): stdout an NUL trennen, die erste Nachricht (Akzeptanztest-Commit) weglassen, leere
+       verwerfen, die übrigen getrimmt mit je einer Leerzeile dazwischen zu `summary` verbinden.
+    5. title = gh("issue", "view", str(n), "--json", "title")["title"];
+       body = build_pr_body(pr_template(), n, WORKER, summary);
+       gh("pr", "create", "--title", title, "--body", body, "--head", branch). Rückgabe True."""
+    branch = issue_branch(n)
+    offen = gh("pr", "list", "--state", "open", "--head", branch, "--json", "number")
+    if offen:
+        return True
+
+    res_count = subprocess.run(
+        ["git", "rev-list", "--count", "origin/main..HEAD"],
+        cwd=WORKDIR,
+        env=ENV,
+        check=True,
+    )
+    count_str = str(getattr(res_count, "stdout", "") or "").strip()
+    try:
+        count = int(count_str)
+    except ValueError:
+        count = 0
+    if count <= 1:
+        log(f"issue{n}: keine Änderungen über den Akzeptanztest hinaus, kein PR.")
+        return False
+
+    res_push = subprocess.run(
+        ["git", "push", "-u", "origin", branch],
+        cwd=WORKDIR,
+        env=ENV,
+        check=False,
+    )
+    if getattr(res_push, "returncode", None) != 0:
+        alarm(f"issue{n}", "Push abgelehnt (Tests rot oder GitHub-Fehler)")
+        return False
+
+    res_log = subprocess.run(
+        ["git", "log", "--reverse", "--format=%B%x00", "origin/main..HEAD"],
+        cwd=WORKDIR,
+        env=ENV,
+        check=True,
+    )
+    raw_msgs = (getattr(res_log, "stdout", "") or "").split("\x00")
+    msgs = [m.strip() for m in raw_msgs[1:] if m.strip()]
+    summary = "\n\n".join(msgs)
+
+    view = gh("issue", "view", str(n), "--json", "title")
+    title = view["title"] if isinstance(view, dict) and "title" in view else ""
+    body = build_pr_body(pr_template(), n, WORKER, summary)
+    gh("pr", "create", "--title", title, "--body", body, "--head", branch)
+    return True
+
+
 def issue_job(skip: Callable[[str], bool] | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
 
@@ -1157,13 +1289,10 @@ Das Issue steht unten; es ist der Vertrag. Gehe genau diese Schritte durch und f
 5. `{TEST_CMD}`. Ist ein Test rot: Fehlermeldung lesen, Code (nicht den Akzeptanztest)
    korrigieren, Schritt 5 wiederholen. Ein roter Test ist kein Grund aufzuhören, sondern der
    nächste Arbeitsschritt. Erst weiter, wenn alles grün ist.
-6. `git add -A && git commit -m "<was und warum>" && git push -u origin {branch}`
+6. Alle Änderungen in Commits sichern (`git add -A && git commit -m "<was und warum>"`). Die
+   Nachricht jedes Commits beschreibt, was und warum geändert wurde (sie wird zum PR-Text), und
+   aufhören. Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an.
    {PUSH_RULE}
-7. Schreib den PR-Text nach der Vorlage unten in .git/pr-body.md: jede Überschrift
-   ausgefüllt, „Closes #{n}“, zutreffende Kästchen mit [x], unter „Offene Punkte“ eine Antwort
-   („keine“ reicht), unter „Umgesetzt von / Review durch“ die Zeile „Worker: {WORKER}“. Dann
-   `gh pr create --title "$(gh issue view {n} --json title -q .title)" --body-file .git/pr-body.md`
-8. Prüfe mit `gh pr view {branch} --json number,title,body`, dass der PR mit deinem Text da ist.
 Hältst du einen Akzeptanztest für falsch: aufhören und die Begründung mit
 `gh issue comment {n} --body-file .git/frage.md` ins Issue schreiben. Nie den Test passend machen.
 {ERROR_RULE.format(where=f"ins Issue #{n}")}
@@ -2131,6 +2260,11 @@ def main() -> int:
             return 0
         if state.pop(f"_apierr:{skey}", None) is not None:
             save_state(state)   # ein früherer Anbieterfehler ist vorbei
+        if n is not None:
+            # #172 / #68: Gibt es WORKDIR nicht (gefaktes prepare_workdir in bestehenden Tests),
+            # entfällt das Anlegen des PRs.
+            if os.path.isdir(WORKDIR):
+                open_pr(n)
         # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
         if key.startswith("issue"):
             check_issue_result(key)

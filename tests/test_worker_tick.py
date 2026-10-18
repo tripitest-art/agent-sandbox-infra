@@ -69,10 +69,13 @@ def _repo_workdir(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "git_hooks_dir", lambda cwd: str(tmp_path / "git-hooks"))
     # #171: prepare_issue_branch legt Zweige und Akzeptanztests in WORKDIR an. Nie im Test ins Repo.
     monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+    # #172: open_pr legt den PR nach dem Agentenlauf an. Nie im Test ins echte GitHub.
+    monkeypatch.setattr(w, "open_pr", lambda n: True)
 
 
 _ECHTE_GIT_HOOKS_DIR = w.git_hooks_dir    # vor dem Autouse-Fixture gesichert (#68)
 _ECHTE_PREPARE_ISSUE_BRANCH = w.prepare_issue_branch  # vor dem Autouse-Fixture gesichert (#171)
+_ECHTE_OPEN_PR = w.open_pr  # vor dem Autouse-Fixture gesichert (#172)
 
 
 def _good_body(issue_no=100):
@@ -204,17 +207,14 @@ def test_issue_job(monkeypatch):
     for step in ("gh issue edit 102 --add-label in-arbeit --remove-label bereit",
                  "Der Takt hat den Branch feature/issue-102 ausgecheckt und den Akzeptanztest bereits als Commit gesichert.",
                  "Die Datei tests/acceptance/test_issue_102.py darf der Agent nie ändern.",
-                 "git push -u origin feature/issue-102",
-                 "--body-file .git/pr-body.md",
-                 "gh pr view feature/issue-102 --json number,title,body"):
+                 "Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an."):
         assert step in task
-    assert "Closes #102" in task and f"Worker: {w.WORKER}" in task
+    assert f"Worker: {w.WORKER}" in task
     assert ISSUE_BODY in task  # Issue wörtlich, nicht vom Modell nachzulesen
     assert "Ein roter Test ist kein Grund aufzuhören" in task  # erster Lauf endete dort
     assert "NICHT erledigt" in task and "ins Issue #102" in task
     assert "/tmp/" not in task
     assert not any(c[:2] == ("issue", "edit") for c in fake.calls)
-    assert '--title "$(gh issue view 102 --json title -q .title)"' in task
 
 
 def test_issue_job_ignores_foreign_issue(monkeypatch):
@@ -1699,6 +1699,131 @@ def test_prepare_issue_branch_laesst_called_process_error_durch(monkeypatch, tmp
         w.prepare_issue_branch(7)
 
 
+def test_main_ruft_open_pr_nach_agent_und_vor_check_issue_result(monkeypatch, tmp_path):
+    """#172: open_pr läuft für Issue-Aufträge genau einmal nach dem Agentenlauf und vor check_issue_result."""
+    schritte = []
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: None)
+    monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: schritte.append("agent") or 0)
+    aufrufe = []
+    monkeypatch.setattr(w, "open_pr", lambda n: aufrufe.append(n) or schritte.append("open_pr") or True)
+    monkeypatch.setattr(w, "check_issue_result", lambda k: schritte.append("check_issue_result"))
+
+    assert w.main() == 0
+    assert aufrufe == [7]
+    assert schritte == ["agent", "open_pr", "check_issue_result"]
+
+
+def test_main_ruft_open_pr_nie_fuer_nacharbeit_oder_text(monkeypatch, tmp_path):
+    """#172: open_pr läuft nie für Nacharbeit oder PR-Text."""
+    for job_key, pr_no, before in [
+        ("pr103@2026-09-29T21:39:23Z", 103, ("3373e35", "commit")),
+        ("text7@3373e35", 7, ("3373e35", "commit")),
+    ]:
+        monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+        monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+        monkeypatch.setattr(w, "PREFIX", "")
+        monkeypatch.setattr(w, "BACKEND", "litellm")
+        monkeypatch.setattr(w, "litellm_ready", lambda: None)
+        monkeypatch.setattr(w, "pick_job", lambda state, k=job_key, p=pr_no, b=before: (k, "Auftrag", p, b))
+        monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+        monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+        monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+        monkeypatch.setattr(w, "prepare_workdir", lambda: None)
+        monkeypatch.setattr(w, "gh", FakeGH(prs=[_pr()]))
+        monkeypatch.setattr(w, "pr_snapshot", lambda view: ("3373e35", "commit"))
+        monkeypatch.setattr(w, "warn_text", lambda *a: None)
+        monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
+
+        aufgerufen = []
+        monkeypatch.setattr(w, "open_pr", lambda n: aufgerufen.append(n) or True)
+
+        assert w.main() == 0
+        assert aufgerufen == []
+
+
+def test_main_ruft_open_pr_nicht_nach_anbieterfehler(monkeypatch, tmp_path):
+    """#172: Ein Anbieterfehler im Lauf bricht main() ab; open_pr wird nicht aufgerufen."""
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: None)
+    monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+
+    def run_with_apierr(prompt):
+        w.LAST_AGENT_ERROR = "API 429: Budget exceeded"
+        return 1
+
+    monkeypatch.setattr(w, "run_agent", run_with_apierr)
+    aufgerufen = []
+    monkeypatch.setattr(w, "open_pr", lambda n: aufgerufen.append(n) or True)
+
+    assert w.main() == 0
+    assert aufgerufen == []
+
+
+def test_main_behandelt_ausnahme_aus_open_pr(monkeypatch, tmp_path, capsys):
+    """#172: open_pr lässt Fehler beim PR-Anlegen zu main durch; main fängt sie und alarmiert Stephan."""
+    monkeypatch.setattr(w, "open_pr", _ECHTE_OPEN_PR)
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: None)
+    monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
+
+    class FailingGH:
+        def __call__(self, *args):
+            if args[:2] == ("pr", "list"):
+                return []
+            if args[:2] == ("issue", "view"):
+                return {"title": "Titel"}
+            if args[:2] == ("pr", "create"):
+                raise RuntimeError("GitHub API kaputt")
+            raise AssertionError(f"unerwartet: {args}")
+
+    monkeypatch.setattr(w, "gh", FailingGH())
+
+    def fake_git(cmd, **kw):
+        if "rev-list" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "2\n", "")
+        if "push" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "log" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "Akzeptanztests aus #7\n\x00Zusammenfassung\n\x00", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_git)
+
+    assert w.main() == 0
+    out = capsys.readouterr().out
+    assert "⚠ Stephan: issue7: Fehler: GitHub API kaputt" in out
+
+
 def test_push_regel_nur_im_issue_auftrag(monkeypatch):
     """#68: Der Auftrag für ein neues Issue nennt die Push-Sperre, die Nacharbeit nicht.
 
@@ -1716,9 +1841,6 @@ def test_push_regel_nur_im_issue_auftrag(monkeypatch):
     key, task, pr_no, before = w.issue_job()
     assert key == "issue68"
     assert w.PUSH_RULE in task
-    # Direkt nach Schritt 6 (dem Push), vor Schritt 7: dort liest der Agent den Push-Befehl.
-    assert task.index('git push -u origin feature/issue-68') < task.index(w.PUSH_RULE)
-    assert task.index(w.PUSH_RULE) < task.index("7. Schreib den PR-Text")
 
     monkeypatch.setattr(w, "gh", FakeGH(prs=[_pr()]))
     rkey, rtask, _, _ = w.rework_job()
