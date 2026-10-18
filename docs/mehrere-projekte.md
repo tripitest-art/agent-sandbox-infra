@@ -30,8 +30,7 @@ eine **Projektliste**. Das zweite Projekt ist diese Infrastruktur selbst
    "auto_merge": true, "required_checks": ["tests", "acceptance-guard", "CodeQL"]},
   {"name": "agent-sandbox-infra", "repo": "tripitest-art/agent-sandbox-infra",
    "workdir": "/root/work/agent-sandbox-infra", "auto_merge": false,
-   "manual_paths": ["sandbox/*", ".github/*", "AGENTS.md", "tests/acceptance/*",
-                    "docs/main-schutz.ruleset.json", "skills/*"]}
+   "manual_paths": ["AGENTS.md", ".github/*", "skills/*", "docs/main-schutz.ruleset.json"]}
 ]}
 ```
 
@@ -119,10 +118,12 @@ Voraussetzung ist der Vertrag aus sc-digger:
 
 Die Skripte steuern die Agenten, die sie ändern. Deshalb gilt (siehe `AGENTS.md`, Regeln 4 und 6):
 
-- `auto_merge: true` mit `manual_paths` für die Aufsichtsdateien (`AGENTS.md`, `.github/*`,
-  `tests/acceptance/*`, `skills/*`, `docs/main-schutz.ruleset.json`): Der Takt mergt nach „Freigegeben“
-  alle PRs ohne Treffer bei „Merge-Modus: automatisch“; Treffer gehen an Stephan. Mit `auto_merge: false`
-  prüft und mergt Stephan jeden PR.
+- `auto_merge: true` mit `manual_paths` für die Aufsichtsdateien (`AGENTS.md`, `.github/*`, `skills/*`,
+  `docs/main-schutz.ruleset.json`): Der Takt mergt nach „Freigegeben“ alle PRs ohne Treffer bei
+  „Merge-Modus: automatisch“; Treffer gehen an Stephan. Mit `auto_merge: false` prüft und mergt Stephan
+  jeden PR. `tests/acceptance/*` steht bewusst **nicht** in der Liste: Jeder Worker-PR legt dort seinen
+  Akzeptanztest an (`test_issue_<N>.py`), das Muster würde jeden PR an Stephan übergeben. Schon gemergte
+  Akzeptanztests schützt `acceptance-guard` (Änderung nur mit `freigabe-geschützt`).
 - Kein Agent deployt oder führt `install.sh`, `systemctl` oder Befehle auf dem Server aus. Ein Merge
   wirkt erst, wenn Stephan `git pull && bash sandbox/install.sh` ausführt.
 - Änderungen, die Review, Modellfamilien-Regel, `auto_merge`, Merge-Bedingungen oder `acceptance-guard`
