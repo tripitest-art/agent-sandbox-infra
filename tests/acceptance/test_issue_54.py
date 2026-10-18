@@ -55,8 +55,11 @@ def test_use_project_setzt_die_pflicht_checks(monkeypatch):
 
 
 def test_nicht_vorhandener_pflicht_check_bleibt_folgenlos():
-    # Unverändertes Verhalten: `checks_summary` bewertet nur vorhandene Checks.
+    # Gemeint ist ein Check, der nicht zur Pflichtliste gehört (hier CodeQL): Auch ein NEUTRAL-Lauf macht den PR
+    # nicht rot. Seit #144 gilt ein *fehlender* Pflicht-Check dagegen als laufend und später als rot; deshalb
+    # stehen hier beide Pflicht-Checks des Vertrags dieses Repos (tests, acceptance-guard) im Rollup.
     done, rows, red = r.checks_summary(
         [{"name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"},
+         {"name": "acceptance-guard", "status": "COMPLETED", "conclusion": "SUCCESS"},
          {"name": "CodeQL", "status": "COMPLETED", "conclusion": "NEUTRAL"}])
     assert done is True and red == []

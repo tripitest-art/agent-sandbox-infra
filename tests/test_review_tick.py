@@ -5,6 +5,7 @@ import io
 import json
 import sys
 import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -179,8 +180,34 @@ def test_checks_summary_status_eintraege_zaehlen_je_context():
     assert sorted(rows) == [("acceptance-guard", "SUCCESS"), ("github-advanced-security", "FAILURE"),
                             ("review", "FAILURE"), ("tests", "SUCCESS")]
     # Statuseinträge ohne Zeitstempel: der spätere Eintrag der Liste gewinnt
-    assert r.checks_summary([{"context": "review", "state": "FAILURE"},
-                             {"context": "review", "state": "SUCCESS"}])[1] == [("review", "SUCCESS")]
+    rollup = [{"context": "review", "state": "FAILURE"},
+              {"context": "review", "state": "SUCCESS"},
+              {"name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"},
+              {"name": "acceptance-guard", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    assert [row for row in r.checks_summary(rollup)[1] if row[0] == "review"] == [("review", "SUCCESS")]
+
+
+def test_checks_summary_statuseintraege_geben_keine_kulanzzeit():
+    """`startedAt` gibt es nur bei Check-Runs: Ein Rollup nur aus Statuseinträgen (`context`/`state`)
+    liefert keinen Beginn, also keine Kulanzzeit — ein fehlender Pflicht-Check ist sofort `FEHLT`."""
+    rollup = [{"context": "review", "state": "SUCCESS"},
+              {"name": "acceptance-guard", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    now = datetime(2026, 10, 17, 8, 0, 30, tzinfo=timezone.utc)
+    done, rows, red = r.checks_summary(rollup, now=now)
+    assert done is True and red == ["tests"]
+    assert ("tests", "FEHLT") in rows
+
+
+def test_checks_summary_startzeit_kommt_nur_von_check_runs_mit_startedat():
+    """Statuseinträge zählen für den Beginn nicht mit; ein Check-Run mit `startedAt` schon."""
+    rollup = [{"context": "review", "state": "SUCCESS"},
+              {"name": "acceptance-guard", "status": "COMPLETED", "conclusion": "SUCCESS",
+               "startedAt": "2026-10-17T08:00:00Z"}]
+    now = datetime(2026, 10, 17, 8, 5, 0, tzinfo=timezone.utc)
+    done, rows, red = r.checks_summary(rollup, now=now)
+    assert done is False and red == [] and ("tests", "FEHLT") not in rows
+    now = datetime(2026, 10, 17, 8, 20, 0, tzinfo=timezone.utc)
+    assert r.checks_summary(rollup, now=now)[2] == ["tests"]
 
 
 def test_checks_summary_ein_eintrag_je_name_wie_bisher():
