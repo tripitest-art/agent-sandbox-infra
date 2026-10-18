@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `dashboard`: Die Kopfzeile zeigt jetzt Kurz-Hash und Zeitpunkt des zuletzt deployten Stands (`.deploy-state.json`, neues Feld `last_good_at` in `autodeploy.py`); ein zurückgerollter Stand erscheint zusätzlich als Banner (#188).
 - `worker_tick`: Push und Pull Request legt der Takt nach dem Agentenlauf an; der PR-Text entsteht aus Vorlage und Commit-Nachrichten, ein abgelehnter Push alarmiert (#185).
 - `worker_tick`: Branch und Akzeptanztest-Commit legt der Takt vor dem Agentenlauf an; der Auftragstext nennt den fertigen Branch und verlangt kein Kopieren mehr, fehlt der Akzeptanztest-Block im Issue, bricht der Takt mit Alarm ab (#184).
 - `worker_tick`: Ein LiteLLM-Ausfall über 20 Minuten erscheint im ersten Slot als einmalige „⚠ Stephan:“-Zeile („LiteLLM seit N Minuten nicht erreichbar; Worker und Review stehen“); die Rückkehr steht nach einem Alarm ohne „⚠“ im Log, ein kurzer Aussetzer bleibt still (#182).

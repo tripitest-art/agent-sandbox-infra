@@ -41,6 +41,9 @@ eine „⚠ Stephan:“-Zeile, aber nur einmal je Fehlertext, nicht alle 15 Minu
   Gemeldet wird nie rohe Ausgabe von pytest oder `install.sh`, nur der Exit-Code (Regel 5).
 - Sofort anstoßen: `systemctl start agent-sandbox-deploy.service`. Zurücksetzen eines vermerkten
   `bad`-Stands: `.deploy-state.json` löschen.
+- Das Web-Dashboard (`sandbox/dashboard.py`) liest dieselbe Datei und zeigt `last_good`/`last_good_at`
+  als Kachel „Version“ in der Kopfzeile; ein vermerkter `bad`-Stand erscheint zusätzlich als Banner.
+  Ohne Auto-Deploy oder vor dessen erstem Lauf bleibt die Kachel leer (kein Fehler).
 
 ## Grenzen
 

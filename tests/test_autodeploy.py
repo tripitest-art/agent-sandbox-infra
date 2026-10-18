@@ -164,6 +164,14 @@ def test_erfolg_reihenfolge_und_state(tmp_path):
     assert notes == ["Auto-Deploy: 1111111 -> 2222222 ausgerollt"]
 
 
+def test_erfolg_vermerkt_zeitpunkt_fuer_das_dashboard(tmp_path):
+    # last_good_at kommt aus einer injizierten Uhr, nicht aus time.strftime (Test ohne echte Uhr).
+    git = Git()
+    res, _ = deploy(tmp_path, git, now=lambda: "2026-10-18T20:00:00")
+    assert res.status == "ausgerollt"
+    assert ad.load_state(tmp_path)["last_good_at"] == "2026-10-18T20:00:00"
+
+
 def test_pull_fehler_rollt_nicht_zurueck_und_testet_nicht(tmp_path):
     git = Git(fails=[("git", "pull")])
     res, notes = deploy(tmp_path, git)
