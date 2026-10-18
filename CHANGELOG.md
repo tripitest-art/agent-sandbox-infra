@@ -22,6 +22,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 - Merge-Modus: „automatisch“ ist der Standard für Worker-Issues, manuell nur für Aufsichtsdateien (`manual_paths`); braucht `freigabe-geschützt`, wirkt nach Serverkonfiguration (#133).
 
 ### Hinzugefügt
+- Planer-Preflight: Skript `scripts/issuecheck.py` prüft Issue-Text, Formatierung und Akzeptanztests vor dem Einstellen, führt isolierte pytest-Rot-Läufe durch; neuer Skill `skills/agent-sandbox-planner/SKILL.md` und Dokumentation in `docs/planer-ablauf.md` (Stufe 5, #17).
 - `worker_tick`: Audit-Log (`AUDIT_LOG`, Vorgabe `/root/audit.jsonl`) — je Ereignis eine JSON-Zeile mit UTC-Zeitstempel, `event`, Slot, Modell und den übergebenen Feldern (Werte wie `token` oder `api_key` nur als `***`); den Anfang macht die Übernahme eines Issues (`issue_claimed`, Funktion `audit()`), Schreibfehler brechen den Lauf nicht ab (#136).
 - `wake_listener`: Dienst `agent-wake` startet Takt-Units sofort bei ntfy-Nachrichten (`WAKE_URL`), periodische Timer bleiben als Sicherheitsnetz (#132).
 - Dashboard: Abschnitt „Reviews und Merges“ (Freigabequote, Merges, Übergaben an Stephan, 24 h und 7 Tage, je Projekt und je Reviewer-Modell) aus `worker.log` (`dashboard_stats.py`) (#115).

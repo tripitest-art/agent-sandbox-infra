@@ -119,13 +119,14 @@ DeepSeek berechnet zu Spitzenzeiten (Mo–Fr) einen Aufschlag (1,20 \$ statt 0,6
 Die meiste manuelle Vorbereitungszeit fließt in das Ausformulieren präziser Schnittstellen und Akzeptanztests, die den strengen Vorgaben des `acceptance-guard` genügen.
 
 #### Kernpunkte:
-1. **Lokales Pre-Flight Tooling (`scripts/validate_issue.py`):**
+1. **Lokales Pre-Flight Tooling (`scripts/issuecheck.py`):**
    - Prüft vor dem Einstellen eines Issues:
      - Ist der Akzeptanztest auf dem aktuellen `main` tatsächlich rot?
      - Werden ausschließlich erlaubte Module importiert (keine verbotenen Netzwerk- oder Dritt-Libraries)?
      - Läuft der Test ohne Zeit-/Zufallsabhängigkeiten und ohne `skip`/`xfail`?
-2. **Standardisierter Issue-Prompt:**
-   - Prompt-Vorlage für Antigravity / Claude, um aus stichpunktartigen Benutzerwünschen direkt vertragskonforme Issue-Texte gemäß `ENTWICKLUNG.md` zu generieren.
+     - Sind Pflichtüberschriften, Merge-Modus und Pfade vertragskonform?
+2. **Planer-Skill & Vorlage:**
+   - Skill `skills/agent-sandbox-planner/SKILL.md` für Antigravity / Claude, um aus Stichpunkten direkt vertragskonforme Issue-Texte gemäß `docs/planer-ablauf.md` zu generieren und per Pre-Flight abzusichern.
 
 ---
 
@@ -137,7 +138,7 @@ Die meiste manuelle Vorbereitungszeit fließt in das Ausformulieren präziser Sc
 | **Stufe 2** | Strukturierte Slot-Telemetrie in Home Assistant | ⭐⭐⭐⭐ | ✅ **Gemergt (#48)** |
 | **Stufe 3** | Continuous Deployment (`autodeploy.py`, Pull-Timer auf CT 112) | ⭐⭐⭐⭐ | ✅ **Gemergt (#15)** |
 | **Stufe 4** | Prime-Time- & Budget-Scheduling | ⭐⭐⭐ | 🔵 **Geplant** |
-| **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🔵 **Geplant** |
+| **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🟡 **In Umsetzung (#17)** |
 | **Baustein** | Web-Dashboard als Ersatz fürs HA-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | ✅ **Gemergt (#104, #105)**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |
 | **Baustein** | Mehrere Projekte (Projektliste, Infra-Repo als zweites Projekt) | ⭐⭐⭐⭐ | ✅ **Gemergt (#18, #19, #20)**; Inbetriebnahme auf dem Server: siehe [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) |
 

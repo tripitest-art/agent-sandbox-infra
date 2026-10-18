@@ -57,15 +57,16 @@ Der Planer schreibt Issues, keinen Code: keine Branches, keine Commits, keine PR
    - importieren nur die Standardbibliothek und die Takt-Module dieses Repos;
    - schreiben nur in `tmp_path`. **Nicht** nach `/root` — dort ist der Pfad auf dem
      Entwicklungsrechner nicht schreibbar und in der CI nicht erlaubt (Fehler aus #39).
-6. **Akzeptanztests prüfen (mit Shell).** Datei als Probe unter `tests/acceptance/` anlegen,
-   `python -m pytest -q -p no:cacheprovider <probe>` laufen lassen und belegen, dass jeder Test
-   **rot** ist und zwar aus dem gemeinten Grund; danach die Probe löschen. Ein eigenes
-   Prüfwerkzeug für Akzeptanztests gibt es in diesem Repository nicht (in sc-digger heißt es
-   `issuecheck`). Ergebnis mit dem Commit-Hash von `main` in den
-   Kontext („ohne Umsetzung 3 von 4 rot, mit Umsetzung grün").
+6. **Akzeptanztests prüfen (mit Shell).** Entwurf als Datei speichern (z. B. `entwuerfe/issue-<thema>.md`)
+   und mit `python scripts/issuecheck.py <datei>` prüfen. Das Skript prüft die Pflichtüberschriften,
+   den Merge-Modus, AST-Regeln (kein Netzwerk, keine Zeit-/Zufallsaufrufe, kein `skip`/`xfail`, keine
+   harten `/root`-Pfade, keine versehentlichen `Wartet auf:`-Zeilen) und lässt den Akzeptanztest
+   isoliert mit pytest gegen das Repository laufen. Er muss vor der Umsetzung zwingend **rot** sein
+   (aus dem gemeinten Grund). Der Skill `skills/agent-sandbox-planner/SKILL.md` führt durch diesen Ablauf.
+   Ergebnis mit dem Commit-Hash von `main` in den Kontext („ohne Umsetzung rot (ImportError: ...), mit Umsetzung grün").
    **Ohne Shell** geht das nicht: Label `entwurf` statt `bereit`, im Kontext „Akzeptanztests noch
-   nicht ausgeführt (Planer ohne Shell)". Stephan oder ein Agent mit Shell prüft sie und ersetzt
-   `entwurf` durch `bereit`.
+   nicht ausgeführt (Planer ohne Shell)". Stephan oder ein Agent mit Shell prüft sie mit `scripts/issuecheck.py`
+   und ersetzt `entwurf` durch `bereit`.
 7. **Entwurf zeigen.** Titel, Text und Labels Stephan im Chat vorlegen; erst nach seinem OK
    anlegen (außer er hat ausdrücklich „direkt anlegen" gesagt).
 8. **Anlegen** mit Labels `worker-task`, `phase-N`, `bereit` (ohne Shell `entwurf`), genau einem
