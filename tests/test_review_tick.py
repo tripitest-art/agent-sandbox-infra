@@ -1345,3 +1345,42 @@ def test_fehler_ohne_erkannten_grund_ergibt_die_bisherige_logzeile(monkeypatch, 
         "Projekt a: Fehler: CalledProcessError: Command 'gh' returned non-zero exit status 1.")
     assert "etwas anderes" not in out
 
+
+def test_pr_list_nutzt_limit_zur_schonung_des_graphql_kontingents(monkeypatch):
+    """PR-Liste muss mit --limit aufgerufen werden, um das GitHub-GraphQL-Kontingent zu schonen."""
+    seen = []
+    monkeypatch.setattr(r, "load_state", lambda: {})
+
+    def fake_gh_json(*args):
+        seen.append(args)
+        return []
+
+    monkeypatch.setattr(r, "gh_json", fake_gh_json)
+    r._run_pr_review()
+
+    pr_calls = [c for c in seen if c[:2] == ("pr", "list")]
+    assert len(pr_calls) == 1
+    call = pr_calls[0]
+    assert "--limit" in call
+    idx = call.index("--limit")
+    assert call[idx + 1] == str(r.PR_LIST_LIMIT)
+
+
+def test_unblock_nutzt_limit_fuer_blockierte_issues(monkeypatch):
+    """Abfrage blockierter Issues muss mit --limit aufgerufen werden."""
+    seen = []
+
+    def fake_gh_json(*args):
+        seen.append(args)
+        return []
+
+    monkeypatch.setattr(r, "gh_json", fake_gh_json)
+    r.unblock_dependent_issues()
+
+    issue_calls = [c for c in seen if c[:2] == ("issue", "list")]
+    assert len(issue_calls) == 1
+    call = issue_calls[0]
+    assert "--limit" in call
+    idx = call.index("--limit")
+    assert call[idx + 1] == str(r.BLOCKED_ISSUES_LIMIT)
+

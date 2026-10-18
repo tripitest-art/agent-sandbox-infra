@@ -92,6 +92,8 @@ MAX_ROUNDS = agent_settings.value("MAX_ROUNDS", 2)   # „Änderungen nötig“ 
 MERGE_RETRIES = 6          # so viele Takte lang wird ein gescheiterter Merge wiederholt
 BIG_DIFF_CHARS = 90_000     # darüber: REVIEW_MODEL_BIG
 MAX_DIFF_CHARS = 400_000    # darüber: nicht prüfen, an Stephan melden
+PR_LIST_LIMIT = 10          # GraphQL-Kontingent schonen: max. 10 offene PRs je Takt
+BLOCKED_ISSUES_LIMIT = 20   # max. 20 blockierte Issues zur Entblock-Prüfung
 def _max_tokens() -> int:
     """REVIEW_MAX_TOKENS (Vorgabe 16000). Unbrauchbare Werte (kein Integer, unter 1000) fallen auf die Vorgabe zurück."""
     try:
@@ -857,7 +859,8 @@ def unblock_dependent_issues() -> list[int]:
     Hat ein blockiertes Issue keine erkennbare Abhängigkeit, wird es einmal je Issue gemeldet
     (Zustandsliste `entblock_gemeldet`) statt still übersprungen (Regel 7)."""
     try:
-        blocked = gh_json("issue", "list", "--state", "open", "--label", "blockiert", "--json", "number,title,body")
+        blocked = gh_json("issue", "list", "--state", "open", "--label", "blockiert",
+                          "--limit", str(BLOCKED_ISSUES_LIMIT), "--json", "number,title,body")
     except Exception as exc:
         log(f"Konnte blockierte Issues nicht abfragen: {exc}")
         return []
@@ -900,7 +903,7 @@ def unblock_dependent_issues() -> list[int]:
 
 def _run_pr_review() -> int:
     state = load_state()
-    prs = gh_json("pr", "list", "--state", "open", "--json",
+    prs = gh_json("pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT), "--json",
                   "number,title,body,headRefName,headRefOid,isCrossRepository,isDraft,labels,reviews,commits,statusCheckRollup")
     cache: dict[int, list[str]] = {}
 
