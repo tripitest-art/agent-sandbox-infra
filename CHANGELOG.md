@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- README (Dashboard): Master-Key gehört nicht auf CT 112 (Worker laufen als root), Budgets im LiteLLM-Dashboard ändern; korrigierter Aufruf für `--notify-test` (Umgebungsdatei laden) und Hinweise zu `HTTP 307` und leerem Eingabefeld bei der ntfy-URL (#PR).
 - `review_tick`: Je Check-Name zählt nur der neueste Lauf (ein von `acceptance-guard` abgebrochener älterer Lauf ist kein rotes Ergebnis mehr), und ein gerade nicht prüfbarer PR blockiert die jüngeren nicht mehr: der Takt überspringt ihn und prüft den nächsten Kandidaten, die Zeile zur fehlenden `Worker:`-Zeile kommt nur einmal je Commit (#137).
 - AGENTS.md Regel 4: Merge-Modus „manuell“ bleibt Standard, „automatisch“ nur für PRs ohne Dateien aus `manual_paths` (braucht `freigabe-geschützt`, wirkt mit #122 und Serverkonfiguration) (#123).
 - `review_tick`: Kurz vor dem Merge prüft der Takt die frische Dateiliste des freigegebenen PRs gegen die Dateimuster `manual_paths` des Projekts (z. B. `sandbox/*`, `AGENTS.md`); ein Treffer oder eine nicht lesbare Liste geht mit Label `braucht-stephan` an Stephan, ohne Muster bleibt es wie bisher (#126).
