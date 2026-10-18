@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `install.sh`: merkt sich `TAKT` und `REVIEW_TAKT` in `/etc/agent-sandbox.conf` und liest sie per `conf_get`, damit ein erneuter Lauf (z. B. durch autodeploy) die Timer-Intervalle nicht auf die Vorgabe 2min zurücksetzt (#201).
 - `autodeploy`: Pre-Flight-Tests ohne Serverpfade ausführen, Rollback nennt die roten Tests (PR folgt).
 - `worker_tick`: Regel 8 übergeht bei der Datei-Kollision die Doku-Pflichtzeilen `CHANGELOG.md`/`README.md` und Akzeptanztest-Platzhalter unter `tests/acceptance/test_issue_*`; echte Code-Kollisionen und der Hotspot blockieren weiter (PR folgt).
 - `worker_tick`: Erledigte geparkte Aufträge (PR gemergt oder geschlossen, Issue geschlossen) verlieren ihre Parkmarke `_park:<skey>` samt Versuchszähler, damit die Slot-Telemetrie nicht mehr endlos „wartet auf Stephan“ zeigt; im Leerlauf nennt sie zusätzlich die von Regel 8 übersprungenen Kandidaten mit Grund (PR folgt).
