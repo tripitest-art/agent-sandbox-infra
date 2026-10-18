@@ -29,107 +29,13 @@ MAX_CHARS = 2000   # der HA-Sensor hält ohnehin nur die letzten 2000 Zeichen
 SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
 
 
-class Follower:
-    """Liest neu angehängte Zeilen einer Datei; erkennt Abschneiden und Ersetzen."""
-
-    def __init__(self, path: str, from_start: bool = False):
-        self.path, self.fh, self.inode, self.partial = path, None, None, ""
-        self._open(from_start)
-
-    def _open(self, from_start: bool) -> None:
-        if self.fh:
-            self.fh.close()
-        try:
-            self.fh = open(self.path, encoding="utf-8", errors="replace")
-        except OSError:
-            self.fh, self.inode = None, None
-            return
-        self.inode = os.fstat(self.fh.fileno()).st_ino
-        if not from_start:
-            self.fh.seek(0, os.SEEK_END)
-
-    def poll(self) -> list[str]:
-        """Neue, vollständige Zeilen seit dem letzten Aufruf (ohne Zeilenende)."""
-        try:
-            st = os.stat(self.path)
-        except OSError:
-            return []
-        if self.fh is None or st.st_ino != self.inode:
-            self._open(from_start=True)          # ersetzt (z. B. rotiert) -> neue Datei von vorn
-        elif st.st_size < self.fh.tell():
-            self.fh.seek(0)                      # abgeschnitten -> von vorn
-            self.partial = ""
-        if self.fh is None:
-            return []
-        data = self.partial + self.fh.read()
-        lines = data.split("\n")
-        self.partial = lines.pop()               # letzte Zeile ohne \n: noch unvollständig
-        return [ln for ln in lines if ln.strip()]
-
-
-_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-
-
-def strip_ansi(text: str) -> str:
-    """Entfernt ANSI-Farbcodes und Escape-Sequenzen für saubere Anzeige in Home Assistant."""
-    return _ANSI_ESCAPE_RE.sub("", text)
-
-
-def pid_is_active(pid: int | None) -> bool:
-    """Lebt der Prozess noch? False ohne Prozess-ID oder bei OSError (z. B. ESRCH)."""
-    if not pid or pid <= 0:
-        return False
-    if sys.platform == "win32":
-        # os.kill(pid, 0) ist unter Windows kein „nur prüfen“: Signal 0 ist dort CTRL_C_EVENT und
-        # trifft die ganze Konsole samt pytest-Sitzung. Deshalb fragt der Windows-Zweig die
-        # Win32-API, ohne os.kill (#118).
-        import ctypes
-
-        k = ctypes.windll.kernel32
-        handle = k.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False                             # auch „Zugriff verweigert“ heißt hier: nicht aktiv
-        try:
-            code = ctypes.c_ulong()
-            k.GetExitCodeProcess(handle, ctypes.byref(code))
-        finally:
-            k.CloseHandle(handle)                    # immer schließen, auch bei Fehler
-        return code.value == 259                     # STILL_ACTIVE
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-def read_slots(slot_dir: str = SLOT_DIR, is_pid_alive=pid_is_active) -> dict[str, dict]:
-    """Alle slot-*.json aus slot_dir als {slot: daten}.
-
-    Ein verwaister Slot (status „running“, aber PID tot) wird zu „idle“ mit
-    message „Prozess beendet“: So zeigt das Dashboard keinen hängenden Lauf, wenn der
-    Takt abstürzt, ohne sich abzumelden.
-    """
-    slots: dict[str, dict] = {}
-    try:
-        names = os.listdir(slot_dir)
-    except OSError:
-        return slots
-    for name in names:
-        m = re.match(r"^slot-(.+)\.json$", name)
-        if not m:
-            continue
-        try:
-            with open(os.path.join(slot_dir, name), encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        slot = str(data.get("slot") or m.group(1))
-        if data.get("status") == "running" and not is_pid_alive(data.get("pid")):
-            data = {**data, "status": "idle", "message": "Prozess beendet"}
-        slots[slot] = data
-    return slots
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # dashboard.py liegt daneben
+from dashboard import (  # noqa: E402
+    Follower,
+    pid_is_active,
+    read_slots,
+    strip_ansi,
+)
 
 
 def payload(lines: list[str], slots: dict | None = None) -> bytes:

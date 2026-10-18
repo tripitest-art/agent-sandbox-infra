@@ -420,3 +420,57 @@ def test_serve_startet_den_push_faden_nur_mit_url(monkeypatch, tmp_path):
     server = d.serve("127.0.0.1", 0)
     assert server.push is True and started == [(d.NOTIFY_INTERVAL,)]
     server.server_close()
+
+
+def test_strip_ansi_entfernt_escape_sequenzen():
+    assert d.strip_ansi("\x1b[31mRot\x1b[0m und normal") == "Rot und normal"
+    assert d.strip_ansi("Kein ANSI") == "Kein ANSI"
+
+
+def test_pid_is_active_ungueltige_pids():
+    assert d.pid_is_active(0) is False
+    assert d.pid_is_active(-1) is False
+    assert d.pid_is_active(None) is False
+    assert d.pid_is_active(d.os.getpid()) is True
+
+
+def test_read_slots_verwaist_und_aktiv(tmp_path):
+    s1 = tmp_path / "slot-1.json"
+    s1.write_text(json.dumps({"slot": "1", "status": "running", "pid": 999999}), encoding="utf-8")
+    s2 = tmp_path / "slot-2.json"
+    s2.write_text(json.dumps({"slot": "2", "status": "idle"}), encoding="utf-8")
+
+    res = d.read_slots(str(tmp_path), is_pid_alive=lambda pid: False)
+    assert res["1"]["status"] == "idle"
+    assert res["1"]["message"] == d.DEAD_MESSAGE
+    assert res["2"]["status"] == "idle"
+
+
+def test_summarize_project_und_budget():
+    p = d.projects.Project(name="proj", repo="org/proj", workdir="/root/proj")
+    issues = [{"number": 1, "labels": [{"name": "bereit"}, {"name": "worker-task"}]}]
+    prs = [{"number": 2, "title": "PR", "url": "https://...", "labels": [{"name": "braucht-stephan"}],
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]}]
+    summary = d.summarize_project(p, issues, prs)
+    assert summary["name"] == "proj"
+    assert summary["issues"]["bereit"] == 1
+    assert summary["prs"]["rot"] == 1
+    assert len(summary["prs"]["wartet_auf_stephan"]) == 1
+
+    b = d.summarize_budget({"spend": 2.5, "max_budget": 10.0})
+    assert b["spend"] == 2.5
+    assert b["max"] == 10.0
+    assert b["prozent"] == 25
+    assert d.summarize_budget(None) == {"fehler": "nicht erreichbar"}
+
+
+def test_build_status_baut_vollstaendigen_zustand():
+    p = d.projects.Project(name="proj", repo="org/proj", workdir="/root/proj")
+    now = d.datetime(2026, 10, 18, 12, 0, 0, tzinfo=d.timezone.utc)
+    fetch = lambda kind, repo: []
+    budgets = {"worker": {"spend": 1.0, "max_budget": 10.0}}
+    res = d.build_status([p], fetch, budgets, now)
+    assert res["zeit"] == "2026-10-18T12:00:00+00:00"
+    assert len(res["projekte"]) == 1
+    assert res["budgets"]["worker"]["spend"] == 1.0
+
