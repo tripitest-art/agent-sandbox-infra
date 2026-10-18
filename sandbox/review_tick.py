@@ -50,6 +50,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py und worker_tick.py liegen daneben
 import projects  # noqa: E402
@@ -107,6 +108,10 @@ LLM_TIMEOUT = float(os.environ.get("REVIEW_LLM_TIMEOUT", "420"))
 # Pflicht-Checks dieses Repos (tests, acceptance-guard); sc-diggers Vertrag nennt zusätzlich CodeQL
 # und steht in dessen Projektlisteneintrag. use_project() übernimmt die Liste des aktiven Projekts.
 REQUIRED_CHECKS = ("tests", "acceptance-guard")
+# Ein Pflicht-Check, der noch nicht im Rollup steht, kann verspätet starten (anderes Ereignis, volle
+# Runner-Warteschlange). Bis zu dieser Zeit nach dem ersten Start gilt er als laufend, danach als
+# fehlend/rot — sonst prüfte der Takt einen PR, dessen Pflicht-Check Sekunden später grün war.
+MISSING_CHECK_GRACE_S = 600
 
 # Modellfamilien: Worker und Reviewer dürfen nie aus derselben stammen (AGENTS.md). Die Reihenfolge
 # zählt: „Qwen3-Coder“ und „coder-glm“ enthalten „coder“, gehören aber nicht zu DeepSeek. Die
@@ -336,14 +341,24 @@ def _neuerer_lauf(neu: dict, alt: dict) -> bool:
     return bool(t_neu) or not t_alt
 
 
-def checks_summary(rollup: list[dict]) -> tuple[bool, list[tuple[str, str]], list[str]]:
+def _now() -> datetime:
+    """Aktuelle Zeit, zeitzonenbehaftet (UTC). Eigene Funktion, damit Tests die Uhr setzen können."""
+    return datetime.now(timezone.utc)
+
+
+def checks_summary(rollup: list[dict], now: datetime | None = None) -> tuple[bool, list[tuple[str, str]], list[str]]:
     """(alle fertig, [(Name, Ergebnis)], Namen roter Pflicht-Checks).
 
     Je Check-Name (`name`, bei Statuseinträgen `context`) zählt nur der neueste Lauf: Ein
     abgebrochener Lauf bleibt neben dem neueren im Rollup stehen (acceptance-guard bricht mit
     `cancel-in-progress` den älteren ab), sonst gälte ein PR als rot, obwohl der neue Lauf grün
     war, und der Takt verbrauchte eine Review-Runde ohne Grund. `rows` hat genau einen Eintrag je
-    Name, in der Reihenfolge des ersten Vorkommens."""
+    Name, in der Reihenfolge des ersten Vorkommens.
+
+    Ein Pflicht-Check, der noch nicht im Rollup steht, startet manchmal verspätet: Bis
+    MISSING_CHECK_GRACE_S nach dem frühesten `startedAt` gilt er als laufend (`done` False, kein
+    Eintrag in `rows`/`red`), danach als fehlend und rot (`FEHLT`). Ohne Eintrag mit `startedAt`
+    gibt es keine Kulanzzeit — Statuseinträge zählen dafür nicht."""
     gewaehlt: dict[str, dict] = {}
     order: list[str] = []
     for c in rollup or []:
@@ -363,6 +378,28 @@ def checks_summary(rollup: list[dict]) -> tuple[bool, list[tuple[str, str]], lis
         rows.append((name, result or status))
         if name in REQUIRED_CHECKS and result != "SUCCESS":
             red.append(name)
+    fehlend = [name for name in REQUIRED_CHECKS if name not in gewaehlt]
+    if fehlend:
+        startzeiten = []
+        for c in rollup or []:
+            roh = c.get("startedAt")
+            if not roh:
+                continue
+            try:
+                t = datetime.fromisoformat(str(roh).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            startzeiten.append(t if t.tzinfo else t.replace(tzinfo=timezone.utc))
+        beginn = min(startzeiten, default=None)
+        jetzt = now if now is not None else _now()
+        if jetzt.tzinfo is None:
+            jetzt = jetzt.replace(tzinfo=timezone.utc)
+        if beginn is not None and jetzt - beginn < timedelta(seconds=MISSING_CHECK_GRACE_S):
+            done = False
+        else:
+            for name in fehlend:
+                rows.append((name, "FEHLT"))
+                red.append(name)
     return done, rows, red
 
 
@@ -840,7 +877,7 @@ def _run_pr_review() -> int:
     # `skip`; der Takt nimmt den nächsten Kandidaten, statt den jüngeren PRs den Takt zu sperren.
     skip = frozenset()
     while True:
-        done, checks, red = checks_summary(pr.get("statusCheckRollup") or [])
+        done, checks, red = checks_summary(pr.get("statusCheckRollup") or [], now=_now())
         if not done or not checks:
             log(f"PR #{n}: Checks laufen noch, warte.")
         else:
