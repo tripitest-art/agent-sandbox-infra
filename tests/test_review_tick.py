@@ -760,6 +760,52 @@ def test_no_auto_merge_when_env_disabled(monkeypatch, capsys):
 
 
 
+# --- Label-PR ohne Worker-Issue: der PR-Text entscheidet über den Merge (Issue #134) ---
+
+def _pr_ohne_issue(body="Was und warum\n\nWorker: Claude Sonnet 5.5\n"):
+    """PR mit Label `review-anfordern` und Branch ohne issue-<N>: es gibt kein Worker-Issue."""
+    return _pr(headRefName="feature/dashboard-statistik",
+               labels=[{"name": r.REVIEW_REQUEST_LABEL}], body=body)
+
+
+def _label_pr_takt(monkeypatch, body, merge_ok=True):
+    """Freigegebener Label-PR; gibt die gemergten Nummern und den Zustand nach dem Takt zurück."""
+    monkeypatch.setattr(r, "POST", True)
+    monkeypatch.setattr(r, "AUTO_MERGE", True)
+    monkeypatch.setattr(r, "PROJECT_AUTO_MERGE", True)
+    monkeypatch.setattr(r, "PROJECT_MANUAL_PATHS", ())
+    _fake_github(monkeypatch, [_pr_ohne_issue(f"Was und warum\n\n{body}\nWorker: Claude Sonnet 5.5\n")])
+    merged = []
+
+    def gh_text(*args, **kw):
+        if args[:2] == ("pr", "merge"):
+            merged.append(args[2])
+            if not merge_ok:
+                raise r.subprocess.CalledProcessError(1, "gh", stderr="not mergeable")
+            return ""
+        if args[:2] == ("pr", "diff"):
+            return "diff --git a/a.py b/a.py\n+x\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    assert r.run_once() == 0
+    return merged, r.load_state()
+
+
+def test_label_pr_merge_modus_abschnitt_zaehlt_wie_die_zeile(monkeypatch):
+    """Steht „automatisch“ im Abschnitt `### Merge-Modus`, mergt der Takt den Label-PR."""
+    merged, _ = _label_pr_takt(monkeypatch, "### Merge-Modus\n\nautomatisch nach Review\n")
+    assert merged == ["7"]
+
+
+def test_label_pr_gescheiterter_merge_wird_wie_bei_worker_prs_vorgemerkt(monkeypatch):
+    """Ein abgelehnter Merge landet in `merge_offen`; der nächste Takt versucht es erneut."""
+    merged, state = _label_pr_takt(monkeypatch, "Merge-Modus: automatisch\n", merge_ok=False)
+    assert merged == ["7"]
+    assert state["merge_offen"] == {"7": {"sha": SHA, "versuche": 0}}
+
+
+
 # --- Durchgängiger Takt: Entwürfe nachholen, Merge wiederholen, an Stephan melden ---
 
 def test_pick_pr_takes_every_worker_family_label():
