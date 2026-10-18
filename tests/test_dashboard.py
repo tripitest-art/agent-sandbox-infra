@@ -539,3 +539,31 @@ def test_build_status_baut_vollstaendigen_zustand():
     assert len(res["projekte"]) == 1
     assert res["budgets"]["worker"]["spend"] == 1.0
 
+
+
+# --- Takt wecken -------------------------------------------------------------------------------
+
+WAKE_ENV = {"DASHBOARD_WRITE_TOKEN": "w" * 32, "WAKE_PUBLISH_URL": "https://ntfy.test/thema"}
+
+
+def test_state_meldet_ob_wecken_moeglich_ist(tmp_path):
+    assert _dash(tmp_path).state()["wecken"] is False
+    dash = _dash(tmp_path)
+    dash.waker = d.WakeSender(env=WAKE_ENV, publish=lambda url: None)
+    assert dash.state()["wecken"] is True
+
+
+def test_seite_zeigt_den_takt_knopf_nur_bei_wecken():
+    zeile = next(ln for ln in d.PAGE.splitlines() if "Takt starten" in ln)
+    # Alles nach dem frühen return entsteht nur, wenn der Zustand `wecken` wahr meldet.
+    vor, nach = zeile.split("if(!s.wecken)return;", 1)
+    assert "replaceChildren" in vor and "Takt starten" in nach and "onclick=wecken" in nach
+
+
+def test_seite_weckt_ueber_die_relative_adresse_und_den_gemerkten_token():
+    start = d.PAGE.index("async function wecken(")
+    js = d.PAGE[start:d.PAGE.index("\n}", start)]
+    assert 'sessionStorage.getItem("wt")' in js
+    assert 'fetch("api/wake"' in js and "X-Dashboard-Token" in js
+    # Ein 403 heißt: Token abgelehnt oder Wecken aus -> gemerkten Token vergessen.
+    assert "r.status===403" in js and 'sessionStorage.removeItem("wt")' in js

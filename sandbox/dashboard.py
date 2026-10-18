@@ -6,14 +6,16 @@ Slot-Status (`/run/worker-slots/slot-<n>.json`), Projekte,
 Issues, PRs, „braucht-stephan“ und LiteLLM-Budgets (`build_status`) und den Schwanz
 von `/root/worker.log`. Die Seite holt den Stand über Server-Sent-Events (`/events`).
 
-Endpunkte: `/` (Seite), `/api/state` (JSON), `/events` (SSE), `/healthz` und
-`POST /api/budget` (Limit eines LiteLLM-Keys ändern, nur mit Schreib-Token).
+Endpunkte: `/` (Seite), `/api/state` (JSON), `/events` (SSE), `/healthz`,
+`POST /api/budget` (Limit eines LiteLLM-Keys ändern, nur mit Schreib-Token) und
+`POST /api/wake` (Takt sofort über den Wake-Listener starten, nur mit Schreib-Token).
 
 Push-Meldungen über ntfy (`NTFY_URL`): siehe `dashboard_notify.py`.
 
-Einzige Ausnahme vom „nur lesend“: das Budget-Limit. Dafür braucht der Dienst
-`LITELLM_MASTER_KEY` und `DASHBOARD_WRITE_TOKEN` (beide nur in `/etc/agent-dashboard.env`, Modus 600).
-Fehlt eines, ist das Ändern aus und die Seite zeigt keinen Knopf. Geändert wird nur `max_budget`.
+Ausnahmen vom „nur lesend“: das Budget-Limit und der Takt-Start. Für beides braucht der Dienst
+`DASHBOARD_WRITE_TOKEN`; das Budget zusätzlich `LITELLM_MASTER_KEY`, das Wecken
+`WAKE_PUBLISH_URL` (alle nur in `/etc/agent-dashboard.env`, Modus 600). Fehlt eines, ist die
+Funktion aus und die Seite zeigt keinen Knopf. Geändert wird nur `max_budget`.
 
 Kein Login: Der Dienst gehört ins LAN und nie hinter eine Portfreigabe. Deshalb liefert er
 nur aufbereitete Felder; Fehler erscheinen als Name der Exception-Klasse, Log-Zeilen laufen
@@ -35,6 +37,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from datetime import datetime, timezone
@@ -62,6 +65,7 @@ STEPHAN_MARK = "⚠ Stephan"
 MIN_TOKEN_LEN = 16         # kürzere Schreib-Token gelten als nicht eingerichtet
 MAX_BUDGET_LIMIT = 10000   # Obergrenze gegen Tippfehler (USD)
 FAIL_DELAY = 1.0           # Sekunden Wartezeit nach falschem Token (bremst Raten)
+WAKE_COOLDOWN = 10.0       # Sekunden zwischen zwei Takt-Starts über das Dashboard
 DEAD_MESSAGE = "Prozess beendet"   # setzt read_slots für einen verwaisten Lauf
 
 # Status- und Budget-Konstanten
@@ -430,6 +434,67 @@ class BudgetWriter:
         return value
 
 
+class WakeError(Exception):
+    """Fehler beim Wecken; die Meldung ist für die Anzeige gedacht (nie URL oder Token)."""
+
+    def __init__(self, message: str, status: int = 502):
+        super().__init__(message)
+        self.status = status
+
+
+class WakeSender:
+    """Schickt das Wort „wake“ per POST an `WAKE_PUBLISH_URL` (ntfy).
+
+    Der Wake-Listener (`wake_listener.py`, Dienst `agent-wake`) startet bei jeder Nachricht
+    im Thema die Takt-Units; den Inhalt liest er nicht. Damit ersetzt der Knopf den früheren
+    Home-Assistant-Knopf, ohne dass das Dashboard `systemctl` aufruft. Fehlertexte nennen
+    nie URL, Thema oder Token (Regel 5).
+    """
+
+    def __init__(self, env: dict | None = None, publish: Callable[[str], None] | None = None,
+                 clock: Callable[[], float] = time.monotonic):
+        env = dict(os.environ if env is None else env)
+        self.token = env.get("DASHBOARD_WRITE_TOKEN", "")
+        self.url = env.get("WAKE_PUBLISH_URL", "")
+        self.publish = publish or self._post_wake
+        self.clock = clock
+        self.fail_delay = FAIL_DELAY
+        self.sent_at: float | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        """True nur mit Token der Länge >= MIN_TOKEN_LEN und einer URL mit Schema http oder https und Host."""
+        if len(self.token) < MIN_TOKEN_LEN:
+            return False
+        parts = urllib.parse.urlsplit(self.url)
+        return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+    def token_ok(self, supplied: str) -> bool:
+        """Konstantzeit-Vergleich mit dem Schreib-Token; False, wenn nicht `enabled`."""
+        return self.enabled and hmac.compare_digest(supplied.encode("utf-8"), self.token.encode("utf-8"))
+
+    def _post_wake(self, url: str) -> None:
+        request = urllib.request.Request(url, data=b"wake", method="POST")
+        urllib.request.urlopen(request, timeout=10).close()
+
+    def send(self) -> None:
+        """Sendet „wake“; höchstens einmal je WAKE_COOLDOWN Sekunden, sonst WakeError(429)."""
+        with self._lock:
+            now = self.clock()
+            if self.sent_at is not None and now - self.sent_at < WAKE_COOLDOWN:
+                raise WakeError("Wecken höchstens einmal je 10 Sekunden", 429)
+            try:
+                self.publish(self.url)
+            except WakeError:
+                raise
+            except urllib.error.HTTPError as exc:
+                raise WakeError(f"ntfy lehnt ab (HTTP {exc.code})") from None
+            except Exception as exc:   # noqa: BLE001 — nur die Art des Fehlers, nie der Text (URL, Token)
+                raise WakeError(f"Wecken nicht möglich ({type(exc).__name__})") from None
+            self.sent_at = now
+
+
 def default_builder(env: dict | None = None) -> dict:
     """Projekte, Issues, PRs und Budgets."""
     env = dict(os.environ if env is None else env)
@@ -501,10 +566,11 @@ class Dashboard:
     def __init__(self, cache: StatusCache, logbuf: LogBuffer, slot_dir: str = SLOT_DIR,
                  is_pid_alive=pid_is_active,
                  clock: Callable[[], datetime] = lambda: datetime.now(),
-                 writer: BudgetWriter | None = None):
+                 writer: BudgetWriter | None = None, waker: WakeSender | None = None):
         self.cache, self.logbuf, self.slot_dir = cache, logbuf, slot_dir
         self.is_pid_alive, self.clock = is_pid_alive, clock
         self.writer = writer or BudgetWriter(env={})   # ohne Angabe: Ändern aus
+        self.waker = waker or WakeSender(env={})       # ohne Angabe: Wecken aus
 
     def set_budget(self, alias: object, value: object) -> float:
         new = self.writer.set_budget(alias, value)
@@ -516,6 +582,7 @@ class Dashboard:
         slots = read_slots(self.slot_dir, self.is_pid_alive)
         state = build_state(slots, status, veraltet, self.logbuf.stephan(), self.clock())
         state["schreiben"] = self.writer.enabled   # zeigt den „Limit ändern“-Knopf
+        state["wecken"] = self.waker.enabled       # zeigt den Knopf „Takt starten“
         stats = self.logbuf.stats
         state["statistik"] = stats.snapshot(self.clock()) if stats is not None else None
         return state
@@ -573,7 +640,7 @@ overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0
 button{font:inherit;font-size:12px;padding:1px 8px;border:1px solid var(--line);border-radius:6px;
 background:var(--card);color:var(--fg);cursor:pointer}
 </style></head><body>
-<h1>Agenten-Sandbox <span id="conn" class="mut"></span></h1>
+<h1>Agenten-Sandbox <span id="conn" class="mut"></span> <span id="wake"></span></h1>
 <div id="alerts"></div><div id="veraltet"></div>
 <div class="kopf" id="kopf"></div>
 <h2>Worker-Slots</h2><div class="grid" id="slots"></div>
@@ -606,6 +673,15 @@ async function setBudget(alias,cur){
  if(r.ok){try{sessionStorage.setItem("wt",tok)}catch(e){}alert("Limit von "+alias+" auf $"+j.max_budget+" gesetzt")}
  else{if(r.status===403){try{sessionStorage.removeItem("wt")}catch(e){}}alert(j.fehler||"Fehler "+r.status)}
 }
+async function wecken(){
+ let tok="";try{tok=sessionStorage.getItem("wt")||""}catch(e){}
+ if(!tok){tok=prompt("Schreib-Token:")||"";if(!tok)return}
+ const r=await fetch("api/wake",{method:"POST",headers:{"X-Dashboard-Token":tok}});
+ const j=await r.json().catch(()=>({}));
+ if(r.ok){try{sessionStorage.setItem("wt",tok)}catch(e){}alert("Takt gestartet")}
+ else{if(r.status===403){try{sessionStorage.removeItem("wt")}catch(e){}}alert(j.fehler||"Fehler "+r.status)}
+}
+function renderWake(s){const b=$("wake");b.replaceChildren();if(!s.wecken)return;const t=el("button",null,"Takt starten");t.onclick=wecken;b.append(t)}
 function renderLog(){const l=$("log"),nur=$("nur").checked,
  stick=l.scrollTop+l.clientHeight>=l.scrollHeight-20;
  l.textContent=logLines.filter(x=>!nur||x.includes("⚠ Stephan")).join("\n");
@@ -617,6 +693,7 @@ function render(s){
  $("kopf").replaceChildren(...[["Aktive Slots",s.kopf.aktive_slots],["Offene Issues",s.kopf.offene_issues],
   ["Offene PRs",s.kopf.offene_prs],["Stand",(s.stand||"–").slice(11,19)]].map(([k,v])=>{
   const d=el("div","kpi");d.append(el("span","mut",k),el("b",null,v));return d}));
+ renderWake(s);
  $("slots").replaceChildren(...s.slots.map(v=>{const d=el("div","card");
   d.append(el("span","badge "+(v.tot?"tot":v.status),v.tot?"tot":v.status),el("b",null," Slot "+v.slot));
   const rows=[v.project,v.model,v.branch,v.message];
@@ -682,7 +759,11 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
                        "application/json; charset=utf-8")
 
         def do_POST(self):   # noqa: N802
-            if self.path.split("?", 1)[0] != "/api/budget":
+            path = self.path.split("?", 1)[0]
+            if path == "/api/wake":
+                self._wake()
+                return
+            if path != "/api/budget":
                 self._send(404, b"nicht gefunden", "text/plain; charset=utf-8")
                 return
             writer = dash.writer
@@ -715,6 +796,27 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
             print(f"dashboard: Budget-Limit {data['alias']} auf {value} gesetzt", flush=True)
             self._json(200, {"ok": True, "alias": data["alias"], "max_budget": value})
 
+        def _wake(self) -> None:
+            waker = dash.waker
+            # Wie beim Budget: kein Login, aber der Header X-Dashboard-Token löst bei fremden
+            # Seiten einen Preflight aus, den dieser Dienst nie beantwortet (kein CORS).
+            if not waker.enabled:
+                self._json(403, {"fehler": "Wecken ist nicht eingerichtet"})
+                return
+            if not waker.token_ok(self.headers.get("X-Dashboard-Token", "")):
+                time.sleep(waker.fail_delay)
+                print("dashboard: Wecken mit falschem Token abgelehnt", file=sys.stderr, flush=True)
+                self._json(403, {"fehler": "Token falsch"})
+                return
+            try:
+                waker.send()
+            except WakeError as exc:
+                print(f"dashboard: Wecken fehlgeschlagen: {exc}", file=sys.stderr, flush=True)
+                self._json(exc.status, {"fehler": str(exc)})
+                return
+            print("dashboard: Takt über ntfy angestoßen", flush=True)
+            self._json(200, {"ok": True})
+
         def _events(self) -> None:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -739,7 +841,8 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
 
 def serve(bind: str = BIND, port: int = PORT) -> ThreadingHTTPServer:
     stats = dashboard_stats.ReviewStats()
-    dash = Dashboard(StatusCache(default_builder), LogBuffer(stats=stats), writer=BudgetWriter())
+    dash = Dashboard(StatusCache(default_builder), LogBuffer(stats=stats), writer=BudgetWriter(),
+                     waker=WakeSender())
     server = ThreadingHTTPServer((bind, port), make_handler(dash))
     server.daemon_threads = True
     notifier = dashboard_notify.Notifier()
