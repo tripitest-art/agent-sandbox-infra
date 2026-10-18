@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py liegt daneben
+import agent_settings  # noqa: E402
 import projects  # noqa: E402
 
 PROJECTS = projects.load_projects()   # ohne /etc/agent-projects.json: sc-digger allein
@@ -89,7 +90,7 @@ def worker_name(model: str) -> str:
 
 WORKER = os.environ.get("WORKER", worker_name(LITELLM_MODEL) if BACKEND == "litellm" else "Qwen3-Coder 30B")
 ACTIVE_MODEL = LITELLM_MODEL   # BACKEND=litellm: Alias dieses Laufs, nach der Probe ggf. ein Ausweichmodell
-MAX_TRIES = 2               # Versuche je Auftrag, danach liegt er bei Stephan
+MAX_TRIES = agent_settings.value("MAX_TRIES", 2)   # Versuche je Auftrag, danach liegt er bei Stephan
 DONE = "erledigt"           # Schlüssel in STATE: angekommene Nacharbeiten, nicht wiederholen
 # Minuten je Lauf des Agenten. Über LiteLLM kürzer: das Modell ist schneller, und jede Minute
 # kostet Token; 90 min hat bei #122 nur Zeit verbrannt.
