@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- README (Wake-Listener): `WAKE_URL` ist die JSON-Strom-Adresse `https://ntfy.sh/<Wake-Thema>/json`, getrenntes Thema vom Dashboard, Prüfung per `curl` und Fehlerbild `HTTPError`/`404` (#150).
 - README: Regel-8-Dateikollisionsschutz auf tatsächliches Verhalten nach #32 aktualisiert (fail-closed, „unbekannt = blockieren“, Pfaderkennung, Logzeile beim Überspringen), Hotspot-Definition um `sandbox/worker_tick.py` für dieses Repo ergänzt und Review-Modell nach PR #57 auf einheitliches `coder-glm` korrigiert (#145).
 - `review_tick`: Scheitert der Commit-Status `review` mit HTTP 401/403/404/422/429, nennt die „⚠ Stephan“-Zeile zusätzlich einen festen Hinweis zur Ursache (bei 403: dem Token fehlt „Commit statuses: write“); nie Text aus dem gh-Fehler (#146).
 - `review_tick`: Ein Pflicht-Check, der noch nicht im `statusCheckRollup` steht, gilt bis zehn Minuten nach dem Start des ersten Eintrags als laufend; danach als `FEHLT` und rot. Ein verspätet startender `tests`-Lauf löst so kein falsches „Änderungen nötig“ mehr aus, ohne Zeitstempel gibt es keine Kulanzzeit (#148).
