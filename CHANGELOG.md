@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `install.sh`: Home-Assistant-Dienste (`qwen-webhook.service`, `ha-status.service`/`timer`) und Secret-Abfragen entfernt (#152).
 - `worker_tick`: Das Audit-Log führt zusätzlich `active_model` — mit `BACKEND=litellm` der tatsächlich genutzte Modell-Alias (auch nach dem Ausweichen), sonst wie bisher der Ollama-Name; `model` bleibt unverändert der Ollama-Name (#156).
 - Dashboard: von `ha_status` und `qwen_webhook` entkoppelt; `build_status`, Helfer und Slot-Logik direkt im Dashboard implementiert, `ha_status` und `qwen_webhook` reexportieren (#151).
 - README (Wake-Listener): `WAKE_URL` ist die JSON-Strom-Adresse `https://ntfy.sh/<Wake-Thema>/json`, getrenntes Thema vom Dashboard, Prüfung per `curl` und Fehlerbild `HTTPError`/`404` (#150).

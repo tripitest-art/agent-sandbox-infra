@@ -13,8 +13,7 @@
 # Der GitHub-Zugang wird hier bewusst NICHT eingerichtet: den Token gibt Stephan selbst
 # verdeckt ein (README, Schritt 3). Das Skript prüft nur, ob er da ist.
 # Geheimnisse stehen nie im Repo (es ist öffentlich): Der LiteLLM-Key kommt nach
-# /etc/qwen-worker.env, die Webhook-URL für das Live-Log nach /etc/qwen-webhook.env (beide 600).
-# Fehlen sie, fragt das Skript verdeckt danach (nur im Terminal).
+# /etc/qwen-worker.env (Modus 600). Fehlt er, fragt das Skript verdeckt danach (nur im Terminal).
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # sandbox/ dieses Repos
@@ -139,11 +138,6 @@ secrets_ok=1
 if [ "$BACKEND" = litellm ]; then
   ask_secret /etc/qwen-worker.env LITELLM_API_KEY "LiteLLM-Key »worker« (aus Vaultwarden)" || secrets_ok=0
 fi
-# Nur für das Live-Log im HA-Dashboard; fehlt sie, läuft der Worker trotzdem.
-# Es reicht die Webhook-ID; eine volle URL http://<HA>:8123/api/webhook/<ID> geht auch.
-ask_secret /etc/qwen-webhook.env HA_WEBHOOK_URL "HA-Webhook-ID (aus Vaultwarden)" || true
-# Nur für den Status-Bericht im HA-Dashboard; volle Webhook-URL (http://<HA>:8123/api/webhook/<ID>).
-ask_secret /etc/ha-status.env HA_STATUS_URL "HA-Webhook-URL für den Status (aus Vaultwarden)" || true
 # Eigener, eingeschränkter LiteLLM-Key nur für den Review-Takt (nur REVIEW_MODEL/REVIEW_MODEL_BIG).
 # Fehlt er, bleibt der Review-Takt aus; der Worker läuft trotzdem.
 review_key=0
@@ -380,25 +374,6 @@ else
   echo "Review-Takt: aus (LITELLM_REVIEW_KEY fehlt in /etc/qwen-reviewer.env)"
 fi
 
-echo "== Log-Stream nach Home Assistant (Webhook)"
-# Früher MQTT: Der Login konnte am Broker alles lesen/schreiben (Zendure, Frigate, Zigbee);
-# die ACL der Mosquitto-App greift nicht. Alten Dienst und sein Passwort entfernen.
-if [ -e /etc/systemd/system/qwen-mqtt.service ] || [ -e /etc/qwen-mqtt.env ]; then
-  systemctl disable --now qwen-mqtt.service >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/qwen-mqtt.service
-  [ -e /etc/qwen-mqtt.env ] && shred -u /etc/qwen-mqtt.env
-  echo "qwen-mqtt: entfernt (inkl. /etc/qwen-mqtt.env)"
-fi
-# qwen_webhook.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py).
-install -m 644 "$SCRIPT_DIR/systemd/qwen-webhook.service" /etc/systemd/system/qwen-webhook.service
-systemctl daemon-reload
-if [ -f /etc/qwen-webhook.env ] && grep -q '^HA_WEBHOOK_URL=.' /etc/qwen-webhook.env; then
-  systemctl enable qwen-webhook.service >/dev/null; systemctl restart qwen-webhook.service
-  echo "qwen-webhook: $(systemctl is-active qwen-webhook.service)"
-else
-  systemctl disable --now qwen-webhook.service >/dev/null 2>&1 || true
-  echo "qwen-webhook: aus (/etc/qwen-webhook.env fehlt)"
-fi
 
 echo "== Wake-Listener"
 # wake_listener.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py).
@@ -437,42 +412,6 @@ else
   echo "agent-wake: aus (WAKE_URL fehlt in /etc/agent-wake.env)"
 fi
 
-echo "== Status-Bericht"
-# ha_status.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py).
-cat > /etc/systemd/system/ha-status.service <<UNIT
-[Unit]
-Description=Workflow-Status an Home Assistant (sandbox/ha_status.py)
-[Service]
-Type=oneshot
-Environment=HOME=/root
-# HA_STATUS_URL (Geheimnis) und optional LITELLM_WORKER_KEY/LITELLM_PLANER_KEY für die Budgets.
-EnvironmentFile=/etc/ha-status.env
-# LITELLM_REVIEW_KEY für das Budget des Reviewers; fehlt die Datei, entfällt nur dieses Budget.
-EnvironmentFile=-/etc/qwen-reviewer.env
-Environment=LITELLM=$LITELLM
-Environment=LANG=C.UTF-8
-ExecStart=/usr/bin/flock -n /run/ha-status.lock /usr/bin/python3 /root/ha_status.py
-StandardOutput=append:/root/worker.log
-StandardError=append:/root/worker.log
-UNIT
-cat > /etc/systemd/system/ha-status.timer <<UNIT
-[Unit]
-Description=Status-Bericht alle 2 Minuten
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=2min
-[Install]
-WantedBy=timers.target
-UNIT
-systemctl daemon-reload
-if [ -f /etc/ha-status.env ] && grep -q '^HA_STATUS_URL=.' /etc/ha-status.env; then
-  systemctl enable ha-status.timer >/dev/null; systemctl restart ha-status.timer
-  echo "ha-status: $(systemctl is-active ha-status.timer)"
-else
-  systemctl disable --now ha-status.timer >/dev/null 2>&1 || true
-  echo "ha-status: aus (HA_STATUS_URL fehlt in /etc/ha-status.env)"
-fi
-
 echo "== Web-Dashboard"
 # Budget-Limits im Dashboard ändern ist optional: braucht LITELLM_MASTER_KEY und einen Schreib-Token
 # (mind. 16 Zeichen, frei gewählt). Beides nur in /etc/agent-dashboard.env (600), das nur dieser Dienst liest.
@@ -496,7 +435,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=LANG=C.UTF-8
 Environment=DASHBOARD_PORT=$DASHBOARD_PORT
 Environment=LITELLM=$LITELLM
-# Budget-Keys wie bei ha-status (LITELLM_WORKER_KEY/LITELLM_PLANER_KEY von Hand in /etc/ha-status.env);
+# Budget-Keys (LITELLM_WORKER_KEY/LITELLM_PLANER_KEY in /etc/agent-dashboard.env bzw. /etc/ha-status.env);
 # fehlt eine Datei, entfällt nur das jeweilige Budget.
 EnvironmentFile=-/etc/ha-status.env
 EnvironmentFile=-/etc/qwen-reviewer.env
