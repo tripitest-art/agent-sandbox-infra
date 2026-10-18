@@ -21,11 +21,13 @@ import base64
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
+ENV_FILE: str = "/etc/agent-dashboard.env"   # systemd lädt sie; --notify-test liest sie selbst
 STEPHAN_MARK = "⚠ Stephan"
 BUDGET_PERCENT = 90        # ab diesem Anteil des Limits wird gemeldet
 STALE_AFTER_S = 600        # so lange dürfen die GitHub-/Budgetdaten veraltet sein
@@ -82,7 +84,58 @@ class Notifier:
         except Exception as exc:   # noqa: BLE001 — nur die Art, nie der Text (enthält die URL)
             code = getattr(exc, "code", None)
             self.last_error = f"HTTP {code}" if code else type(exc).__name__
+            if code in (301, 302, 303, 307, 308):
+                host = _redirect_host(exc)
+                if host:
+                    self.last_error += f" → {host}"   # nur das Ziel, nie den Pfad (Regel 5)
             return False
+
+
+def _redirect_host(exc: Exception) -> str:
+    """Host (mit Port) aus einem absoluten `Location`-Header; leer, wenn er nicht brauchbar ist."""
+    headers = getattr(exc, "headers", None) or getattr(exc, "hdrs", None)
+    location = (headers.get("Location", "") if headers is not None else "") or ""
+    parts = urllib.parse.urlsplit(location)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return ""
+    host = parts.hostname or ""
+    try:
+        port = parts.port
+    except ValueError:   # ungültiger Port: dann lieber gar kein Ziel nennen
+        return ""
+    if port:
+        host += f":{port}"
+    return host
+
+
+def read_env_file(path: str) -> dict[str, str]:
+    """Liest KEY=WERT-Zeilen; fehlende oder unlesbare Datei ergibt {} (nie eine Ausnahme)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, ValueError):
+        return {}
+    values: dict[str, str] = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def notifier_for_test(path: str | None = None, environ: dict | None = None) -> Notifier:
+    """Notifier für `--notify-test`: Umgebung und Datei, die Datei gewinnt bei gleichem Schlüssel.
+
+    `path=None` liest `ENV_FILE` erst beim Aufruf, damit Tests die Konstante ersetzen können.
+    """
+    merged = dict(os.environ if environ is None else environ)
+    merged.update(read_env_file(ENV_FILE if path is None else path))
+    return Notifier(env=merged)
 
 
 class Watcher:

@@ -536,7 +536,7 @@ def serve(bind: str = BIND, port: int = PORT) -> ThreadingHTTPServer:
 
 def main() -> None:
     if "--notify-test" in sys.argv[1:]:
-        sys.exit(dashboard_notify.send_test(dashboard_notify.Notifier()))
+        sys.exit(dashboard_notify.send_test(dashboard_notify.notifier_for_test()))
     server = serve()
     print(f"Dashboard läuft auf {BIND}:{server.server_address[1]}, Push {'an' if server.push else 'aus'}", flush=True)
     try:
