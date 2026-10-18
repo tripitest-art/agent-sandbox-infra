@@ -2,8 +2,8 @@
 """Web-Dashboard der Agenten-Sandbox (löst das Home-Assistant-Dashboard ab).
 
 Nur lesend und nur Standardbibliothek. Der Dienst fasst vorhandene Quellen zusammen:
-Slot-Status (`/run/worker-slots/slot-<n>.json`, gelesen wie in `qwen_webhook.py`), Projekte,
-Issues, PRs, „braucht-stephan“ und LiteLLM-Budgets (`ha_status.build_status`) und den Schwanz
+Slot-Status (`/run/worker-slots/slot-<n>.json`), Projekte,
+Issues, PRs, „braucht-stephan“ und LiteLLM-Budgets (`build_status`) und den Schwanz
 von `/root/worker.log`. Die Seite holt den Stand über Server-Sent-Events (`/events`).
 
 Endpunkte: `/` (Seite), `/api/state` (JSON), `/events` (SSE), `/healthz` und
@@ -21,7 +21,7 @@ durch `redact` (Regel 5: Geheimnisse nie ausgeben).
 
 Einstellungen (Umgebung): DASHBOARD_BIND (Standard 0.0.0.0), DASHBOARD_PORT (8099),
 DASHBOARD_STATUS_TTL (Sekunden, in denen `gh`/LiteLLM-Antworten wiederverwendet werden, 90),
-WORKER_LOG, SLOT_DIR, LITELLM sowie die Budget-Keys aus `ha_status.py`.
+WORKER_LOG, SLOT_DIR, LITELLM sowie die Budget-Keys.
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -43,9 +44,10 @@ from typing import Callable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # Module liegen nebenan
 import dashboard_notify  # noqa: E402
 import dashboard_stats  # noqa: E402
-import ha_status  # noqa: E402
 import projects  # noqa: E402
-import qwen_webhook  # noqa: E402
+
+if __name__ in sys.modules:
+    sys.modules["dashboard"] = sys.modules[__name__]
 
 LOG: str = os.environ.get("WORKER_LOG", "/root/worker.log")
 SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
@@ -60,7 +62,116 @@ STEPHAN_MARK = "⚠ Stephan"
 MIN_TOKEN_LEN = 16         # kürzere Schreib-Token gelten als nicht eingerichtet
 MAX_BUDGET_LIMIT = 10000   # Obergrenze gegen Tippfehler (USD)
 FAIL_DELAY = 1.0           # Sekunden Wartezeit nach falschem Token (bremst Raten)
-DEAD_MESSAGE = "Prozess beendet"   # setzt qwen_webhook.read_slots für einen verwaisten Lauf
+DEAD_MESSAGE = "Prozess beendet"   # setzt read_slots für einen verwaisten Lauf
+
+# Status- und Budget-Konstanten
+STATES = ("bereit", "in-arbeit", "blockiert", "entwurf")
+WAITING_LABEL = "braucht-stephan"
+RED_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"})
+BUDGET_KEYS = (("LITELLM_WORKER_KEY", "worker"),
+               ("LITELLM_REVIEW_KEY", "reviewer"),
+               ("LITELLM_PLANER_KEY", "planer"))
+DEFAULT_LITELLM = "http://192.168.0.211:4000"
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def strip_ansi(text: str) -> str:
+    """Entfernt ANSI-Farbcodes und Escape-Sequenzen."""
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
+def pid_is_active(pid: int | None) -> bool:
+    """Lebt der Prozess noch? False ohne Prozess-ID oder bei OSError (z. B. ESRCH)."""
+    if not pid or pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        k = ctypes.windll.kernel32
+        handle = k.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False                             # auch „Zugriff verweigert“ heißt hier: nicht aktiv
+        try:
+            code = ctypes.c_ulong()
+            k.GetExitCodeProcess(handle, ctypes.byref(code))
+        finally:
+            k.CloseHandle(handle)                    # immer schließen, auch bei Fehler
+        return code.value == 259                     # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def read_slots(slot_dir: str = SLOT_DIR, is_pid_alive=pid_is_active) -> dict[str, dict]:
+    """Alle slot-*.json aus slot_dir als {slot: daten}.
+
+    Ein verwaister Slot (status „running“, aber PID tot) wird zu „idle“ mit
+    message „Prozess beendet“: So zeigt das Dashboard keinen hängenden Lauf, wenn der
+    Takt abstürzt, ohne sich abzumelden.
+    """
+    slots: dict[str, dict] = {}
+    try:
+        names = os.listdir(slot_dir)
+    except OSError:
+        return slots
+    for name in names:
+        m = re.match(r"^slot-(.+)\.json$", name)
+        if not m:
+            continue
+        try:
+            with open(os.path.join(slot_dir, name), encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        slot = str(data.get("slot") or m.group(1))
+        if data.get("status") == "running" and not is_pid_alive(data.get("pid")):
+            data = {**data, "status": "idle", "message": DEAD_MESSAGE}
+        slots[slot] = data
+    return slots
+
+
+class Follower:
+    """Liest neu angehängte Zeilen einer Datei; erkennt Abschneiden und Ersetzen."""
+
+    def __init__(self, path: str, from_start: bool = False):
+        self.path, self.fh, self.inode, self.partial = path, None, None, ""
+        self._open(from_start)
+
+    def _open(self, from_start: bool) -> None:
+        if self.fh:
+            self.fh.close()
+        try:
+            self.fh = open(self.path, encoding="utf-8", errors="replace")
+        except OSError:
+            self.fh, self.inode = None, None
+            return
+        self.inode = os.fstat(self.fh.fileno()).st_ino
+        if not from_start:
+            self.fh.seek(0, os.SEEK_END)
+
+    def poll(self) -> list[str]:
+        """Neue, vollständige Zeilen seit dem letzten Aufruf (ohne Zeilenende)."""
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return []
+        if self.fh is None or st.st_ino != self.inode:
+            self._open(from_start=True)          # ersetzt (z. B. rotiert) -> neue Datei von vorn
+        elif st.st_size < self.fh.tell():
+            self.fh.seek(0)                      # abgeschnitten -> von vorn
+            self.partial = ""
+        if self.fh is None:
+            return []
+        data = self.partial + self.fh.read()
+        lines = data.split("\n")
+        self.partial = lines.pop()               # letzte Zeile ohne \n: noch unvollständig
+        return [ln for ln in lines if ln.strip()]
+
 
 # Umgebungsvariablen, deren Werte nie im Dashboard erscheinen dürfen.
 _SECRET_NAME_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|WEBHOOK|URL)", re.IGNORECASE)
@@ -68,7 +179,7 @@ _SECRET_NAME_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|WEBHOOK|URL)", re.IGNO
 
 def redact(text: str, env: dict | None = None) -> str:
     """ANSI-Codes entfernen und die Werte geheimer Umgebungsvariablen maskieren."""
-    text = qwen_webhook.strip_ansi(text)
+    text = strip_ansi(text)
     for name, value in (os.environ if env is None else env).items():
         if len(value) >= 8 and _SECRET_NAME_RE.search(name):
             text = text.replace(value, f"<{name}>")
@@ -86,7 +197,7 @@ class LogBuffer:
         self._lock = threading.Lock()
         self._poll_lock = threading.Lock()
         self._add(self._preload())
-        self._follower = qwen_webhook.Follower(path)   # ab dem aktuellen Dateiende
+        self._follower = Follower(path)   # ab dem aktuellen Dateiende
         if stats is not None and self._follower.fh:
             stats.preload(path, self._follower.fh.tell())   # Statistik: weiter zurück, bis genau hierher
 
@@ -166,6 +277,111 @@ class BudgetError(Exception):
         self.status = status
 
 
+def _labels(obj: dict) -> set[str]:
+    """Labelnamen eines Issues/PRs aus dem `gh --json`-Format (Labels als [{"name": …}])."""
+    return {lab.get("name") for lab in obj.get("labels") or [] if isinstance(lab, dict)}
+
+
+def _pr_state(pr: dict) -> str:
+    """„rot“, „laufend“ oder „gruen“ aus statusCheckRollup. Fehlt/leer: weder rot noch laufend."""
+    running = False
+    for check in pr.get("statusCheckRollup") or []:
+        if check.get("conclusion") in RED_CONCLUSIONS:
+            return "rot"
+        if check.get("status") != "COMPLETED":
+            running = True
+    return "laufend" if running else "gruen"
+
+
+def summarize_project(p: projects.Project, issues: list[dict], prs: list[dict]) -> dict:
+    """Zustand eines Projekts: Issues je Zustandslabel, PR-Zahlen und wartende PRs."""
+    counts = {state: 0 for state in STATES}
+    for issue in issues:
+        for state in STATES:
+            if state in _labels(issue):
+                counts[state] += 1
+    rot = laufend = 0
+    waiting: list[dict] = []
+    for pr in prs:
+        state = _pr_state(pr)
+        if state == "rot":
+            rot += 1
+        elif state == "laufend":
+            laufend += 1
+        if WAITING_LABEL in _labels(pr):
+            waiting.append({"number": pr["number"], "title": pr["title"], "url": pr["url"]})
+    waiting.sort(key=lambda e: e["number"])
+    return {
+        "name": p.name,
+        "repo": p.repo,
+        "issues": counts,
+        "prs": {"offen": len(prs), "rot": rot, "laufend": laufend, "wartet_auf_stephan": waiting},
+    }
+
+
+def summarize_budget(info: dict | None) -> dict:
+    """LiteLLM-Budget eines Keys: spend, max_budget und Prozent. None = nicht erreichbar."""
+    if info is None:
+        return {"fehler": "nicht erreichbar"}
+    spend = info.get("spend") or 0.0
+    max_budget = info.get("max_budget")
+    prozent = round(spend / max_budget * 100) if max_budget else None
+    return {"spend": round(spend, 2), "max": max_budget, "prozent": prozent}
+
+
+def build_status(items: list[projects.Project], fetch: Callable[[str, str], list[dict]],
+                 budgets: dict[str, dict | None], now: datetime) -> dict:
+    """Gesamtstatus: je Projekt ein summarize_project, die Summe der wartenden PRs und die Budgets.
+
+    Wirft `fetch` für ein Projekt eine Exception, bekommt nur dieses Projekt einen
+    `fehler`-Eintrag (Name der Klasse, nie der Meldungstext); die anderen laufen weiter.
+    """
+    projekte: list[dict] = []
+    braucht_stephan = 0
+    for p in items:
+        try:
+            issues = fetch("issues", p.repo)
+            prs = fetch("prs", p.repo)
+        except Exception as exc:   # noqa: BLE001 — ein kaputtes Projekt darf die anderen nicht stoppen
+            projekte.append({"name": p.name, "repo": p.repo, "fehler": type(exc).__name__})
+            continue
+        summary = summarize_project(p, issues, prs)
+        projekte.append(summary)
+        braucht_stephan += len(summary["prs"]["wartet_auf_stephan"])
+    return {
+        "zeit": now.isoformat(timespec="seconds"),
+        "projekte": projekte,
+        "braucht_stephan": braucht_stephan,
+        "budgets": {alias: summarize_budget(info) for alias, info in budgets.items()},
+    }
+
+
+def _gh_fetch(kind: str, repo: str) -> list[dict]:
+    """Offene Issues (Label worker-task) bzw. PRs eines Repos über `gh` — nur lesend."""
+    if kind == "issues":
+        args = ["issue", "list", "--repo", repo, "--state", "open", "--label", "worker-task",
+                "--json", "number,title,labels", "--limit", "200"]
+    else:
+        args = ["pr", "list", "--repo", repo, "--state", "open",
+                "--json", "number,title,url,isDraft,labels,statusCheckRollup", "--limit", "100"]
+    out = subprocess.run(["gh", *args], capture_output=True, text=True, check=True)
+    text = out.stdout.strip()
+    return json.loads(text) if text else []
+
+
+def _default_key_info(key: str, base: str) -> dict | None:
+    """`GET {base}/key/info` mit dem Key; das Feld `info` oder None bei jedem Fehler."""
+    request = urllib.request.Request(f"{base.rstrip('/')}/key/info",
+                                     headers={"Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:   # noqa: BLE001 — nicht erreichbar/kein JSON zählt als None
+        return None
+    info = data.get("info")
+    return info if isinstance(info, dict) else None
+
+
 class BudgetWriter:
     """Setzt `max_budget` eines LiteLLM-Keys über `POST /key/update` mit dem Master-Key.
 
@@ -177,8 +393,8 @@ class BudgetWriter:
         env = dict(os.environ if env is None else env)
         self.token = env.get("DASHBOARD_WRITE_TOKEN", "")
         self.master = env.get("LITELLM_MASTER_KEY", "")
-        self.base = env.get("LITELLM") or ha_status.DEFAULT_LITELLM
-        self.keys = {alias: env[var] for var, alias in ha_status.BUDGET_KEYS if env.get(var)}
+        self.base = env.get("LITELLM") or DEFAULT_LITELLM
+        self.keys = {alias: env[var] for var, alias in BUDGET_KEYS if env.get(var)}
         self.update = update or self._litellm_update
         self.fail_delay = FAIL_DELAY
 
@@ -215,15 +431,15 @@ class BudgetWriter:
 
 
 def default_builder(env: dict | None = None) -> dict:
-    """Projekte, Issues, PRs und Budgets über dieselben Funktionen wie `ha_status.py`."""
+    """Projekte, Issues, PRs und Budgets."""
     env = dict(os.environ if env is None else env)
-    base = env.get("LITELLM") or ha_status.DEFAULT_LITELLM
+    base = env.get("LITELLM") or DEFAULT_LITELLM
     budgets = {}
-    for var, alias in ha_status.BUDGET_KEYS:
+    for var, alias in BUDGET_KEYS:
         if env.get(var):
-            budgets[alias] = ha_status._default_key_info(env[var], base)
-    return ha_status.build_status(projects.load_projects(env=env), ha_status._gh_fetch,
-                                  budgets, datetime.now(timezone.utc))
+            budgets[alias] = _default_key_info(env[var], base)
+    return build_status(projects.load_projects(env=env), _gh_fetch,
+                        budgets, datetime.now(timezone.utc))
 
 
 def _elapsed(started_at: str | None, now: datetime) -> int | None:
@@ -283,7 +499,7 @@ class Dashboard:
     """Bündelt Quellen und liefert Zustand sowie SSE-Rahmen; testbar ohne HTTP."""
 
     def __init__(self, cache: StatusCache, logbuf: LogBuffer, slot_dir: str = SLOT_DIR,
-                 is_pid_alive=qwen_webhook.pid_is_active,
+                 is_pid_alive=pid_is_active,
                  clock: Callable[[], datetime] = lambda: datetime.now(),
                  writer: BudgetWriter | None = None):
         self.cache, self.logbuf, self.slot_dir = cache, logbuf, slot_dir
@@ -297,7 +513,7 @@ class Dashboard:
 
     def state(self) -> dict:
         status, veraltet = self.cache.get()
-        slots = qwen_webhook.read_slots(self.slot_dir, self.is_pid_alive)
+        slots = read_slots(self.slot_dir, self.is_pid_alive)
         state = build_state(slots, status, veraltet, self.logbuf.stephan(), self.clock())
         state["schreiben"] = self.writer.enabled   # zeigt den „Limit ändern“-Knopf
         stats = self.logbuf.stats
