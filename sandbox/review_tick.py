@@ -268,6 +268,34 @@ def reviewer_model(diff: str) -> str:
     return REVIEW_MODEL_BIG if len(diff) > BIG_DIFF_CHARS else REVIEW_MODEL
 
 
+def fallback_model(model: str) -> str | None:
+    """Das jeweils andere der beiden eingestellten Modelle: REVIEW_MODEL_BIG, wenn `model` REVIEW_MODEL ist,
+    sonst REVIEW_MODEL. None, wenn beide gleich sind. Reine Funktion."""
+    if REVIEW_MODEL == REVIEW_MODEL_BIG:
+        return None
+    return REVIEW_MODEL_BIG if model == REVIEW_MODEL else REVIEW_MODEL
+
+
+def normalize_verdict_line(text: str) -> str:
+    """Ersetzt die erste nicht leere Zeile durch die feste Form VERDICTS[0] oder VERDICTS[1], wenn sie nach dem Entfernen
+    von Leerzeichen, `*`, `_` und einem abschließenden Punkt oder Doppelpunkt (ohne Rücksicht auf Groß-/Kleinschreibung)
+    genau „Freigegeben“ oder „Änderungen nötig“ lautet. Alles andere (zusätzliche Wörter, andere erste Zeile, leerer
+    Text) bleibt unverändert; führende Leerzeilen und der Rest des Textes bleiben erhalten. Reine Funktion."""
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        body = line.rstrip("\r\n")
+        if not body.strip():
+            continue
+        candidate = re.sub(r"[\s*_]", "", body)
+        candidate = re.sub(r"[.:]$", "", candidate)
+        for verdict in VERDICTS:
+            if candidate.casefold() == re.sub(r"[\s*_]", "", verdict).casefold():
+                lines[i] = verdict + line[len(body):]
+                break
+        return "".join(lines)
+    return text
+
+
 def reviewer_config_problem() -> str | None:
     """Grund, warum die Reviewer-Konfiguration unbrauchbar ist, sonst None.
     Verlangt, dass model_family(REVIEW_MODEL), model_family(REVIEW_MODEL_BIG) und
@@ -884,20 +912,32 @@ def _run_pr_review() -> int:
                 state.setdefault("erledigt", []).append(key); save_state(state)
                 to_stephan(n, key, problem, state)
                 return 0
-            meta = f"PR #{n} {pr['headRefOid'][:7]} Reviewer {model}"
             rules = "\n\n".join(filter(None, (
                 extract_section(agents, "### Reviewer"), extract_section(agents, "## Goldene Regeln"),
                 extract_section(skill, "## Schritt 5", until=("## Schritt 7",)))))
-            try:
-                raw, usage = call_llm(model, build_messages(issue, pr, files, diff, checks, rules))
-            except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
-                log(f"PR #{n}: Modell {model} antwortet nicht ({type(exc).__name__}), nächster Takt.")
-                return 0
-            verdict, _, _, problem = parse_review(raw)
-            bad = suspicious_output(raw, usage)
-            if bad:
-                verdict, problem = None, bad
-            if verdict is None:
+            messages = build_messages(issue, pr, files, diff, checks, rules)
+            # Ein Modell, das sein Token-Limit im Denken verbraucht (coder-glm am 16.10.2026), liefert
+            # nichts Brauchbares. Dann geht derselbe Aufruf im selben Takt an das andere der beiden
+            # eingestellten Modelle — aber nur, wenn das unabhängig vom Worker ist.
+            alt = fallback_model(model)
+            if alt is not None and independence_problem(worker, alt) is not None:
+                alt = None
+            while True:
+                try:
+                    raw, usage = call_llm(model, messages)
+                except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+                    log(f"PR #{n}: Modell {model} antwortet nicht ({type(exc).__name__}), nächster Takt.")
+                    return 0
+                raw = normalize_verdict_line(raw)
+                verdict, _, _, problem = parse_review(raw)
+                bad = suspicious_output(raw, usage)
+                if bad:
+                    verdict, problem = None, bad
+                if not (verdict is None or problem) or alt is None:
+                    break
+                log(f"PR #{n}: Antwort von {model} unbrauchbar ({safe_snippet(problem, 200)}), weiche auf {alt} aus.")
+                model, alt = alt, None
+            if verdict is None or problem:
                 tries = state.setdefault("fehler", {}).get(key, 0) + 1
                 state["fehler"][key] = tries
                 if tries >= 2:
@@ -909,7 +949,9 @@ def _run_pr_review() -> int:
                     to_stephan(n, key, f"Review-Modell {model} lieferte zweimal keine brauchbare Antwort; bitte von Hand prüfen.", state)
                 return 0
             text = assemble(raw, worker, checks, model)
-            meta += f" Modell {model} Token {usage.get('prompt_tokens')}/{usage.get('completion_tokens')}"
+            # Nach einem Ausweichen nennt die Reviewer-Zeile das Modell, das wirklich geantwortet hat.
+            meta = (f"PR #{n} {pr['headRefOid'][:7]} Reviewer {model} Modell {model} "
+                    f"Token {usage.get('prompt_tokens')}/{usage.get('completion_tokens')}")
 
     verdict, muss, kann, problem = parse_review(text)
     path = draft_path(pr) if draft else save_draft(pr, text, meta + (f" PROBLEM: {problem}" if problem else ""))

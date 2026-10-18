@@ -279,6 +279,18 @@ def _fake_github(monkeypatch, prs, llm_text=OK_REVIEW, calls=None, diff="diff --
     return calls
 
 
+def _fake_github_je_modell(monkeypatch, antworten, calls=None):
+    """Wie _fake_github, aber je Modellalias eine eigene Antwort. `antworten` fehlt ein Alias:
+    KeyError aus call_llm, damit ein unerwarteter zweiter Aufruf den Test rot macht."""
+    calls = _fake_github(monkeypatch, [_pr()], calls=calls)
+
+    def call_llm(model, messages):
+        calls.setdefault("models", []).append(model)
+        return antworten[model], {"prompt_tokens": 1000, "completion_tokens": 100}
+    monkeypatch.setattr(r, "call_llm", call_llm)
+    return calls
+
+
 def test_dry_run_writes_draft_and_does_not_post(monkeypatch, capsys, tmp_path):
     calls = _fake_github(monkeypatch, [_pr()])
     assert r.run_once() == 0
@@ -511,6 +523,38 @@ def test_big_diff_names_the_model_actually_called(monkeypatch, tmp_path):
     assert calls["model"] == "glm-4.6-longctx"
     text = next((tmp_path / "reviews").glob("pr7-*.md")).read_text(encoding="utf-8")
     assert "Reviewer: glm-4.6-longctx" in text and "Reviewer: GLM" not in text
+
+
+def test_urteil_mit_satzzeichen_oder_unterstrichen_wird_zur_festen_form():
+    # Gemini-Alias schrieb „Freigegeben“ ohne Sterne; davor scheiterte parse_review daran.
+    assert r.normalize_verdict_line("Freigegeben\n\n### Muss\nkeine") == "**Freigegeben**\n\n### Muss\nkeine"
+    assert r.normalize_verdict_line("__Änderungen nötig:__\n\n### Muss\n1. x") == "**Änderungen nötig**\n\n### Muss\n1. x"
+    assert r.normalize_verdict_line("  FREIGEGEBEN.  \nrest") == "**Freigegeben**\nrest"
+    # Zusätzliche Wörter oder eine andere erste Zeile bleiben unverändert.
+    assert r.normalize_verdict_line("Freigegeben, aber mit Vorbehalt\nrest") == "Freigegeben, aber mit Vorbehalt\nrest"
+
+
+def test_ungueltige_muss_kann_zahlen_weichen_auf_das_zweite_modell_aus(monkeypatch, tmp_path, capsys):
+    # „Freigegeben“ mit Muss-Punkt ist nicht postbar: derselbe Takt fragt das zweite Modell.
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "longctx-lite")
+    inkonsistent = "**Freigegeben**\n\n### Muss\n1. `a.py` Zeile 3: Signatur weicht ab\n\n### Kann\n- keine"
+    calls = _fake_github_je_modell(monkeypatch, {"coder-glm": inkonsistent, "longctx-lite": OK_REVIEW})
+    r.run_once()
+    assert calls["models"] == ["coder-glm", "longctx-lite"]
+    text = next((tmp_path / "reviews").glob("pr7-*.md")).read_text(encoding="utf-8")
+    body = text.split("\n", 1)[1]   # erste Zeile ist der Meta-Kommentar des Entwurfs
+    assert body.startswith("**Freigegeben**") and "Muss-Punkte" not in text
+    assert "weiche auf longctx-lite aus" in capsys.readouterr().out
+
+
+def test_reviewer_zeile_nennt_nach_dem_ausweichen_das_zweite_modell(monkeypatch, tmp_path):
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "longctx-lite")
+    _fake_github_je_modell(monkeypatch, {"coder-glm": "Hier ist mein Eindruck, ohne Urteil.",
+                                         "longctx-lite": OK_REVIEW})
+    r.run_once()
+    draft = next((tmp_path / "reviews").glob("pr7-*.md")).read_text(encoding="utf-8")
+    assert "Reviewer: longctx-lite" in draft and "Reviewer: coder-glm" not in draft
+    assert draft.startswith("<!-- PR #7 ") and "Modell longctx-lite Token 1000/100" in draft.splitlines()[0]
 
 
 def test_unusable_answer_is_retried_once_then_dropped(monkeypatch, capsys):
