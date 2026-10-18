@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `worker_tick`: Regel 8 übergeht bei der Datei-Kollision die Doku-Pflichtzeilen `CHANGELOG.md`/`README.md` und Akzeptanztest-Platzhalter unter `tests/acceptance/test_issue_*`; echte Code-Kollisionen und der Hotspot blockieren weiter (PR folgt).
 - `worker_tick`: Erledigte geparkte Aufträge (PR gemergt oder geschlossen, Issue geschlossen) verlieren ihre Parkmarke `_park:<skey>` samt Versuchszähler, damit die Slot-Telemetrie nicht mehr endlos „wartet auf Stephan“ zeigt; im Leerlauf nennt sie zusätzlich die von Regel 8 übersprungenen Kandidaten mit Grund (PR folgt).
 - `install.sh`: fragt im Web-Dashboard-Abschnitt nur noch `DASHBOARD_WRITE_TOKEN` und `NTFY_URL` ab; die Abfrage des `LITELLM_MASTER_KEY` und der Hinweis darauf in der Unit entfallen. Wer den Budget-Weg braucht, trägt den Key von Hand in `/etc/agent-dashboard.env` ein (PR folgt).
 - `worker_tick`: Ein Issue, das seit mindestens 40 Minuten auf `in-arbeit` steht, ohne offenen PR auf seinem Branch und ohne lebende Belegung, meldet der erste Slot einmal als „⚠ Stephan:“-Zeile; der Merker `_verwaist:<N>` verschwindet, sobald das Issue nicht mehr verwaist ist, Labels bleiben unberührt (PR folgt).
