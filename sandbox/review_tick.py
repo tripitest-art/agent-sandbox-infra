@@ -53,6 +53,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py und worker_tick.py liegen daneben
+import agent_settings  # noqa: E402
 import projects  # noqa: E402
 import worker_tick  # noqa: E402   # nur lesen: WORKER_NAMES für die Familienprüfung
 
@@ -80,14 +81,14 @@ REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "coder-glm")
 # reviewer_config_problem() würde in jeder Umgebung ohne REVIEW_MODEL_BIG jeden Review sperren.
 # Das systemd-Unit setzt die Einstellung ausdrücklich (install.sh schreibt dort seine eigene Vorgabe
 # „longctx-lite“ hinein); für den Serverbetrieb ist diese Zeile deshalb ohne Wirkung.
-REVIEW_MODEL_BIG = os.environ.get("REVIEW_MODEL_BIG") or REVIEW_MODEL   # für große Diffs
+REVIEW_MODEL_BIG = agent_settings.value("REVIEW_MODEL_BIG", REVIEW_MODEL)   # für große Diffs
 REVIEWER_NAME = os.environ.get("REVIEWER_NAME", "GLM")                 # Zeile „Reviewer: …“
 POST = os.environ.get("REVIEW_POST", "0") == "1"
 AUTO_MERGE = os.environ.get("REVIEW_AUTO_MERGE", "1") == "1"
 BASE_STATE = os.environ.get("REVIEW_STATE", "/root/review-state.json")
 BASE_DRAFT_DIR = os.environ.get("REVIEW_DRAFTS", "/root/reviews")
 STATE, DRAFT_DIR = BASE_STATE, BASE_DRAFT_DIR
-MAX_ROUNDS = 2              # Reviews „Änderungen nötig“ je PR, danach liegt er bei Stephan
+MAX_ROUNDS = agent_settings.value("MAX_ROUNDS", 2)   # „Änderungen nötig“ je PR, danach liegt er bei Stephan
 MERGE_RETRIES = 6          # so viele Takte lang wird ein gescheiterter Merge wiederholt
 BIG_DIFF_CHARS = 90_000     # darüber: REVIEW_MODEL_BIG
 MAX_DIFF_CHARS = 400_000    # darüber: nicht prüfen, an Stephan melden
@@ -103,15 +104,15 @@ def _max_tokens() -> int:
 # Obergrenze der Modellantwort; erreicht sie das, gilt sie als unbrauchbar. Bei GLM zählen die Denk-Tokens
 # (reasoning_tokens) mit: Eine Anfrage „Antworte nur mit: ok“ braucht schon über 100, ein Review mit großem
 # Diff am 16.10. mehr als 6000 (PR #119 und #132 scheiterten je zweimal am Limit).
-MAX_TOKENS = _max_tokens()
-LLM_TIMEOUT = float(os.environ.get("REVIEW_LLM_TIMEOUT", "420"))
+MAX_TOKENS = agent_settings.value("REVIEW_MAX_TOKENS", _max_tokens())
+LLM_TIMEOUT = float(agent_settings.value("REVIEW_LLM_TIMEOUT", float(os.environ.get("REVIEW_LLM_TIMEOUT", "420"))))
 # Pflicht-Checks dieses Repos (tests, acceptance-guard); sc-diggers Vertrag nennt zusätzlich CodeQL
 # und steht in dessen Projektlisteneintrag. use_project() übernimmt die Liste des aktiven Projekts.
 REQUIRED_CHECKS = ("tests", "acceptance-guard")
 # Ein Pflicht-Check, der noch nicht im Rollup steht, kann verspätet starten (anderes Ereignis, volle
 # Runner-Warteschlange). Bis zu dieser Zeit nach dem ersten Start gilt er als laufend, danach als
 # fehlend/rot — sonst prüfte der Takt einen PR, dessen Pflicht-Check Sekunden später grün war.
-MISSING_CHECK_GRACE_S = 600
+MISSING_CHECK_GRACE_S = agent_settings.value("MISSING_CHECK_GRACE_S", 600)
 
 # Modellfamilien: Worker und Reviewer dürfen nie aus derselben stammen (AGENTS.md). Die Reihenfolge
 # zählt: „Qwen3-Coder“ und „coder-glm“ enthalten „coder“, gehören aber nicht zu DeepSeek. Die
