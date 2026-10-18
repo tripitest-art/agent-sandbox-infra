@@ -543,7 +543,7 @@ def pr_template() -> str:
                                  capture_output=True, text=True, check=True, env=ENV)
         except (OSError, subprocess.CalledProcessError):
             continue
-        if out and getattr(out, "stdout", None) and out.stdout.strip():
+        if out.stdout.strip():
             _TEMPLATE_CACHE = out.stdout
             return _TEMPLATE_CACHE
     for base in (WORKDIR, BASE_WORKDIR):
@@ -993,27 +993,22 @@ def prepare_issue_branch(n: int) -> bool:
     Holt das Issue mit gh("issue", "view", str(n), "--json", "body") (Feld "body"); liefert
     acceptance_block(...) None, ist das Ergebnis False und es lief kein git-Befehl.
 
-    Reihenfolge der Zweig-Suche:
-    1. git fetch -q origin
-    2. git rev-parse --verify -q refs/remotes/origin/feature/issue-<N>  (rc == 0 -> vorhanden)
-       -> git checkout -q -B feature/issue-<N> origin/feature/issue-<N>
-    3. sonst git rev-parse --verify -q refs/heads/feature/issue-<N>     (rc == 0 -> vorhanden)
-       -> git checkout -q feature/issue-<N>
-    4. sonst git checkout -q -B feature/issue-<N> origin/main
-
-    Datei tests/acceptance/test_issue_<N>.py:
-    - Verzeichnis anlegen falls nötig
-    - Inhalt: acceptance_block(...) + "\n", UTF-8
-    - Wenn die Datei vorher schon existierte und der Inhalt Byte für Byte identisch war:
-      kein git add / git commit
-    - Sonst:
-      git add tests/acceptance/test_issue_<N>.py
-      git commit -q -m "Akzeptanztests aus #<N>"
-
-    Alle git-Befehle mit cwd=WORKDIR. Liefert True."""
-    if not os.path.isdir(WORKDIR):
-        return True
-
+    Sonst, jeweils mit cwd=WORKDIR, env=ENV, check=True (nur die zwei rev-parse mit check=False),
+    in genau dieser Reihenfolge:
+      1. ["git", "fetch", "-q", "origin"]
+      2. ["git", "rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}"]
+      3. nur wenn 2. Exit != 0: ["git", "rev-parse", "--verify", "-q", f"refs/heads/{branch}"]
+      4. Checkout, je nach Fund:
+         - Zweig auf origin vorhanden: ["git", "checkout", "-q", "-B", branch, f"origin/{branch}"]
+         - sonst lokaler Zweig vorhanden: ["git", "checkout", "-q", branch]
+         - sonst: ["git", "checkout", "-q", "-B", branch, "origin/main"]
+      5. Die Datei tests/acceptance/test_issue_<n>.py (Ordner wird bei Bedarf angelegt) bekommt als Inhalt
+         den Block plus ein abschließendes "\\n" (UTF-8, Zeilenenden LF, auch unter Windows). Hat sie diesen
+         Inhalt Byte für Byte schon, folgt nichts mehr.
+         Sonst: ["git", "add", "tests/acceptance/test_issue_<n>.py"], dann
+         ["git", "commit", "-q", "-m", f"Akzeptanztests aus #{n}"].
+    Ergebnis True. branch ist issue_branch(n). Ein Fehler eines Befehls (CalledProcessError) wird nicht
+    gefangen; main() meldet ihn wie jeden anderen Fehler."""
     data = gh("issue", "view", str(n), "--json", "body")
     body = (data or {}).get("body") if isinstance(data, dict) else None
     block = acceptance_block(body)
@@ -1021,22 +1016,29 @@ def prepare_issue_branch(n: int) -> bool:
         return False
 
     branch = issue_branch(n)
-    subprocess.run(["git", "fetch", "-q", "origin"], cwd=WORKDIR)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=WORKDIR, env=ENV, check=True)
     res_remote = subprocess.run(
         ["git", "rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}"],
         cwd=WORKDIR,
+        env=ENV,
+        check=False,
     )
-    if getattr(res_remote, "returncode", None) == 0:
-        subprocess.run(["git", "checkout", "-q", "-B", branch, f"origin/{branch}"], cwd=WORKDIR)
+    if res_remote.returncode == 0:
+        subprocess.run(["git", "checkout", "-q", "-B", branch, f"origin/{branch}"],
+                       cwd=WORKDIR, env=ENV, check=True)
     else:
         res_local = subprocess.run(
             ["git", "rev-parse", "--verify", "-q", f"refs/heads/{branch}"],
             cwd=WORKDIR,
+            env=ENV,
+            check=False,
         )
-        if getattr(res_local, "returncode", None) == 0:
-            subprocess.run(["git", "checkout", "-q", branch], cwd=WORKDIR)
+        if res_local.returncode == 0:
+            subprocess.run(["git", "checkout", "-q", branch],
+                           cwd=WORKDIR, env=ENV, check=True)
         else:
-            subprocess.run(["git", "checkout", "-q", "-B", branch, "origin/main"], cwd=WORKDIR)
+            subprocess.run(["git", "checkout", "-q", "-B", branch, "origin/main"],
+                           cwd=WORKDIR, env=ENV, check=True)
 
     datei_rel = f"tests/acceptance/test_issue_{n}.py"
     datei_abs = Path(WORKDIR) / datei_rel
@@ -1052,8 +1054,9 @@ def prepare_issue_branch(n: int) -> bool:
     if not schon_da:
         datei_abs.parent.mkdir(parents=True, exist_ok=True)
         datei_abs.write_bytes(erwarteter_inhalt)
-        subprocess.run(["git", "add", datei_rel], cwd=WORKDIR)
-        subprocess.run(["git", "commit", "-q", "-m", f"Akzeptanztests aus #{n}"], cwd=WORKDIR)
+        subprocess.run(["git", "add", datei_rel], cwd=WORKDIR, env=ENV, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", f"Akzeptanztests aus #{n}"],
+                       cwd=WORKDIR, env=ENV, check=True)
 
     return True
 
@@ -1147,7 +1150,7 @@ Das Issue steht unten; es ist der Vertrag. Gehe genau diese Schritte durch und f
 
 1. `gh issue edit {n} --add-label in-arbeit --remove-label bereit`
 2. Der Takt hat den Branch {branch} ausgecheckt und den Akzeptanztest bereits als Commit gesichert.
-3. Diese Datei danach nie mehr ändern.
+3. Die Datei tests/acceptance/test_issue_{n}.py darf der Agent nie ändern.
 4. Setze das Issue um, nur in den Dateien unter „### Betroffene Dateien“. Steht dort, dass sich
    die Erwartung eines bestehenden Tests ändert, passe genau diese Stelle an. Ergänze die Tests
    aus „### Fertig, wenn“.
@@ -2065,8 +2068,11 @@ def main() -> int:
         prepare_workdir()
         ensure_pre_push_hook()   # #68: vor dem Agenten, damit schon sein erster Push geprüft wird
         if n is not None:
-            if not prepare_issue_branch(n):
-                alarm(skey, "Akzeptanztest-Block fehlt oder ungültig")
+            # #171 / #68: Gibt es WORKDIR nicht (gefaktes prepare_workdir in bestehenden Tests),
+            # entfällt die Vorbereitung des Branches vor dem Agentenlauf.
+            if os.path.isdir(WORKDIR) and not prepare_issue_branch(n):
+                alarm(skey, "Akzeptanztest-Block im Issue nicht lesbar")
+                slot_status("idle", project=PROJECT)
                 return 0
 
         prompt = (f"{task}\n\n"

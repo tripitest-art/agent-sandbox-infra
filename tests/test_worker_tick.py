@@ -72,6 +72,7 @@ def _repo_workdir(monkeypatch, tmp_path):
 
 
 _ECHTE_GIT_HOOKS_DIR = w.git_hooks_dir    # vor dem Autouse-Fixture gesichert (#68)
+_ECHTE_PREPARE_ISSUE_BRANCH = w.prepare_issue_branch  # vor dem Autouse-Fixture gesichert (#171)
 
 
 def _good_body(issue_no=100):
@@ -202,6 +203,7 @@ def test_issue_job(monkeypatch):
     # Mit „nach AGENTS.md“ allein übersprang Qwen Label, Branch und Akzeptanz-Commit (#102).
     for step in ("gh issue edit 102 --add-label in-arbeit --remove-label bereit",
                  "Der Takt hat den Branch feature/issue-102 ausgecheckt und den Akzeptanztest bereits als Commit gesichert.",
+                 "Die Datei tests/acceptance/test_issue_102.py darf der Agent nie ändern.",
                  "git push -u origin feature/issue-102",
                  "--body-file .git/pr-body.md",
                  "gh pr view feature/issue-102 --json number,title,body"):
@@ -1625,8 +1627,9 @@ def test_main_ruft_prepare_issue_branch_nie_fuer_nacharbeit_oder_text(monkeypatc
 
 
 def test_main_startet_agent_nicht_wenn_prepare_issue_branch_false(monkeypatch, tmp_path, capsys):
-    """#171: Scheitert prepare_issue_branch, startet kein Agent und Stephan wird alarmiert."""
+    """#171: Scheitert prepare_issue_branch, startet kein Agent, Stephan wird alarmiert und Status wird idle."""
     schritte = []
+    status_calls = []
     monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
     monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
     monkeypatch.setattr(w, "PREFIX", "")
@@ -1636,7 +1639,7 @@ def test_main_startet_agent_nicht_wenn_prepare_issue_branch_false(monkeypatch, t
     monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
     monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
     monkeypatch.setattr(w, "claim_issue", lambda n: True)
-    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: status_calls.append((a, k)))
     monkeypatch.setattr(w, "check_issue_result", lambda k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: schritte.append("workdir"))
     monkeypatch.setattr(w, "ensure_pre_push_hook", lambda: schritte.append("hook"))
@@ -1647,7 +1650,53 @@ def test_main_startet_agent_nicht_wenn_prepare_issue_branch_false(monkeypatch, t
     assert schritte == ["workdir", "hook"]
     out = capsys.readouterr().out
     assert "⚠ Stephan:" in out
-    assert "Akzeptanztest-Block" in out
+    assert "Akzeptanztest-Block im Issue nicht lesbar" in out
+    assert any(a == ("idle",) for a, _ in status_calls)
+
+
+def test_prepare_issue_branch_verwendet_env_und_check(monkeypatch, tmp_path):
+    """#171: Alle git-Aufrufe mit cwd=WORKDIR, env=ENV, check=True (nur die zwei rev-parse mit check=False)."""
+    monkeypatch.setattr(w, "prepare_issue_branch", _ECHTE_PREPARE_ISSUE_BRANCH)
+    arbeit = tmp_path / "wt"
+    arbeit.mkdir()
+    monkeypatch.setattr(w, "WORKDIR", str(arbeit))
+    monkeypatch.setattr(w, "gh", lambda *args: {"body": "### Akzeptanztests\n```python\nassert 1\n```\n"})
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((list(cmd), kw))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    assert w.prepare_issue_branch(7) is True
+
+    assert len(calls) >= 5
+    assert all(kw.get("cwd") == str(arbeit) for _, kw in calls)
+    assert all(kw.get("env") == w.ENV for _, kw in calls)
+    rev_parses = [kw for c, kw in calls if c[:2] == ["git", "rev-parse"]]
+    others = [kw for c, kw in calls if c[:2] != ["git", "rev-parse"]]
+    assert len(rev_parses) == 1  # remote gefunden, 2. rev-parse nicht ausgeführt
+    assert all(kw.get("check") is False for kw in rev_parses)
+    assert all(kw.get("check") is True for kw in others)
+
+
+def test_prepare_issue_branch_laesst_called_process_error_durch(monkeypatch, tmp_path):
+    """#171: Ein Fehler eines git-Befehls (CalledProcessError) wird nicht gefangen."""
+    monkeypatch.setattr(w, "prepare_issue_branch", _ECHTE_PREPARE_ISSUE_BRANCH)
+    arbeit = tmp_path / "wt"
+    arbeit.mkdir()
+    monkeypatch.setattr(w, "WORKDIR", str(arbeit))
+    monkeypatch.setattr(w, "gh", lambda *args: {"body": "### Akzeptanztests\n```python\nassert 1\n```\n"})
+
+    def failing_run(cmd, **kw):
+        if cmd[1] == "checkout":
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 1 if cmd[1] == "rev-parse" else 0, "", "")
+
+    monkeypatch.setattr(w.subprocess, "run", failing_run)
+    with pytest.raises(subprocess.CalledProcessError):
+        w.prepare_issue_branch(7)
 
 
 def test_push_regel_nur_im_issue_auftrag(monkeypatch):
