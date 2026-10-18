@@ -1427,6 +1427,37 @@ def test_issue_job_kollidiert_bei_echt_genannter_datei(monkeypatch):
     assert "Du setzt Issue #402 um" in task
 
 
+def test_issue_job_kollidiert_nicht_wegen_doku_und_akzeptanztest(monkeypatch):
+    """#189: Doku-Pflicht und Akzeptanztest-Platzhalter blockieren keinen zweiten Auftrag."""
+    active_issue = _aktiver_auftrag(500, ("CHANGELOG.md", "README.md",
+                                          "tests/acceptance/test_issue_", "sandbox/review_tick.py"))
+    candidate = _kandidat(501, ["CHANGELOG.md", "README.md",
+                                "tests/acceptance/test_issue_501.py", "sandbox/worker_tick.py"])
+
+    monkeypatch.setattr(w, "gh", FakeGH(active=[active_issue], issues=[candidate]))
+    key, task, pr_no, sha = w.issue_job()
+    assert key == "issue501"
+    assert "Du setzt Issue #501 um" in task
+    assert w.SKIPPED == []
+
+
+def test_issue_job_kollidiert_weiter_bei_gemeinsamem_code(monkeypatch, capsys):
+    """#189: Gemeinsamer Code bleibt eine Kollision, die Logzeile bleibt im Wortlaut."""
+    active_issue = _aktiver_auftrag(500, ("CHANGELOG.md", "README.md", "sandbox/review_tick.py"))
+    candidate_overlap = _kandidat(501, ["README.md", "sandbox/review_tick.py"])
+    candidate_clean = _kandidat(502, ["CHANGELOG.md", "sandbox/worker_tick.py"])
+
+    monkeypatch.setattr(w, "gh", FakeGH(active=[active_issue],
+                                        issues=[candidate_overlap, candidate_clean]))
+    key, task, pr_no, sha = w.issue_job()
+    assert key == "issue502"
+    assert w.SKIPPED == [
+        "#501: Datei-Kollision mit aktivem Auftrag auf sandbox/review_tick.py",
+    ]
+    assert ("Issue #501 übersprungen: Datei-Kollision mit aktivem Auftrag auf "
+            "sandbox/review_tick.py (Regel 8).") in capsys.readouterr().out
+
+
 def test_prepare_workdir_creates_worktree(monkeypatch, tmp_path):
     base_dir = tmp_path / "base_repo"
     workdir = tmp_path / "worktrees" / "w2"

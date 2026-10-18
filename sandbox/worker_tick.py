@@ -868,6 +868,24 @@ def _path_candidate(text: str) -> str | None:
     return p.rstrip("/")
 
 
+# Regel 8: Fast jedes Issue nennt die Doku-Dateien (Pflicht nach AGENTS.md, „Doku und Changelog“)
+# und den Akzeptanztest-Platzhalter `tests/acceptance/test_issue_<N>.py`. Beides blockierte bisher
+# jeden zweiten Auftrag (#189); Code-Dateien zählen weiterhin.
+COLLISION_EXEMPT: frozenset[str] = frozenset({"CHANGELOG.md", "README.md"})
+_ACCEPTANCE_TEST_PREFIX = "tests/acceptance/test_issue_"
+
+
+def collision_files(files: set[str]) -> set[str]:
+    """Dateien, die für Regel 8 (Datei-Kollision) zählen: `files` ohne COLLISION_EXEMPT und ohne
+    Pfade, die unter `tests/acceptance/` liegen und mit `test_issue_` beginnen (der Dateiname
+    trägt im Issue-Text oft den Platzhalter `<N>`). Gibt eine neue Menge zurück; `files` bleibt
+    unverändert."""
+    return {
+        f for f in files
+        if f not in COLLISION_EXEMPT and not f.startswith(_ACCEPTANCE_TEST_PREFIX)
+    }
+
+
 def parse_affected_files(issue_body: str) -> set[str] | None:
     """Dateipfade aus der Sektion „Betroffene Dateien“; None, wenn die Sektion fehlt oder leer ist.
 
@@ -1286,10 +1304,11 @@ def issue_job(skip: Callable[[str], bool] | None = None):
                            f"an {HOTSPOT} in Arbeit ist")
             continue
 
-        # Regel 8: Keine zwei Agenten in denselben Dateien
+        # Regel 8: Keine zwei Agenten in denselben Dateien; Doku-Pflichtzeilen und der
+        # Akzeptanztest-Platzhalter zählen dabei nicht (#189).
         if cand_touches_main:
             cand_files.add(HOTSPOT)
-        overlap = cand_files & active_files
+        overlap = collision_files(cand_files) & collision_files(active_files)
         if overlap:
             log(f"Issue #{cand_no} übersprungen: Datei-Kollision mit aktivem Auftrag auf "
                 f"{', '.join(sorted(overlap))} (Regel 8).")
