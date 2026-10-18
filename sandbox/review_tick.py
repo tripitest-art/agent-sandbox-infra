@@ -182,6 +182,38 @@ def gh_json(*args: str):
     return json.loads(out) if out.strip() else None
 
 
+GH_GRUND_RATE_LIMIT = "GitHub-Rate-Limit erreicht"
+GH_GRUND_TOKEN = "GitHub-Token ungültig oder abgelaufen"
+GH_GRUND_NETZ = "GitHub nicht erreichbar"
+
+
+def gh_fehler_grund(exc: BaseException) -> str:
+    """Fester Klartext zur Ursache eines gescheiterten gh-Aufrufs, sonst ''.
+
+    Nur für subprocess.CalledProcessError mit str-stderr; jede andere Ausnahme und stderr=None ergeben ''.
+    Der stderr wird ohne Beachtung der Groß-/Kleinschreibung durchsucht, in dieser Reihenfolge:
+    - 'rate limit' (auch 'secondary rate limit')                   -> GH_GRUND_RATE_LIMIT
+    - 'http 401' oder 'bad credentials'                            -> 'GitHub-Token ungültig oder abgelaufen'
+    - 'no such host', 'could not resolve host', 'connection refused',
+      'timed out', 'timeout' oder 'tls handshake'                  -> 'GitHub nicht erreichbar'
+    - sonst ''.
+    Gibt nie Text aus stderr zurück (Regel 5: darin stehen Benutzerkennungen und Adressen). Reine Funktion."""
+    if not isinstance(exc, subprocess.CalledProcessError):
+        return ""
+    stderr = getattr(exc, "stderr", None)
+    if not isinstance(stderr, str):
+        return ""
+    text = stderr.lower()
+    if "rate limit" in text:
+        return GH_GRUND_RATE_LIMIT
+    if "http 401" in text or "bad credentials" in text:
+        return GH_GRUND_TOKEN
+    if any(marker in text for marker in ("no such host", "could not resolve host", "connection refused",
+                                         "timed out", "timeout", "tls handshake")):
+        return GH_GRUND_NETZ
+    return ""
+
+
 def repo_file(path: str) -> str:
     """Datei aus main des aktiven Projekts (roh)."""
     return gh_text("api", f"repos/{REPO}/contents/{path}?ref=main", "-H", "Accept: application/vnd.github.raw", repo=False)
@@ -1082,14 +1114,23 @@ def run_once() -> int:
     for i, p in enumerate(PROJECTS):
         if len(PROJECTS) > 1:
             use_project(p, first=(i == 0))
+        rate_limit = False
         try:
             if POST and AUTO_MERGE and PROJECT_AUTO_MERGE:
                 retry_merges(load_state())
             _run_pr_review()
         except Exception as exc:   # ein Projekt darf die anderen nicht blockieren
-            log(f"Projekt {p.name}: Fehler: {type(exc).__name__}: {str(exc)[:200]}")
+            grund = gh_fehler_grund(exc)
+            log(f"Projekt {p.name}: Fehler: {type(exc).__name__}: {str(exc)[:200]}"
+                + (f" ({grund})" if grund else ""))
+            if grund == GH_GRUND_RATE_LIMIT:
+                # #161: Weitere Abfragen verbrauchen nur Kontingent; der nächste Takt fragt wieder an.
+                rate_limit = True
+                log("GitHub-Rate-Limit: Lauf beendet, übrige Projekte werden übersprungen.")
+                return 0
         finally:
-            unblock_dependent_issues()
+            if not rate_limit:
+                unblock_dependent_issues()
     return 0
 
 

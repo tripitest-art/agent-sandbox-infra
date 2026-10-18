@@ -2177,3 +2177,35 @@ def test_modellwechsel_uebernimmt_genau_ein_issue(monkeypatch, tmp_path):
     assert w.main() == 0
     assert claims == [101]
     assert len(runs) == 1 and "Du setzt Issue #101 um" in runs[0]
+
+
+def _rate_limit_gh():
+    """gh, das beim Auflisten am GraphQL-Kontingent scheitert (Beleg 18.10.2026, #161)."""
+    def gh(*args):
+        raise subprocess.CalledProcessError(
+            1, ["gh", *args], stderr="GraphQL: API rate limit already exceeded for user ID 334735739.\n")
+    return gh
+
+
+def test_main_meldet_rate_limit_je_slot_nur_einmal(monkeypatch, tmp_path, capsys):
+    """#161: derselbe bekannte Grund steht in zwei Läufen nur einmal im Log, ohne stderr-Text."""
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "gh", _rate_limit_gh())
+
+    assert w.main() == 0
+    out = capsys.readouterr().out
+    assert out.count("⚠ Stephan: -: Fehler: GitHub-Rate-Limit erreicht") == 1
+    assert "334735739" not in out
+
+    assert w.main() == 0      # zweiter Lauf: derselbe Grund, keine zweite Zeile
+    assert "⚠ Stephan:" not in capsys.readouterr().out
+
+    # Ein Lauf ohne gh-Fehler hebt die Merkung auf; der nächste Fehler wird wieder gemeldet.
+    monkeypatch.setattr(w, "gh", FakeGH())
+    assert w.main() == 0
+    assert "_gherr" not in json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    capsys.readouterr()
+    monkeypatch.setattr(w, "gh", _rate_limit_gh())
+    assert w.main() == 0
+    assert capsys.readouterr().out.count("⚠ Stephan: -: Fehler: GitHub-Rate-Limit erreicht") == 1
+

@@ -1296,3 +1296,28 @@ def test_label_pr_wird_nie_gemergt_und_liegt_bei_stephan(monkeypatch, capsys):
     assert calls.get("posted") == [7]
     assert merged == []                             # kein Merge ohne Issue, trotz auto_merge
     assert "kein Worker-Issue" in capsys.readouterr().out
+
+
+def test_fehler_ohne_erkannten_grund_ergibt_die_bisherige_logzeile(monkeypatch, capsys):
+    """#161: ohne bekannten gh-Grund bleibt die Zeile wie bisher, ohne Klammer und ohne stderr."""
+    from types import SimpleNamespace
+    ablauf = []
+    monkeypatch.setattr(r, "PROJECTS", [SimpleNamespace(name="a"), SimpleNamespace(name="b")])
+    monkeypatch.setattr(r, "use_project", lambda p, first: ablauf.append(p.name))
+
+    def boom():
+        ablauf.append("review")
+        raise _cp_error("etwas anderes")
+
+    monkeypatch.setattr(r, "_run_pr_review", boom)
+    monkeypatch.setattr(r, "unblock_dependent_issues", lambda: ablauf.append("unblock"))
+
+    assert r.run_once() == 0
+    out = capsys.readouterr().out
+    assert ablauf == ["a", "review", "unblock", "b", "review", "unblock"]
+    zeilen = [z for z in out.splitlines() if "Projekt a: Fehler:" in z]
+    assert len(zeilen) == 1
+    assert zeilen[0].endswith(
+        "Projekt a: Fehler: CalledProcessError: Command 'gh' returned non-zero exit status 1.")
+    assert "etwas anderes" not in out
+

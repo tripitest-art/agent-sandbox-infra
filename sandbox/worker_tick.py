@@ -258,6 +258,63 @@ def first_line(error: BaseException | str) -> str:
     return lines[0] if lines else ""
 
 
+GH_GRUND_RATE_LIMIT = "GitHub-Rate-Limit erreicht"
+GH_GRUND_TOKEN = "GitHub-Token ungültig oder abgelaufen"
+GH_GRUND_NETZ = "GitHub nicht erreichbar"
+
+
+def gh_fehler_grund(exc: BaseException) -> str:
+    """Fester Klartext zur Ursache eines gescheiterten gh-Aufrufs, sonst ''.
+
+    Nur für subprocess.CalledProcessError mit str-stderr; jede andere Ausnahme und stderr=None ergeben ''.
+    Der stderr wird ohne Beachtung der Groß-/Kleinschreibung durchsucht, in dieser Reihenfolge:
+    - 'rate limit' (auch 'secondary rate limit')                   -> GH_GRUND_RATE_LIMIT
+    - 'http 401' oder 'bad credentials'                            -> 'GitHub-Token ungültig oder abgelaufen'
+    - 'no such host', 'could not resolve host', 'connection refused',
+      'timed out', 'timeout' oder 'tls handshake'                  -> 'GitHub nicht erreichbar'
+    - sonst ''.
+    Gibt nie Text aus stderr zurück (Regel 5: darin stehen Benutzerkennungen und Adressen). Reine Funktion."""
+    if not isinstance(exc, subprocess.CalledProcessError):
+        return ""
+    stderr = getattr(exc, "stderr", None)
+    if not isinstance(stderr, str):
+        return ""
+    text = stderr.lower()
+    if "rate limit" in text:
+        return GH_GRUND_RATE_LIMIT
+    if "http 401" in text or "bad credentials" in text:
+        return GH_GRUND_TOKEN
+    if any(marker in text for marker in ("no such host", "could not resolve host", "connection refused",
+                                         "timed out", "timeout", "tls handshake")):
+        return GH_GRUND_NETZ
+    return ""
+
+
+def report_gh_error(state: dict, skey: str, exc: BaseException) -> bool:
+    """Meldet einen gescheiterten Lauf. True, wenn eine Zeile geschrieben wurde.
+
+    - Ohne Grund (gh_fehler_grund(exc) == ''): wie bisher alarm(skey, first_line(exc)); jedes Mal True;
+      `state` bleibt unverändert.
+    - Mit Grund: steht dieser schon unter state['_gherr'], wird nichts geschrieben (False). Sonst
+      alarm(skey, f'{grund}: {first_line(exc)}'), state['_gherr'] = grund, True. Ein anderer Grund
+      als der gemerkte wird also erneut gemeldet.
+    Schreibt nicht selbst in die Zustandsdatei; das tut der Aufrufer."""
+    grund = gh_fehler_grund(exc)
+    if not grund:
+        alarm(skey, first_line(exc))
+        return True
+    if state.get("_gherr") == grund:
+        return False
+    alarm(skey, f"{grund}: {first_line(exc)}")
+    state["_gherr"] = grund
+    return True
+
+
+def clear_gh_error(state: dict) -> bool:
+    """Löscht state['_gherr']. True, wenn der Schlüssel gesetzt war, sonst False."""
+    return state.pop("_gherr", None) is not None
+
+
 def normalize_slot(slot: str | None) -> str:
     """Slot-Name auf seine Ziffernfolge bringen; Vorgabe ist WORKER_SLOT oder „1“."""
     m = re.search(r"\d+", str(slot if slot is not None else WORKER_SLOT))
@@ -1516,6 +1573,7 @@ def prepare_workdir() -> None:
 def main() -> int:
     global LAST_AGENT_ERROR
     skey = "-"          # Regel 7: vor der Auftragswahl meldet der Takt „-“
+    gh_fehler = False   # True: der Lauf endete in der Ausnahmebehandlung, _gherr bleibt gemerkt
     try:
         state = load_state()
         if BACKEND != "litellm" and WORKER_SLOT and WORKER_SLOT not in ("1", "w1", ""):
@@ -1667,10 +1725,27 @@ def main() -> int:
         return 0
     except Exception as exc:   # der Timer darf nie mit Traceback enden (Regel 7)
         # Regel 5: an alarm() geht nur die erste Zeile der Meldung, nie die rohe, mehrzeilige
-        # Ausnahme; die Kurzbeschreibung bleibt damit einzeilig.
-        alarm(skey, first_line(exc))
+        # Ausnahme; die Kurzbeschreibung bleibt damit einzeilig. Einen bekannten gh-Grund
+        # (#161) meldet report_gh_error je Slot nur einmal, bis ein Lauf ohne Fehler endet.
+        gh_fehler = True
+        try:
+            state = load_state()
+        except Exception:
+            state = {}   # Zustandsdatei selbst kaputt: melden, aber nichts merken können
+        vorher = state.get("_gherr")
+        report_gh_error(state, skey, exc)
+        if state.get("_gherr") != vorher:
+            save_state(state)
         return 0
     finally:
+        if not gh_fehler:
+            # Ein Lauf ohne Fehler hebt die Merkung auf: ein späterer gh-Fehler wird wieder gemeldet.
+            try:
+                state = load_state()
+                if clear_gh_error(state):
+                    save_state(state)
+            except Exception as e:
+                log(f"Warnung: Zustand nicht lesbar oder schreibbar ({type(e).__name__}).")
         # #59: Die Belegung endet mit dem Lauf, auch wenn er geworfen hat. Ohne eigene Belegung
         # (keine Arbeit, fremde Belegung) ist das ein Nullaufruf.
         release_job(skey)
