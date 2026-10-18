@@ -122,6 +122,11 @@ CLAIM_DIR = os.environ.get("CLAIM_DIR", "/var/lib/worker-claims")
 # Ab diesem Alter räumt cleanup_claims() auf (#170). Bewusst lang: Eine .done-Marke verhindert
 # sonst, dass dieselbe Nacharbeit in einem anderen Slot erneut anläuft (#59).
 CLAIM_MAX_AGE_DAYS = 30
+# #183: Ein Issue mit `in-arbeit`, das so lange unverändert ist, ohne offenen PR auf seinem Branch
+# und ohne lebende Belegung, steht still. Der Takt meldet das einmal, setzt aber kein Label zurück
+# (Stephan entscheidet). 40 Minuten: länger als ein Lauf (`timeout -k 30 1860`).
+VERWAIST_S = 2400
+VERWAIST = "_verwaist:"      # Vorsatz der Schlüssel im Zustand: f"_verwaist:{nummer}"
 # Verzeichnisse, für die claim_job schon eine „⚠ Stephan:“-Zeile geschrieben hat. Eigener Merker,
 # weil claim_job keinen Zustand bekommt; der Takt ist ein kurzer Prozess je Auftrag.
 _CLAIM_WARNED: set[str] = set()
@@ -1861,6 +1866,103 @@ def job_done_anywhere(skey: str) -> bool:
     return os.path.exists(_claim_done_path(skey))
 
 
+def _iso_sekunden(text: object) -> float | None:
+    """Sekunden seit der Epoche aus einem gh-Zeitstempel (ISO 8601), sonst None.
+
+    Ohne Zeitzone gilt UTC; ein unlesbarer Wert zählt als unbekannt und wird nie geraten."""
+    if not isinstance(text, str):
+        return None
+    try:
+        zeit = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if zeit.tzinfo is None:
+        zeit = zeit.replace(tzinfo=timezone.utc)
+    return zeit.timestamp()
+
+
+def verwaiste_auftraege(issues: list[dict], prs: list[dict], now: float | None = None) -> list[int]:
+    """Nummern der verwaisten Issues, aufsteigend.
+
+    `issues`: Einträge von `gh issue list --label in-arbeit` mit `number` und `updatedAt`
+    (ISO 8601). `prs`: offene PRs mit `headRefName`. Verwaist heißt: seit mindestens VERWAIST_S
+    Sekunden unverändert, kein PR auf `issue_branch(N)` und keine lebende Belegung
+    (`claim_path(PREFIX + f"issue{N}")`). Ein Eintrag ohne lesbares `updatedAt` zählt nicht.
+    Wirft nie, ändert nichts, schreibt kein Log. `now` Vorgabe: jetzt_s()."""
+    jetzt = jetzt_s() if now is None else now
+    branches = {pr.get("headRefName") for pr in prs or [] if isinstance(pr, dict)}
+    verwaist: list[int] = []
+    for eintrag in issues or []:
+        if not isinstance(eintrag, dict):
+            continue
+        try:
+            nummer = int(eintrag.get("number"))
+        except (TypeError, ValueError):
+            continue
+        geaendert = _iso_sekunden(eintrag.get("updatedAt"))
+        if geaendert is None or jetzt - geaendert < VERWAIST_S:
+            continue
+        if issue_branch(nummer) in branches:
+            continue
+        # Eine tote Belegung (abgebrochener Takt) hält den Auftrag nicht; eine lebende schon.
+        besitzer = _claim_owner(claim_path(PREFIX + f"issue{nummer}"))
+        if besitzer is not None and _pid_alive(besitzer):
+            continue
+        verwaist.append(nummer)
+    return sorted(verwaist)
+
+
+def verwaiste_melden(state: dict, now: float | None = None) -> list[int]:
+    """Meldet verwaiste Issues (`in-arbeit` ohne Lauf und ohne PR) einmal je Issue (#183).
+
+    Nur der erste Slot fragt GitHub und schreibt (sonst käme jede Meldung doppelt). Je neuem
+    verwaisten Issue entsteht genau eine „⚠ Stephan:“-Zeile; der Zustandsschlüssel
+    `VERWAIST + N` verhindert die Wiederholung. Ist ein Issue nicht mehr verwaist, wird sein
+    Schlüssel entfernt — wird es später wieder verwaist, meldet der Takt erneut. Ein
+    gescheiterter gh-Aufruf hinterlässt nur eine Warnung ohne „⚠“ und ändert nichts.
+    Rückgabe: die Nummern, die in diesem Aufruf neu gemeldet wurden."""
+    if WORKER_SLOT not in ("", "1"):
+        return []
+    jetzt = jetzt_s() if now is None else now
+    try:
+        issues = gh("issue", "list", "--state", "open", "--label", "in-arbeit",
+                    "--json", "number,updatedAt")
+        prs = gh("pr", "list", "--state", "open", "--json", "number,headRefName")
+    except Exception as e:
+        # Regel 7: sichtbar, aber ohne „⚠“ — der Zustand bleibt unverändert.
+        log(f"Warnung: Prüfung auf verwaiste Aufträge fehlgeschlagen ({type(e).__name__})")
+        return []
+    verwaist = verwaiste_auftraege(issues or [], prs or [], jetzt)
+    gemeldet: list[int] = []
+    geaendert = False
+    for nummer in verwaist:
+        key = VERWAIST + str(nummer)
+        if state.get(key):
+            continue
+        stand = None
+        for eintrag in issues or []:
+            if isinstance(eintrag, dict) and str(eintrag.get("number")) == str(nummer):
+                stand = _iso_sekunden(eintrag.get("updatedAt"))
+                break
+        minuten = 0 if stand is None else int((jetzt - stand) // 60)
+        alarm("-", f"Issue #{nummer} steht seit {minuten} Minuten auf in-arbeit, "
+                   "ohne Lauf und ohne PR; Label prüfen")
+        state[key] = True
+        geaendert = True
+        gemeldet.append(nummer)
+    for key in [k for k in state if k.startswith(VERWAIST)]:
+        try:
+            nummer = int(key[len(VERWAIST):])
+        except ValueError:
+            nummer = None
+        if nummer not in verwaist:
+            del state[key]
+            geaendert = True
+    if geaendert:
+        save_state(state)
+    return gemeldet
+
+
 def main_red_sha() -> str | None:
     """Kurz-Hash (7 Zeichen) des Commits, auf dem der jüngste abgeschlossene Lauf des Workflows
     `tests` auf `main` rot war; sonst None.
@@ -2136,6 +2238,12 @@ def main() -> int:
                 return 0
             if log_on_change(state, LAST_PC, "bereit", "Gaming-PC an, Chat aktiv: suche Arbeit."):
                 state.pop(LAST_WORK, None)   # Ergebnis der ersten Suche wieder zeigen
+        # #183: Ein Issue mit `in-arbeit` ohne Lauf und ohne PR steht still; der erste Slot meldet
+        # es einmal. Die Prüfung darf den Lauf nie abbrechen.
+        try:
+            verwaiste_melden(state)
+        except Exception as e:
+            log(f"Warnung: Prüfung auf verwaiste Aufträge fehlgeschlagen ({type(e).__name__})")
         job = pick_job(state)
         if not job:
             # #178: Ohne Auftrag rechnet der Takt den offenen Lauf ab — /key/info liefert dabei
