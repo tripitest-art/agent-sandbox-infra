@@ -106,6 +106,12 @@ RUN_TIMEOUT = int(os.environ.get("RUN_TIMEOUT_MIN", "30" if BACKEND == "litellm"
 AGENT = os.environ.get("AGENT", "qwen-code")   # oder "opencode"
 PR_TEMPLATE = ".github/pull_request_template.md"
 TOOL_OUTPUT_LINES = 15      # so viele Zeilen je Werkzeugausgabe ins Log
+# Obergrenzen der Listenabfragen (#200): Ohne --limit fordert gh bis zu 30 Einträge an, bei
+# verschachtelten Feldern (reviews, commits) kostet das viele GraphQL-Punkte. Mehr als 10 offene
+# PRs bzw. 20 offene Issues je Sorte braucht ein Takt nicht; das stündliche Kontingent wird sonst
+# vorzeitig verbraucht.
+PR_LIST_LIMIT = 10          # GraphQL-Kontingent schonen: max. 10 offene PRs abfragen
+ISSUE_LIST_LIMIT = 20       # max. 20 offene Issues je Abfrage
 # Sekunden, die der Takt aufs Wecken wartet; länger als WAKE_TIMEOUT des Proxys (180 s),
 # damit der Proxy aufgibt und nicht der Takt.
 WAKE_WAIT = int(os.environ.get("WAKE_WAIT", "240"))
@@ -714,7 +720,7 @@ def rework_job(done=frozenset(), skip: Callable[[str], bool] | None = None):
     Das Review steht wörtlich im Auftrag: Qwen hat es sonst nicht gelesen, nur die Tests auf
     main laufen lassen und den PR selbst für fertig erklärt (#103, erster Lauf).
     """
-    prs = gh("pr", "list", "--state", "open", "--json",
+    prs = gh("pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT), "--json",
              "number,headRefName,headRefOid,isCrossRepository,reviews,commits,title,body")
     for pr in sorted(prs, key=lambda p: p["number"]):
         m = re.match(r"feature/issue-(\d+)", pr["headRefName"])
@@ -767,7 +773,7 @@ def text_fix_job(skip: Callable[[str], bool] | None = None):
     Der Schlüssel hängt am Head-Commit: Neue Commits geben einen neuen Anlauf, sonst gilt
     MAX_TRIES wie für jeden Auftrag.
     """
-    prs = gh("pr", "list", "--state", "open", "--json",
+    prs = gh("pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT), "--json",
              "number,headRefName,headRefOid,isCrossRepository,title,body")
     for pr in sorted(prs or [], key=lambda p: p["number"]):
         m = re.match(r"feature/issue-(\d+)", pr["headRefName"])
@@ -994,6 +1000,7 @@ def active_in_progress_issues() -> list[dict] | None:
     """
     try:
         active = gh("issue", "list", "--state", "open", "--label", "in-arbeit",
+                    "--limit", str(ISSUE_LIST_LIMIT),
                     "--json", "number,title,body,author,labels")
         return [i for i in active or [] if (i.get("author") or {}).get("login") == OWNER]
     except Exception as e:
@@ -1178,6 +1185,8 @@ def open_pr(n: int) -> bool:
        body = build_pr_body(pr_template(), n, WORKER, summary);
        gh("pr", "create", "--title", title, "--body", body, "--head", branch). Rückgabe True."""
     branch = issue_branch(n)
+    # Bewusst ohne --limit: tests/acceptance/test_issue_172.py prüft diesen gh-Aufruf zeichengenau
+    # (gemergt, unveränderlich). Einmal je fertigem Issue ist die Abfrage auch kein Kontingentfresser.
     offen = gh("pr", "list", "--state", "open", "--head", branch, "--json", "number")
     if offen:
         return True
@@ -1256,7 +1265,8 @@ def issue_job(skip: Callable[[str], bool] | None = None):
     """
     SKIPPED.clear()
     issues = gh("issue", "list", "--state", "open", "--label", "worker-task", "--label", "bereit",
-                "--label", LABEL, "--search", "sort:created-asc -label:blockiert",
+                "--label", LABEL, "--limit", str(ISSUE_LIST_LIMIT),
+                "--search", "sort:created-asc -label:blockiert",
                 "--json", "number,title,body,author,labels")
     # Wie bei Reviews: Nur Issues von Stephans Konto werden zum Auftrag mit Schreibrecht.
     issues = [i for i in issues or [] if (i.get("author") or {}).get("login") == OWNER]
