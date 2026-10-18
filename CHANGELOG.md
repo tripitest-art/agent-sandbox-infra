@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- Doku: Home-Assistant-Rückbau redaktionell abgeschlossen; Architekturdiagramm, README, ROADMAP, autodeploy.md und Review-Skill auf Web-Dashboard und ntfy aktualisiert (#154).
 - Home Assistant: Obsolete Module (`ha_status.py`, `qwen_webhook.py`), Konfigurationen (`homeassistant/`), zugehörige Tests und Doku-Links gelöscht (#153).
 - `install.sh`: Home-Assistant-Dienste (`qwen-webhook.service`, `ha-status.service`/`timer`) und Secret-Abfragen entfernt (#152).
 - `worker_tick`: Das Audit-Log führt zusätzlich `active_model` — mit `BACKEND=litellm` der tatsächlich genutzte Modell-Alias (auch nach dem Ausweichen), sonst wie bisher der Ollama-Name; `model` bleibt unverändert der Ollama-Name (#156).
