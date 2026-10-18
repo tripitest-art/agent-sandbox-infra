@@ -10,3 +10,8 @@ import os
 
 # Vor dem Import von `worker_tick` (liest WORKDIR beim Import), auch wenn die Umgebung etwas setzt.
 os.environ["WORKDIR"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_kein_workdir")
+
+# `/etc/agent-settings.json` gewinnt vor Umgebung und Code-Vorgabe (agent_settings.py). Auf dem Server
+# steht dort z. B. `LITELLM_MODEL=coder-nvidia`; `worker_tick` liest es beim Import, und die Tests zum
+# Modell-Ausweichen und zu `agent_cmd` erwarten die Vorgabe `coder`. Ein Pfad ohne Datei = Vorgaben.
+os.environ["AGENT_SETTINGS"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_keine_einstellungen.json")
