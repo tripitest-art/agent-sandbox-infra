@@ -14,6 +14,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -29,6 +30,66 @@ INFRA_DIR: str = os.environ.get("INFRA_DIR", "/root/agent-sandbox-infra")
 COMMAND_TIMEOUT: int = 3600
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess]
+
+BLOCKED_PATHS: tuple[str, ...] = (
+    "/etc/agent-projects.json", "/etc/agent-settings.json", "/etc/agent-sandbox.conf",
+    "/root/sc-digger", "/root/sc-digger-worktrees", "/root/work",
+    "/var/lib/worker-claims", "/run/worker-slots",
+    "/root/worker.log", "/root/audit.jsonl",
+)
+
+
+def preflight_cmd(python: str, repo: str | Path, blocked: Sequence[str] = BLOCKED_PATHS) -> tuple[str, ...]:
+    """Befehlszeile für den Pre-Flight-Test in der systemd-Sandbox. Genau diese Form:
+
+    ("systemd-run", "--quiet", "--wait", "--pipe", "--collect",
+     "-p", f"WorkingDirectory={repo}",
+     "-p", "InaccessiblePaths=" + " ".join("-" + p for p in blocked),
+     python, "-m", "pytest", "-q", "-p", "no:cacheprovider")
+
+    Das „-“ vor jedem Pfad heißt: fehlt der Pfad, ist das kein Fehler. Weder `repo` noch das venv
+    stehen in `blocked`."""
+    return (
+        "systemd-run", "--quiet", "--wait", "--pipe", "--collect",
+        "-p", f"WorkingDirectory={repo}",
+        "-p", "InaccessiblePaths=" + " ".join("-" + p for p in blocked),
+        str(python), "-m", "pytest", "-q", "-p", "no:cacheprovider",
+    )
+
+
+def choose_test_cmd(python: str, repo: str | Path, run: Runner) -> tuple[tuple[str, ...], bool]:
+    """(Befehl, isoliert). Probelauf über run(("systemd-run", "--quiet", "--wait", "--pipe",
+    "-p", "InaccessiblePaths=-/nicht-vorhanden", "true")): Exit 0 -> (preflight_cmd(...), True);
+    jeder andere Exit-Code (auch 124 und 127) -> ((python, "-m", "pytest", "-q"), False)."""
+    probe = run((
+        "systemd-run", "--quiet", "--wait", "--pipe",
+        "-p", "InaccessiblePaths=-/nicht-vorhanden", "true",
+    ))
+    if probe.returncode == 0:
+        return preflight_cmd(python, repo), True
+    return (str(python), "-m", "pytest", "-q"), False
+
+
+_FAILED_TEST_RE = re.compile(r"^[\w./\[\]:,\-]+$")
+
+
+def failed_tests(output: str, limit: int = 5) -> list[str]:
+    r"""Namen der roten Tests aus der pytest-Ausgabe: Zeilen, die mit „FAILED “ beginnen; der Name ist
+    der Text bis zum ersten „ - “ (Meldung wird verworfen, sie kann Werte enthalten). Nur Namen, die
+    vollständig auf ^[\w./\[\]:,\-]+$ passen; andere Zeilen entfallen. Reihenfolge wie in der Ausgabe,
+    höchstens `limit`, leere Ausgabe -> []."""
+    if not output or limit <= 0:
+        return []
+    res: list[str] = []
+    for line in output.splitlines():
+        if line.startswith("FAILED "):
+            rest = line[len("FAILED "):]
+            name = rest.split(" - ", 1)[0]
+            if _FAILED_TEST_RE.match(name):
+                res.append(name)
+                if len(res) >= limit:
+                    break
+    return res
 
 
 @dataclass
@@ -193,7 +254,12 @@ def deploy_once(
 
     tests = run(list(test_cmd))
     if tests.returncode != 0:
-        return verwerfen(f"Tests fehlgeschlagen (Exit {tests.returncode})")
+        failed = failed_tests(tests.stdout or "")
+        if failed:
+            detail = f"Tests fehlgeschlagen (Exit {tests.returncode}): {', '.join(failed)}"
+        else:
+            detail = f"Tests fehlgeschlagen (Exit {tests.returncode})"
+        return verwerfen(detail)
 
     install = run(list(install_cmd))
     if install.returncode != 0:
@@ -222,10 +288,13 @@ def _log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [deploy] {msg}", flush=True)
 
 
-def main() -> int:
+def main(
+    run: Runner | None = None,
+    log: Callable[[str], None] | None = None,
+) -> int:
     repo = Path(INFRA_DIR)
 
-    def run(cmd: Sequence[str]) -> subprocess.CompletedProcess:
+    def default_run(cmd: Sequence[str]) -> subprocess.CompletedProcess:
         # Eine hängende Ausgabe darf den Takt nicht ewig blockieren (Regel 7).
         try:
             return subprocess.run(list(cmd), cwd=repo, capture_output=True, text=True,
@@ -233,13 +302,19 @@ def main() -> int:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return subprocess.CompletedProcess(list(cmd), 124, "", type(exc).__name__)
 
+    runner = run if run is not None else default_run
+    logger = log if log is not None else _log
+
     # Die Tests der Projekte (5 Minuten für sc-digger) sind hier unnötig: install.sh zeigt sie nur an.
     os.environ["SKIP_TESTS"] = "1"
     venv_python = "/root/venv/bin/python"
     python = venv_python if os.path.exists(venv_python) else sys.executable
-    result = deploy_once(repo, run, _log, test_cmd=(python, "-m", "pytest", "-q"))
+    test_cmd, isoliert = choose_test_cmd(python, repo, runner)
+    result = deploy_once(repo, runner, logger, test_cmd=test_cmd)
+    if not isoliert and result.status in ("ausgerollt", "zurueckgerollt"):
+        logger("Pre-Flight lief ohne Isolation (systemd-run nicht nutzbar)")
     if result.status != "unveraendert":
-        _log(f"{result.status}: {result.detail}")
+        logger(f"{result.status}: {result.detail}")
     return 1 if result.status == "fehler" else 0
 
 
