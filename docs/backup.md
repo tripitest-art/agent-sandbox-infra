@@ -20,8 +20,6 @@ entsteht.
 | `/etc/agent-projects.json` | Projektliste (Name, Repository, Arbeitsordner, Hotspot, `auto_merge`, `required_checks`); fehlt sie, kennt der Takt nur sc-digger |
 | `/etc/qwen-worker.env` | `LITELLM_API_KEY` (Worker) |
 | `/etc/qwen-reviewer.env` | `LITELLM_REVIEW_KEY` (Review-Takt) |
-| `/etc/qwen-webhook.env` | `HA_WEBHOOK_URL` (Live-Log in Home Assistant) |
-| `/etc/ha-status.env` | `HA_STATUS_URL` (Status-Bericht an Home Assistant) |
 
 Die Werte stehen im Passwortmanager (Vaultwarden), nicht in einer Sicherung im Klartext außerhalb davon.
 `ask_secret` in `install.sh` fragt fehlende Werte beim nächsten Lauf verdeckt ab.
