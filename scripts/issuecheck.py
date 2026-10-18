@@ -340,9 +340,17 @@ def check_red(issue_md: str, repo: Path, timeout: float = 300, keep_tmp: bool = 
     env["PYTHONPATH"] = os.pathsep.join(pythonpaths)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
 
-    tmp_dir = tempfile.mkdtemp(prefix="issuecheck-")
+    # Viele Akzeptanztests finden das Repo über Path(__file__).parents[2]; aus einem
+    # Temp-Ordner zeigt das ins Leere (#175). Liegt der Akzeptanzordner vor, deshalb dort
+    # ausführen — es wird nie ein Ordner angelegt.
+    acceptance_dir = repo / "tests" / "acceptance"
+    tmp_dir: Path | None = None
+    if acceptance_dir.is_dir():
+        testfile = acceptance_dir / f"test_issue_preflight_{os.getpid()}.py"
+    else:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="issuecheck-"))
+        testfile = tmp_dir / "test_issue_preflight.py"
     try:
-        testfile = Path(tmp_dir) / "test_issue_preflight.py"
         testfile.write_text(block + "\n", encoding="utf-8")
         cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider", str(testfile)]
         try:
@@ -357,9 +365,9 @@ def check_red(issue_md: str, repo: Path, timeout: float = 300, keep_tmp: bool = 
     finally:
         if not keep_tmp:
             try:
-                for child in Path(tmp_dir).iterdir():
-                    child.unlink()
-                Path(tmp_dir).rmdir()
+                testfile.unlink(missing_ok=True)
+                if tmp_dir is not None:
+                    tmp_dir.rmdir()
             except OSError:
                 pass
         else:
@@ -373,7 +381,7 @@ def check_red(issue_md: str, repo: Path, timeout: float = 300, keep_tmp: bool = 
         findings.append(Finding("fehler", "kein-test", "pytest hat im Akzeptanztest keine Testfunktion gesammelt."))
     elif proc.returncode == 4:
         findings.append(Finding("fehler", "pytest-usage", f"pytest Kommandozeilenfehler:\n{output.strip()}"))
-    elif "CollectionError" in output or "SyntaxError:" in output:
+    elif "ERROR collecting" in output or "SyntaxError:" in output:
         # Wenn der Sammlungsfehler ein fehlender Import aus sandbox/ ist, ist das ein erwarteter Rot-Grund
         if "ModuleNotFoundError" not in output and "ImportError" not in output:
             findings.append(Finding("fehler", "sammlungsfehler",

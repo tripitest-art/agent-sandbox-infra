@@ -228,6 +228,20 @@ def test_check_red_meldet_teilweise_gruen(repo):
     assert "teilweise-gruen" in _codes(findings)
 
 
+def test_check_red_loescht_preflight_datei_bei_timeout(repo, monkeypatch):
+    # Der Preflight-Test liegt im Akzeptanzordner; auch eine Zeitüberschreitung muss ihn entfernen.
+    acceptance = repo / "tests" / "acceptance"
+    acceptance.mkdir()
+
+    def fake_run(*args, **kwargs):
+        raise ic.subprocess.TimeoutExpired(cmd="pytest", timeout=0.01)
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    findings, out = ic.check_red(_issue(), repo=repo, timeout=0.01)
+    assert "timeout" in _codes(findings)
+    assert list(acceptance.iterdir()) == []
+
+
 # ---------------- CLI main ----------------
 def test_main_mit_datei_erfolgreich(repo, tmp_path, capsys):
     p = tmp_path / "issue.md"
