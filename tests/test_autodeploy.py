@@ -228,3 +228,31 @@ def test_meldungen_enthalten_keine_rohe_ausgabe(tmp_path):
 
     res, notes = deploy(tmp_path, Laut())
     assert "GEHEIM" not in res.detail and all("GEHEIM" not in n for n in notes)
+
+
+# ---- main() ----
+
+def test_main_loggt_nicht_isolierte_ausfuehrung_nur_bei_neuem_stand(monkeypatch):
+    logs = []
+    fake_run = lambda cmd: cp(cmd, 1)
+
+    monkeypatch.setattr(ad, "_log", logs.append)
+
+    monkeypatch.setattr(
+        ad, "deploy_once",
+        lambda repo, run, notify, **kw: ad.DeployResult("ausgerollt", "1111111", "2222222", "1111111 -> 2222222 ausgerollt"),
+    )
+    ret = ad.main(run=fake_run)
+    assert ret == 0
+    assert "Pre-Flight lief ohne Isolation (systemd-run nicht nutzbar)" in logs
+
+    logs.clear()
+
+    monkeypatch.setattr(
+        ad, "deploy_once",
+        lambda repo, run, notify, **kw: ad.DeployResult("unveraendert", "1111111", "1111111", "kein neuer Stand"),
+    )
+    ret = ad.main(run=fake_run)
+    assert ret == 0
+    assert logs == []
+

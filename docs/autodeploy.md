@@ -24,8 +24,13 @@ Die Units liegen in `sandbox/systemd/`; `autodeploy.py` kommt wie alle `sandbox/
    kommt eine „⚠ Stephan:“-Zeile. Nicht verfolgte Dateien (`.deploy-state.json`, `__pycache__`) zählen nicht.
 3. `git fetch origin main`, dann Vergleich von `HEAD` mit `origin/main`. Gleich: `unveraendert` (keine Logzeile).
 4. Ein Stand, der schon fehlschlug (`bad` im State), wird nicht wiederholt, bis ein neuer Commit auf `main` liegt.
-5. `git pull --ff-only origin main`, dann `pytest -q` (Pre-Flight). Rot: `git reset --hard <alter Stand>`,
-   Stand als `bad` vermerkt, „⚠ Stephan:“-Zeile, Status `zurueckgerollt`. `install.sh` läuft dann nicht.
+5. `git pull --ff-only origin main`, dann `pytest -q` (Pre-Flight in einer systemd-Sandbox über
+   `systemd-run`, Pfade wie `/etc/agent-settings.json`, `/etc/agent-projects.json`, `/root/sc-digger`
+   per `InaccessiblePaths` ausgeblendet). Ist die Isolation auf dem Server nicht nutzbar (`systemd-run`
+   schlägt beim Probelauf fehl), fällt der Pre-Flight auf den normalen pytest-Aufruf zurück und `main`
+   vermerkt dies bei neuem Stand im Log (`Pre-Flight lief ohne Isolation (systemd-run nicht nutzbar)`).
+   Rot: `git reset --hard <alter Stand>`, Stand als `bad` vermerkt, „⚠ Stephan:“-Zeile (nennt bis zu fünf
+   rote Tests), Status `zurueckgerollt`. `install.sh` läuft dann nicht.
 6. `bash sandbox/install.sh` (mit `SKIP_TESTS=1`). Scheitert es: `git reset --hard <alter Stand>` und
    `install.sh` noch einmal, damit installierter Stand und Code zusammenpassen; Meldung wie oben.
 7. Erfolg: `last_good` = neuer Stand, `bad` leer, Logzeile „Auto-Deploy: alt -> neu ausgerollt“.
@@ -38,7 +43,7 @@ eine „⚠ Stephan:“-Zeile, aber nur einmal je Fehlertext, nicht alle 15 Minu
 - Zustand: `/root/agent-sandbox-infra/.deploy-state.json` (`last_good`, `bad`, `last_error`, `dirty_notified`),
   atomar geschrieben, nicht im Repo (nur verfolgte Dateien zählen für „lokale Änderungen“).
 - Log: `/root/worker.log`, Zeilen mit `[deploy]`. „⚠ Stephan:“-Zeilen gehen wie alle anderen über das Dashboard und ntfy an Stephan.
-  Gemeldet wird nie rohe Ausgabe von pytest oder `install.sh`, nur der Exit-Code (Regel 5).
+  Gemeldet wird nie rohe Ausgabe von pytest oder `install.sh` (Regel 5), sondern bei Testfehlern nur der Exit-Code und die Testnamen.
 - Sofort anstoßen: `systemctl start agent-sandbox-deploy.service`. Zurücksetzen eines vermerkten
   `bad`-Stands: `.deploy-state.json` löschen.
 - Das Web-Dashboard (`sandbox/dashboard.py`) liest dieselbe Datei und zeigt `last_good`/`last_good_at`
@@ -49,6 +54,9 @@ eine „⚠ Stephan:“-Zeile, aber nur einmal je Fehlertext, nicht alle 15 Minu
 
 - Der Pre-Flight-Test prüft nur dieses Repo, nicht die Dienste nach dem Neustart. Ein `install.sh`, das
   zwar mit Exit 0 endet, aber einen Timer kaputt konfiguriert, erkennt der Lauf nicht.
+- Kann `systemd-run` im Container (z. B. unprivilegierter LXC) keine Mount-Sandbox anlegen, läuft der
+  Pre-Flight ohne Isolation; Tests können dann wieder echte Serverdateien berühren, falls diese nicht
+  über `tests/conftest.py` abgefangen sind.
 - Ändert ein PR `autodeploy.py` oder `install.sh` selbst, gilt er wie jeder andere: Merge nur durch Stephan,
   und nach einem Fehlschlag steht der alte Stand wieder da.
 - Der sc-digger-Deploy läuft getrennt (sc-digger #241).
