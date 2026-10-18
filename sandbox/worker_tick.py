@@ -73,6 +73,11 @@ LITELLM_MODEL = agent_settings.value("LITELLM_MODEL", os.environ.get("LITELLM_MO
 # Ausweichmodelle (Aliase im LiteLLM-Proxy, der Key »worker« muss sie dürfen), durch Komma getrennt.
 LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "coder-or,coder-free").split(",") if m.strip()]
 PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT", "45"))   # Sekunden je Probe
+# #180: Erst nach 20 Minuten ist ein LiteLLM-Ausfall eine Meldung wert; ein Proxy-Neustart
+# oder ein kurzer Netzaussetzer bleibt still. Die Schlüssel liegen im Slot-Zustand, deshalb
+# meldet nur der erste Slot.
+LITELLM_ALARM_S = 1200           # 20 Minuten
+LITELLM_AB, LITELLM_ALARM = "_litellm_ab", "_litellm_alarm"     # Schlüssel im Zustand
 # Steht als „Worker: …“ im PR; die Review-Regel (andere Modellfamilie) hängt daran.
 WORKER_NAMES = {
     "coder": "DeepSeek (LiteLLM coder)",
@@ -1265,6 +1270,60 @@ def litellm_ready() -> str | None:
         return "LiteLLM nicht erreichbar"
 
 
+def jetzt_s() -> float:
+    """Sekunden seit der Epoche; eigene Funktion, damit Tests die Uhr setzen können (#180)."""
+    return time.time()
+
+
+def litellm_down(state: dict, now: float | None = None) -> bool:
+    """Einen andauernden LiteLLM-Ausfall als „⚠ Stephan:“-Zeile melden (#180).
+
+    Merkt den ersten Fehlschlag in `state[LITELLM_AB]` und behält ihn bis `litellm_up()`;
+    erst ab `LITELLM_ALARM_S` Sekunden danach entsteht genau eine Zeile je Ausfall. Nur der
+    erste Slot (ohne Nummer: der einzige Worker) meldet, sonst käme dieselbe Meldung doppelt.
+    True nur beim Melden, alle anderen Aufrufe False."""
+    if WORKER_SLOT not in ("", "1"):
+        return False
+    if now is None:
+        now = jetzt_s()
+    start = state.get(LITELLM_AB)
+    if not isinstance(start, (int, float)) or isinstance(start, bool):
+        state[LITELLM_AB] = now          # erster Fehlschlag dieses Ausfalls
+        save_state(state)
+        return False
+    if state.get(LITELLM_ALARM):
+        return False                     # dieser Ausfall wurde schon gemeldet
+    if now - start < LITELLM_ALARM_S:
+        return False
+    minuten = int((now - start) // 60)
+    alarm("-", f"LiteLLM seit {minuten} Minuten nicht erreichbar; Worker und Review stehen")
+    state[LITELLM_ALARM] = True
+    save_state(state)
+    return True
+
+
+def litellm_up(state: dict, now: float | None = None) -> bool:
+    """Das Ende eines gemerkten LiteLLM-Ausfalls aufräumen (#180).
+
+    Entfernt beide Ausfallschlüssel und speichert; True nur, wenn zuvor alarmiert wurde, dann
+    steht die Entwarnung im Log (ohne „⚠“). Nach einem kurzen Aussetzer bleibt es still, und
+    ohne gemerkten Ausfall wird nichts gespeichert."""
+    if WORKER_SLOT not in ("", "1"):
+        return False
+    if LITELLM_AB not in state:
+        return False
+    if now is None:
+        now = jetzt_s()
+    start = state.pop(LITELLM_AB)
+    alarmiert = bool(state.pop(LITELLM_ALARM, False))
+    save_state(state)
+    if not alarmiert:
+        return False
+    minuten = int((now - start) // 60) if isinstance(start, (int, float)) else 0
+    log(f"LiteLLM wieder erreichbar nach {minuten} Minuten.")
+    return True
+
+
 def key_info() -> dict | None:
     """Verbrauch und Limit des eigenen Worker-Keys aus GET {LITELLM}/key/info.
 
@@ -1811,7 +1870,9 @@ def main() -> int:
             reason = litellm_ready()
             if reason:
                 log_on_change(state, LAST_PC, reason, f"{reason}, warte.")
+                litellm_down(state)
                 return 0
+            litellm_up(state)
             if log_on_change(state, LAST_PC, "litellm", f"LiteLLM erreichbar ({LITELLM_MODEL}): suche Arbeit."):
                 state.pop(LAST_WORK, None)
         elif not WAKE_PC:

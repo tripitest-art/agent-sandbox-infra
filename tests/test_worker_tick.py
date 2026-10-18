@@ -940,6 +940,26 @@ def test_litellm_ready(monkeypatch):
     assert urls == ["http://litellm.test:4000/health/liveliness"]
 
 
+def test_litellm_rueckkehr_im_naechsten_takt_nach_dem_alarm(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "WORKER_SLOT", "1")
+    state: dict = {}
+    w.litellm_down(state, now=1000.0)
+    assert w.litellm_down(state, now=1000.0 + 20 * 60) is True
+    assert w.litellm_up(state, now=1000.0 + 21 * 60) is True
+    assert "LiteLLM wieder erreichbar nach 21 Minuten." in capsys.readouterr().out
+    assert state == {}
+
+
+def test_litellm_down_schreibt_nach_dem_alarm_nichts(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "WORKER_SLOT", "1")
+    state = {w.LITELLM_AB: 1000.0, w.LITELLM_ALARM: True}
+    monkeypatch.setattr(w, "save_state", lambda s: pytest.fail("Zustand nach dem Alarm gespeichert"))
+    assert w.litellm_down(state, now=1000.0 + 600 * 60) is False
+    assert capsys.readouterr().out == ""
+
+
 def test_agent_cmd_opencode_litellm(monkeypatch):
     monkeypatch.setattr(w, "AGENT", "opencode")
     monkeypatch.setattr(w, "BACKEND", "litellm")

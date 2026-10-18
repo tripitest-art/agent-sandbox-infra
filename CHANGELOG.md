@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `worker_tick`: Ein LiteLLM-Ausfall über 20 Minuten erscheint im ersten Slot als einmalige „⚠ Stephan:“-Zeile („LiteLLM seit N Minuten nicht erreichbar; Worker und Review stehen“); die Rückkehr steht nach einem Alarm ohne „⚠“ im Log, ein kurzer Aussetzer bleibt still (#180).
 - `worker_tick`/`review_tick`: Das Audit-Log nennt die Modellkosten je Lauf (`run_started`/`run_finished`, `run_cost` aus der Spend-Differenz von `GET /key/info` — bei Überlappung mit einem anderen Slot als Obergrenze markiert) und je gepostetem Review (`review_posted` mit `kosten` aus `usage["cost"]`, Modellliste und Token-Zahlen) (#181).
 - `issuecheck`: Der Preflight-Akzeptanztest läuft in `tests/acceptance/` (falls vorhanden), wird auch bei Zeitüberschreitung gelöscht, und ein echter Sammlungsfehler (`ERROR collecting`) ist der Befund `sammlungsfehler` statt „valide und bereit“ (#179).
 - `worker_tick`: Räumt zu Beginn jedes Laufs `.done`-Marken und `.claim`-Dateien beendeter Prozesse in `CLAIM_DIR` auf, sobald sie älter als `CLAIM_MAX_AGE_DAYS` (30 Tage) sind; junge Dateien und Belegungen lebender Prozesse bleiben (#177).
