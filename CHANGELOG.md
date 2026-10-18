@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `review_tick`: Ein Pflicht-Check, der noch nicht im `statusCheckRollup` steht, gilt bis zehn Minuten nach dem Start des ersten Eintrags als laufend; danach als `FEHLT` und rot. Ein verspätet startender `tests`-Lauf löst so kein falsches „Änderungen nötig“ mehr aus, ohne Zeitstempel gibt es keine Kulanzzeit (#148).
 - Dashboard: `--notify-test` liest `/etc/agent-dashboard.env` selbst (kein `set -a` mehr nötig); bei einer Umleitung nennt die Meldung den Zielhost statt nur `HTTP 307` (#143).
 - `review_tick`: Ist die Reviewer-Antwort unbrauchbar (Token-Limit, kein Urteil, Zeichensalat, ungültige Muss/Kann-Zahlen), fragt der Takt im selben Lauf das andere der beiden eingestellten Modelle (`REVIEW_MODEL`/`REVIEW_MODEL_BIG`), sofern dessen Familie unabhängig vom Worker ist; erst wenn beide scheitern, zählt das als ein Fehlversuch. Ein Urteil ohne Sterne oder mit Satzzeichen wird ebenfalls gelesen (`normalize_verdict_line`), Reviewer-Zeile und Entwurf nennen das Modell, das wirklich geantwortet hat (#141).
 - `review_tick`: PRs ohne Worker-Issue (Label `review-anfordern`) werden nach „Freigegeben“ ebenfalls gemergt, wenn ihr PR-Text „Merge-Modus: automatisch“ sagt (Zeile oder Abschnitt `### Merge-Modus`); `auto_merge: false` und `manual_paths` des Projekts gelten weiter, sonst liegt der PR wie bisher bei Stephan (#138).
