@@ -368,13 +368,44 @@ def test_antworten_und_state_enthalten_keine_geheimnisse(served):
 
 # --- Push (dashboard_notify) --------------------------------------------------------------------
 
-def test_main_notify_test_ohne_url_endet_mit_2(monkeypatch, capsys):
+def test_main_notify_test_ohne_url_endet_mit_2(monkeypatch, tmp_path, capsys):
     monkeypatch.delenv("NTFY_URL", raising=False)
+    monkeypatch.setattr(d.dashboard_notify, "ENV_FILE", str(tmp_path / "fehlt"))
     monkeypatch.setattr(sys, "argv", ["dashboard.py", "--notify-test"])
     with pytest.raises(SystemExit) as exit_info:
         d.main()
     assert exit_info.value.code == 2
     assert "NTFY_URL" in capsys.readouterr().err
+
+
+def test_main_notify_test_liest_die_env_datei_und_sendet(monkeypatch, tmp_path, capsys):
+    env = tmp_path / "dashboard.env"
+    env.write_text("NTFY_URL=https://ntfy.example/topic\n", encoding="utf-8")
+    seen = []
+
+    class Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def opener(request, timeout):
+        seen.append(request.full_url)
+        return Resp()
+
+    monkeypatch.delenv("NTFY_URL", raising=False)
+    monkeypatch.setattr(d.dashboard_notify, "ENV_FILE", str(env))
+    real = d.dashboard_notify.Notifier
+    monkeypatch.setattr(d.dashboard_notify, "Notifier", lambda env=None: real(env=env, opener=opener))
+    monkeypatch.setattr(sys, "argv", ["dashboard.py", "--notify-test"])
+    with pytest.raises(SystemExit) as exit_info:
+        d.main()
+    assert exit_info.value.code == 0
+    assert seen == ["https://ntfy.example/topic"]
+    assert "Testmeldung gesendet" in capsys.readouterr().out
 
 
 def test_serve_startet_den_push_faden_nur_mit_url(monkeypatch, tmp_path):

@@ -92,6 +92,40 @@ def test_send_kuerzt_lange_nachrichten():
     assert len(seen[0]) == n.MAX_BODY
 
 
+# --- Umgebungsdatei und Umleitungen -------------------------------------------------------------
+
+def test_read_env_file_entfernt_beide_anfuehrungsarten(tmp_path):
+    f = tmp_path / "e.env"
+    f.write_text("  # Kommentar\nA='x y'\n\nB = \"z\"\nKAPUTT\n", encoding="utf-8")
+    assert n.read_env_file(str(f)) == {"A": "x y", "B": "z"}
+
+
+def test_read_env_file_ist_fuer_ein_verzeichnis_leer(tmp_path):
+    assert n.read_env_file(str(tmp_path)) == {}
+
+
+def _umleitung(code, location):
+    headers = {"Location": location} if location else {}
+
+    def opener(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, code, "Umleitung", headers, None)
+    return opener
+
+
+def test_umleitung_nennt_zielhost_auch_bei_weiteren_codes_und_ohne_port():
+    for code in (301, 302, 303, 308):
+        note = n.Notifier(env={"NTFY_URL": URL}, opener=_umleitung(code, "https://ziel.example/geheim"))
+        assert note.send(n.Event("k", "t", "m")) is False
+        assert note.last_error == f"HTTP {code} → ziel.example"
+
+
+def test_umleitung_mit_kaputtem_ziel_bleibt_bei_der_statuszeile():
+    for location in ("https:///ohne-host", "https://ziel.example:99999/x", "ziel.example/x"):
+        note = n.Notifier(env={"NTFY_URL": URL}, opener=_umleitung(307, location))
+        assert note.send(n.Event("k", "t", "m")) is False
+        assert note.last_error == "HTTP 307"
+
+
 # --- Watcher -----------------------------------------------------------------------------------
 
 def test_stephan_zeilen_werden_in_einer_meldung_gebuendelt():
