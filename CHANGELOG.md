@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `review_tick`: nutzt `--limit` für PR- (`PR_LIST_LIMIT=10`) und Issue-Listen (`BLOCKED_ISSUES_LIMIT=20`), um das GitHub-GraphQL-Kontingent bei jedem Takt zu schonen (#197).
 - `install.sh`: merkt sich `TAKT` und `REVIEW_TAKT` in `/etc/agent-sandbox.conf` und liest sie per `conf_get`, damit ein erneuter Lauf (z. B. durch autodeploy) die Timer-Intervalle nicht auf die Vorgabe 2min zurücksetzt (#201).
 - `autodeploy`: Pre-Flight-Tests ohne Serverpfade ausführen, Rollback nennt die roten Tests (PR folgt).
 - `worker_tick`: Regel 8 übergeht bei der Datei-Kollision die Doku-Pflichtzeilen `CHANGELOG.md`/`README.md` und Akzeptanztest-Platzhalter unter `tests/acceptance/test_issue_*`; echte Code-Kollisionen und der Hotspot blockieren weiter (PR folgt).
