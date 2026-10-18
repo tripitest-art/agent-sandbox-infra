@@ -230,10 +230,10 @@ JSON
 
 echo "== Taktgeber"
 # Alle Python-Module des Repos in einem Schritt nach /root: worker_tick.py und review_tick.py
-# importieren projects.py per sys.path, und eine neue Datei unter sandbox/ (z. B. ha_status.py)
+# importieren projects.py per sys.path, und eine neue Datei unter sandbox/ (z. B. autodeploy.py)
 # muss ohne weitere Änderung mitkommen – sonst stirbt der Takt beim Start mit einem Traceback.
 install -m 644 "$SCRIPT_DIR"/*.py /root/
-chmod 755 /root/worker_tick.py /root/review_tick.py /root/qwen_webhook.py /root/wake_listener.py   # werden direkt gestartet
+chmod 755 /root/worker_tick.py /root/review_tick.py /root/wake_listener.py   # werden direkt gestartet
 
 # Worktree-Ordner je Projekt legt ensure_projects an (bei MAX_WORKERS > 1).
 

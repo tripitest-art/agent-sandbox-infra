@@ -434,6 +434,71 @@ def test_pid_is_active_ungueltige_pids():
     assert d.pid_is_active(d.os.getpid()) is True
 
 
+class _FakeKernel32Dash:
+    def __init__(self, handle=1, exit_code=259, error=0):
+        self.handle, self.exit_code, self.error = handle, exit_code, error
+        self.geoeffnet, self.geschlossen = [], []
+
+    def OpenProcess(self, access, inherit, pid):
+        self.geoeffnet.append(pid)
+        return self.handle
+
+    def GetExitCodeProcess(self, handle, ref):
+        ref._obj.value = self.exit_code
+        return 1
+
+    def GetLastError(self):
+        return self.error
+
+    def CloseHandle(self, handle):
+        self.geschlossen.append(handle)
+        return 1
+
+
+def _setup_windows_dash(monkeypatch, **kwargs):
+    import ctypes, types
+    k = _FakeKernel32Dash(**kwargs)
+
+    def kein_kill(*args, **kw):
+        raise AssertionError("os.kill unter Windows aufgerufen")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", types.SimpleNamespace(kernel32=k), raising=False)
+    monkeypatch.setattr(d.os, "kill", kein_kill)
+    return k
+
+
+def test_pid_is_active_windows_laufender_prozess_lebt_und_handle_geschlossen(monkeypatch):
+    k = _setup_windows_dash(monkeypatch, exit_code=259)
+    assert d.pid_is_active(4242) is True
+    assert k.geoeffnet == [4242]
+    assert k.geschlossen == [1]
+
+
+def test_pid_is_active_windows_beendeter_prozess_lebt_nicht(monkeypatch):
+    k = _setup_windows_dash(monkeypatch, exit_code=0)
+    assert d.pid_is_active(4242) is False
+    assert k.geschlossen == [1]
+
+
+def test_pid_is_active_windows_unbekannte_pid_lebt_nicht(monkeypatch):
+    k = _setup_windows_dash(monkeypatch, handle=0, error=87)
+    assert d.pid_is_active(4242) is False
+    assert k.geschlossen == []
+
+
+def test_pid_is_active_windows_zugriff_verweigert_gilt_als_nicht_aktiv(monkeypatch):
+    _setup_windows_dash(monkeypatch, handle=0, error=5)
+    assert d.pid_is_active(4242) is False
+
+
+@pytest.mark.parametrize("pid", [None, 0, -1])
+def test_pid_is_active_windows_ungueltige_pid_lebt_nicht(monkeypatch, pid):
+    k = _setup_windows_dash(monkeypatch)
+    assert d.pid_is_active(pid) is False
+    assert k.geoeffnet == []
+
+
 def test_read_slots_verwaist_und_aktiv(tmp_path):
     s1 = tmp_path / "slot-1.json"
     s1.write_text(json.dumps({"slot": "1", "status": "running", "pid": 999999}), encoding="utf-8")
