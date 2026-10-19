@@ -65,6 +65,12 @@ class MockGH:
             if "in-arbeit" in args:
                 return self.active
             return self.issues
+        if args[:2] == ("issue", "view"):
+            n = int(args[2])
+            for it in self.active + self.issues:
+                if it.get("number") == n:
+                    return {"labels": it.get("labels", [])}
+            return {"labels": [{"name": "in-arbeit"}]}
         if args[:2] == ("issue", "edit"):
             self.edits.append(args)
             return "https://github.com/.../issues/..."
@@ -398,3 +404,80 @@ def test_dauerkollision_unterbrechung_setzt_merker_zurueck(monkeypatch, capsys):
     w.issue_job(now=T0 + 140 * MIN)
     out = capsys.readouterr().out
     assert "⚠ Stephan:" in out and "324" in out
+
+
+def test_offene_prs_erreichen_limit_nichts_freigegeben(monkeypatch, capsys):
+    """Erreicht die Liste der offenen PRs PR_LIST_LIMIT (10), ist die Lage unvollständig -> nichts freigeben."""
+    aktives_issue = _issue_dict(324, alter_minuten=50)
+    kandidat = _issue_dict(364, alter_minuten=5, labels=("worker-task", "bereit", "agent-qwen"))
+    # Genau PR_LIST_LIMIT (10) PRs
+    prs = [{"number": i, "headRefName": f"other-{i}"} for i in range(1, w.PR_LIST_LIMIT + 1)]
+    mock = MockGH(
+        active=[aktives_issue],
+        issues=[kandidat],
+        prs=prs,
+    )
+    monkeypatch.setattr(w, "gh", mock)
+
+    job = w.issue_job(now=T0)
+    assert job is None
+    assert mock.edits == []
+    out = capsys.readouterr().out
+    assert "Warnung: Abfrage offener PRs erreicht Limit" in out
+    assert "⚠ Stephan:" not in out
+
+
+def test_dauerkollision_bleibt_ueber_prozessgrenzen_im_zustand_erhalten(monkeypatch, capsys):
+    """Zustand wird zwischen Takten aus STATE (state.json) geladen; Dauerkollision alarmiert prozessübergreifend."""
+    aktives_issue = _issue_dict(324, alter_minuten=50)
+    cpath = w.claim_path("issue324")
+    os.makedirs(os.path.dirname(cpath), exist_ok=True)
+    with open(cpath, "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid()))
+
+    kandidat = _issue_dict(364, alter_minuten=5, labels=("worker-task", "bereit", "agent-qwen"))
+    mock = MockGH(
+        active=[aktives_issue],
+        issues=[kandidat],
+        prs=[],
+    )
+    monkeypatch.setattr(w, "gh", mock)
+
+    # 1. Prozess / Takt 1 (t = T0): Kollision beginnt, wird in state.json gespeichert
+    assert w.issue_job(now=T0, state=None) is None
+    assert "⚠ Stephan:" not in capsys.readouterr().out
+    state_file = Path(w.STATE)
+    assert state_file.exists()
+    st = json.loads(state_file.read_text(encoding="utf-8"))
+    assert f"{w.KOLLISION}364:324" in st
+    assert st[f"{w.KOLLISION}364:324"]["start"] == T0
+    assert st[f"{w.KOLLISION}364:324"]["warned"] is False
+
+    # 2. Prozess / Takt 2 (t = T0 + 30 min): Neuer Aufruf liest frischen state.json, Schwelle noch nicht erreicht
+    assert w.issue_job(now=T0 + 30 * MIN, state=None) is None
+    assert "⚠ Stephan:" not in capsys.readouterr().out
+
+    # 3. Prozess / Takt 3 (t = T0 + 60 min): Schwelle erreicht -> genau ein Alarm
+    assert w.issue_job(now=T0 + 60 * MIN, state=None) is None
+    out = capsys.readouterr().out
+    assert out.count("⚠ Stephan:") == 1
+    assert "324" in out and "364" in out
+    st = json.loads(state_file.read_text(encoding="utf-8"))
+    assert st[f"{w.KOLLISION}364:324"]["warned"] is True
+
+    # 4. Prozess / Takt 4 (t = T0 + 70 min): Neuer Prozess liest warned: True -> kein erneuter Alarm
+    assert w.issue_job(now=T0 + 70 * MIN, state=None) is None
+    assert "⚠ Stephan:" not in capsys.readouterr().out
+
+
+def test_release_orphan_claim_idempotent_bei_parallelen_slots(monkeypatch, capsys):
+    """Wurde das Label bereits von einem anderen Slot auf 'bereit' gesetzt, erfolgt kein doppelter Alarm."""
+    mock = MockGH(active=[], issues=[])
+    monkeypatch.setattr(w, "gh", lambda *args, **kw: {"labels": [{"name": "bereit"}]} if args[:2] == ("issue", "view") else mock(*args, **kw))
+
+    # Aufruf von release_orphan_claim für bereits freigegebenes Issue
+    erfolg = w.release_orphan_claim(324, 50)
+    assert erfolg is True
+    assert mock.edits == []
+    out = capsys.readouterr().out
+    assert "⚠ Stephan:" not in out

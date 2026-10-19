@@ -143,19 +143,20 @@ _CLAIM_WARNED: set[str] = set()
 ORPHAN_MINUTEN = 45
 
 # Dauerkollision melden (#206): Ab dieser Dauer (Minuten) ununterbrochener Kollision
-# mit demselben aktiven Auftrag genau einmal alarmieren.
+# mit demselben aktiven Auftrag genau einmal alarmieren. Gespeichert im Zustand (state),
+# damit der Merker über die Takt-Prozesse hinweg erhalten bleibt.
 KOLLISION_MELDUNG_MINUTEN = 60
-
-# Merker für andauernde Kollisionen: (Kandidaten-Issue, Blocker-Issue) -> Startzeitpunkt (jetzt_s())
-_KOLLISION_START: dict[tuple[int, int], float] = {}
-# Merker für bereits alarmierte Dauerkollisionen: (Kandidaten-Issue, Blocker-Issue)
-_KOLLISION_WARNED: set[tuple[int, int]] = set()
+KOLLISION = "_kollision:"  # Vorsatz im Zustand: f"_kollision:{cand_no}:{blocker_no}"
 
 
-def reset_kollision_merker() -> None:
-    """Setzt die Merker für Dauerkollisionen zurück (vor allem für Tests)."""
-    _KOLLISION_START.clear()
-    _KOLLISION_WARNED.clear()
+def reset_kollision_merker(state: dict | None = None) -> None:
+    """Setzt die Kollisionsmerker im Zustand zurück (vor allem für Tests)."""
+    if state is None:
+        state = load_state()
+    for k in list(state.keys()):
+        if k.startswith(KOLLISION):
+            del state[k]
+    save_state(state)
 
 
 # Gründe der im letzten Takt von issue_job übersprungenen Kandidaten (#187). main() zeigt sie in
@@ -548,7 +549,7 @@ def gh(*args: str, repo: str | None = None):
     Projektvorsätze im Zustand (`<projekt>/prN@…`) brauchen die ausdrückliche Angabe, weil sie
     nicht zum gerade aktiven Projekt gehören müssen."""
     try:
-        repo_args = [] if args and args[0] == "api" else ["--repo", repo or REPO]
+        repo_args = ["--repo", repo or REPO]
         out = subprocess.run(["gh", *args, *repo_args], capture_output=True, text=True, check=True, env=ENV)
     except subprocess.CalledProcessError as exc:
         if exc.returncode == 4 and "GH_TOKEN" in (getattr(exc, "stderr", None) or ""):
@@ -1037,12 +1038,19 @@ def active_in_progress_issues() -> list[dict] | None:
 def open_prs_for_issue_check() -> list[dict] | None:
     """Holt offene PRs des Repositories mit number und headRefName.
 
-    None bei Fehlern (Netz, Rate-Limit, gh-Fehler); Lage unbekannt.
+    None bei Fehlern (Netz, Rate-Limit, gh-Fehler) oder wenn die Abfrage >= PR_LIST_LIMIT
+    Einträge liefert (weitere PRs möglich -> Lage unbekannt); nichts freigeben.
     """
     try:
         prs = gh("pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT),
                  "--json", "number,headRefName")
-        return prs if isinstance(prs, list) else []
+        if not isinstance(prs, list):
+            return None
+        if len(prs) >= PR_LIST_LIMIT:
+            log(f"Warnung: Abfrage offener PRs erreicht Limit ({PR_LIST_LIMIT}); "
+                "weitere PRs möglich, Lage unbekannt, nichts freigeben.")
+            return None
+        return prs
     except Exception as e:
         log(f"Warnung: Abfrage offener PRs fehlgeschlagen ({type(e).__name__}: {e}); Lage unbekannt, nichts freigeben.")
         return None
@@ -1051,7 +1059,7 @@ def open_prs_for_issue_check() -> list[dict] | None:
 def issue_label_age_minuten(n: int, issue: dict | None = None, now: float | None = None) -> float | None:
     """Alter des Labels `in-arbeit` eines Issues in Minuten.
 
-    Liest den Zeitpunkt des Labelwechsels bzw. der letzten Änderung aus GitHub (updatedAt oder Events-API).
+    Liest das Alter direkt aus updatedAt des Issues aus GitHub (gh issue list).
     None, wenn das Alter nicht ermittelbar ist (Lage unbekannt).
     """
     if now is None:
@@ -1067,26 +1075,6 @@ def issue_label_age_minuten(n: int, issue: dict | None = None, now: float | None
         ts = _iso_sekunden(issue.get("updatedAt"))
         if ts is not None:
             return max(0.0, (now - ts) / 60.0)
-
-    try:
-        events = gh("api", f"repos/{REPO}/issues/{n}/events")
-    except Exception as e:
-        log(f"Warnung: Abfrage des Label-Alters für Issue #{n} fehlgeschlagen ({type(e).__name__}: {e}); Lage unbekannt, nichts freigeben.")
-        return None
-
-    if isinstance(events, list):
-        labeled_events = [
-            e for e in events
-            if isinstance(e, dict)
-            and e.get("event") == "labeled"
-            and isinstance(e.get("label"), dict)
-            and e["label"].get("name") == "in-arbeit"
-        ]
-        if labeled_events:
-            latest = max(labeled_events, key=lambda e: str(e.get("created_at") or ""))
-            ts = _iso_sekunden(latest.get("created_at"))
-            if ts is not None:
-                return max(0.0, (now - ts) / 60.0)
 
     log(f"Warnung: Alter von Issue #{n} nicht abfragbar; Lage unbekannt, nichts freigeben.")
     return None
@@ -1115,6 +1103,12 @@ def release_orphan_claim(n: int, alter_minuten: int) -> bool:
     True bei Erfolg (Label erfolgreich geändert), False bei Fehler.
     """
     try:
+        # Idempotenz-Schutz vor doppelter Freigabe durch zwei parallele Slots im selben Takt
+        view = gh("issue", "view", str(n), "--json", "labels")
+        if isinstance(view, dict) and "labels" in view:
+            labels = {lab.get("name") for lab in view["labels"] if isinstance(lab, dict)}
+            if "in-arbeit" not in labels:
+                return True
         gh("issue", "edit", str(n), "--add-label", "bereit", "--remove-label", "in-arbeit")
         log(f"Verwaister Claim von Issue #{n} ({alter_minuten} min) erfolgreich auf 'bereit' zurückgesetzt.")
         alarm(f"issue{n}", f"Verwaister Claim #{n} ({alter_minuten} min) freigegeben (in-arbeit -> bereit)")
@@ -1189,21 +1183,32 @@ def cleanup_orphan_claims(active: list[dict], now: float | None = None) -> list[
 
 
 def _track_kollision(cand_no: int, blocker_no: int | None, now: float,
-                     current_collisions: set[tuple[int, int]]) -> None:
-    """Verfolgt eine Datei-Kollision und meldet Dauerkollision ab KOLLISION_MELDUNG_MINUTEN genau einmal."""
+                     current_collisions: set[tuple[int, int]],
+                     state: dict) -> bool:
+    """Verfolgt eine Datei-Kollision im Zustand und meldet Dauerkollision ab KOLLISION_MELDUNG_MINUTEN genau einmal.
+
+    Gibt True zurück, wenn state geändert wurde.
+    """
     if blocker_no is None:
-        return
+        return False
     key = (cand_no, blocker_no)
     current_collisions.add(key)
-    if key not in _KOLLISION_START:
-        _KOLLISION_START[key] = now
-    dauer = now - _KOLLISION_START[key]
+    state_key = f"{KOLLISION}{cand_no}:{blocker_no}"
+    geaendert = False
+    if state_key not in state or not isinstance(state[state_key], dict):
+        state[state_key] = {"start": now, "warned": False}
+        geaendert = True
+
+    entry = state[state_key]
+    dauer = now - entry.get("start", now)
     if dauer >= KOLLISION_MELDUNG_MINUTEN * 60:
-        if key not in _KOLLISION_WARNED:
-            _KOLLISION_WARNED.add(key)
+        if not entry.get("warned"):
+            entry["warned"] = True
+            geaendert = True
             minuten = int(dauer // 60)
             alarm(f"issue{cand_no}",
                   f"Dauerkollision seit {minuten} Minuten mit aktiver Aufgabe #{blocker_no} (Regel 8)")
+    return geaendert
 
 
 def claim_issue(n: int) -> bool:
@@ -1437,7 +1442,8 @@ def open_pr(n: int) -> bool:
     return True
 
 
-def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = None):
+def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = None,
+              state: dict | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
 
     Neu: die Auswahl ändert KEINE Labels mehr — kein claim_issue-Aufruf. Der Auftragstext bleibt
@@ -1460,6 +1466,8 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
     """
     if now is None:
         now = jetzt_s()
+    if state is None:
+        state = load_state()
     SKIPPED.clear()
     issues = gh("issue", "list", "--state", "open", "--label", "worker-task", "--label", "bereit",
                 "--label", LABEL, "--limit", str(ISSUE_LIST_LIMIT),
@@ -1493,6 +1501,7 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
             active_files.add(HOTSPOT)
 
     current_collisions: set[tuple[int, int]] = set()
+    kollision_geaendert = False
     selected = None
     for cand in issues:
         cand_no = cand["number"]
@@ -1516,7 +1525,8 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
                            f"an {HOTSPOT} in Arbeit ist")
             for a in active:
                 if touches_main_py(a):
-                    _track_kollision(cand_no, a.get("number"), now, current_collisions)
+                    if _track_kollision(cand_no, a.get("number"), now, current_collisions, state):
+                        kollision_geaendert = True
             continue
 
         # Regel 8: Keine zwei Agenten in denselben Dateien; Doku-Pflichtzeilen und der
@@ -1534,16 +1544,21 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
                 if touches_main_py(a):
                     a_files.add(HOTSPOT)
                 if collision_files(cand_files) & collision_files(a_files):
-                    _track_kollision(cand_no, a.get("number"), now, current_collisions)
+                    if _track_kollision(cand_no, a.get("number"), now, current_collisions, state):
+                        kollision_geaendert = True
             continue
 
         selected = cand
         break
 
-    for k in list(_KOLLISION_START):
-        if k not in current_collisions:
-            del _KOLLISION_START[k]
-            _KOLLISION_WARNED.discard(k)
+    active_kollision_keys = {f"{KOLLISION}{c}:{b}" for (c, b) in current_collisions}
+    for k in list(state.keys()):
+        if k.startswith(KOLLISION) and k not in active_kollision_keys:
+            del state[k]
+            kollision_geaendert = True
+
+    if kollision_geaendert:
+        save_state(state)
 
     if not selected:
         return None
