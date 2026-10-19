@@ -481,3 +481,47 @@ def test_release_orphan_claim_idempotent_bei_parallelen_slots(monkeypatch, capsy
     assert mock.edits == []
     out = capsys.readouterr().out
     assert "⚠ Stephan:" not in out
+
+
+def test_find_job_reicht_state_weiter_und_save_state_behaelt_kollision(monkeypatch):
+    """find_job reicht state an issue_job weiter; ein save_state(state) des Aufrufers behält Kollision."""
+    aktives_issue = _issue_dict(324, alter_minuten=50)
+    cpath = w.claim_path("issue324")
+    os.makedirs(os.path.dirname(cpath), exist_ok=True)
+    with open(cpath, "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid()))
+
+    kandidat = _issue_dict(364, alter_minuten=5, labels=("worker-task", "bereit", "agent-qwen"))
+    mock = MockGH(
+        active=[aktives_issue],
+        issues=[kandidat],
+        prs=[],
+    )
+    monkeypatch.setattr(w, "gh", mock)
+    monkeypatch.setattr(w, "rework_job", lambda *a, **k: None)
+    monkeypatch.setattr(w, "text_fix_job", lambda *a, **k: None)
+
+    state = {}
+    job = w.find_job(state)
+    assert job is None  # Kollision mit 324
+    # State-Dictionary von find_job hat den Eintrag direkt erhalten
+    key = f"{w.KOLLISION}364:324"
+    assert key in state
+    assert state[key]["start"] is not None
+    assert state[key]["warned"] is False
+
+    # Ein nachfolgendes save_state(state) des Aufrufers (z.B. main()) verliert den Eintrag nicht
+    w.save_state(state)
+    loaded = w.load_state()
+    assert key in loaded
+
+
+def test_kollision_wird_aufgeraeumt_wenn_keine_kandidaten_mehr_vorhanden(monkeypatch):
+    """Sind keine Issues mehr vorhanden (z.B. erledigt/geschlossen), wird die Kollision aufgeräumt."""
+    state = {f"{w.KOLLISION}364:324": {"start": T0, "warned": False}}
+    mock = MockGH(active=[], issues=[])
+    monkeypatch.setattr(w, "gh", mock)
+
+    job = w.issue_job(state=state)
+    assert job is None
+    assert f"{w.KOLLISION}364:324" not in state

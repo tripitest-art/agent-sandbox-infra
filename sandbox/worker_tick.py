@@ -1476,6 +1476,13 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
     # Wie bei Reviews: Nur Issues von Stephans Konto werden zum Auftrag mit Schreibrecht.
     issues = [i for i in issues or [] if (i.get("author") or {}).get("login") == OWNER]
     if not issues:
+        kollision_geaendert = False
+        for k in list(state.keys()):
+            if k.startswith(KOLLISION):
+                del state[k]
+                kollision_geaendert = True
+        if kollision_geaendert:
+            save_state(state)
         return None
 
     # Konfliktprüfung mit aktiven Aufträgen (Regel 8: main.py und dieselben Dateien).
@@ -2389,7 +2396,10 @@ def find_job(state: dict):
     job = rework_job(project_done(state), skip) or text_fix_job(skip)
     if job:
         return job
-    job = issue_job(skip)
+    try:
+        job = issue_job(skip, state=state)
+    except TypeError:
+        job = issue_job(skip)
     if job and main_is_red(state):
         return None
     return job
