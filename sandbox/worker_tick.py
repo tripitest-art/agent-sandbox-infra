@@ -1476,15 +1476,6 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
                 "--json", "number,title,body,author,labels")
     # Wie bei Reviews: Nur Issues von Stephans Konto werden zum Auftrag mit Schreibrecht.
     issues = [i for i in issues or [] if (i.get("author") or {}).get("login") == OWNER]
-    if not issues:
-        kollision_geaendert = False
-        for k in list(state.keys()):
-            if k.startswith(KOLLISION):
-                del state[k]
-                kollision_geaendert = True
-        if kollision_geaendert:
-            save_state(state)
-        return None
 
     # Konfliktprüfung mit aktiven Aufträgen (Regel 8: main.py und dieselben Dateien).
     # Unbekannt heißt blockieren: Ohne belegte Lage baut der Takt keinen Auftrag (#32).
@@ -1494,8 +1485,21 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
         log("Kein Auftrag: aktive Aufträge nicht abfragbar (Regel 8 nicht beurteilbar).")
         return None
 
+    # #207: Auch ohne `bereit`-Kandidaten freigeben. Standen alle Issues auf `blockiert`,
+    # kehrte issue_job vorher zurück, und der verwaiste Claim blieb genau in dem Fall liegen,
+    # für den cleanup_orphan_claims gedacht ist.
     if active:
         active = cleanup_orphan_claims(active, now=now)
+
+    if not issues:
+        kollision_geaendert = False
+        for k in list(state.keys()):
+            if k.startswith(KOLLISION):
+                del state[k]
+                kollision_geaendert = True
+        if kollision_geaendert:
+            save_state(state)
+        return None
 
     active_touches_main = any(touches_main_py(a) for a in active)
     active_files = set()
