@@ -1034,29 +1034,14 @@ def active_in_progress_issues() -> list[dict] | None:
         return None
 
 
-def repo_branches_for_issue_check() -> list[str] | None:
-    """Holt die Liste aller Remote-Branches des aktiven Repositories.
-
-    None bei Fehlern (Netz, Rate-Limit, gh-Fehler); Lage unbekannt.
-    """
-    try:
-        data = gh("api", f"repos/{REPO}/branches?per_page=100")
-        if not isinstance(data, list):
-            return None
-        return [b["name"] if isinstance(b, dict) and "name" in b else str(b) for b in data]
-    except Exception as e:
-        log(f"Warnung: Abfrage der Branches fehlgeschlagen ({type(e).__name__}: {e}); Lage unbekannt, nichts freigeben.")
-        return None
-
-
 def open_prs_for_issue_check() -> list[dict] | None:
-    """Holt offene PRs des Repositories mit number, headRefName und body.
+    """Holt offene PRs des Repositories mit number und headRefName.
 
     None bei Fehlern (Netz, Rate-Limit, gh-Fehler); Lage unbekannt.
     """
     try:
         prs = gh("pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT),
-                 "--json", "number,headRefName,body")
+                 "--json", "number,headRefName")
         return prs if isinstance(prs, list) else []
     except Exception as e:
         log(f"Warnung: Abfrage offener PRs fehlgeschlagen ({type(e).__name__}: {e}); Lage unbekannt, nichts freigeben.")
@@ -1066,7 +1051,7 @@ def open_prs_for_issue_check() -> list[dict] | None:
 def issue_label_age_minuten(n: int, issue: dict | None = None, now: float | None = None) -> float | None:
     """Alter des Labels `in-arbeit` eines Issues in Minuten.
 
-    Liest den Zeitpunkt des Labelwechsels aus GitHub (Events-API oder updatedAt).
+    Liest den Zeitpunkt des Labelwechsels bzw. der letzten Änderung aus GitHub (updatedAt oder Events-API).
     None, wenn das Alter nicht ermittelbar ist (Lage unbekannt).
     """
     if now is None:
@@ -1074,6 +1059,12 @@ def issue_label_age_minuten(n: int, issue: dict | None = None, now: float | None
     # Schneller Pfad: vorab belegtes labeled_at im Dict (z. B. in Tests)
     if isinstance(issue, dict) and issue.get("labeled_at"):
         ts = _iso_sekunden(issue.get("labeled_at"))
+        if ts is not None:
+            return max(0.0, (now - ts) / 60.0)
+
+    # Direkt aus updatedAt des Issues (aus gh issue list --json ... updatedAt)
+    if isinstance(issue, dict) and issue.get("updatedAt"):
+        ts = _iso_sekunden(issue.get("updatedAt"))
         if ts is not None:
             return max(0.0, (now - ts) / 60.0)
 
@@ -1097,12 +1088,6 @@ def issue_label_age_minuten(n: int, issue: dict | None = None, now: float | None
             if ts is not None:
                 return max(0.0, (now - ts) / 60.0)
 
-    # Rückfall: updatedAt aus issue, falls vorhanden
-    if isinstance(issue, dict) and issue.get("updatedAt"):
-        ts = _iso_sekunden(issue.get("updatedAt"))
-        if ts is not None:
-            return max(0.0, (now - ts) / 60.0)
-
     log(f"Warnung: Alter von Issue #{n} nicht abfragbar; Lage unbekannt, nichts freigeben.")
     return None
 
@@ -1115,16 +1100,12 @@ def issue_has_active_slot(n: int) -> bool:
 
 
 def pr_matches_issue(pr: dict, n: int) -> bool:
-    """Prüft, ob ein offener PR zu Issue n gehört (Branch feature/issue-n-* oder Closes #n im Text)."""
+    """Prüft, ob ein offener PR mit Branch issue_branch(n) oder feature/issue-n-* existiert."""
     if not isinstance(pr, dict):
         return False
+    target = issue_branch(n)
     branch = pr.get("headRefName") or ""
-    if branch == f"feature/issue-{n}" or branch.startswith(f"feature/issue-{n}-"):
-        return True
-    body = pr.get("body") or ""
-    clean_body = _HTML_COMMENT_RE.sub("", body)
-    linked = _LINK_RE.findall(clean_body)
-    return str(n) in linked
+    return branch == target or branch.startswith(f"{target}-")
 
 
 def release_orphan_claim(n: int, alter_minuten: int) -> bool:
@@ -1149,14 +1130,14 @@ def cleanup_orphan_claims(active: list[dict], now: float | None = None) -> list[
     """Prüft aktive Aufträge (in-arbeit von OWNER) auf verwaiste Claims und gibt sie frei.
 
     Ein offenes Issue gilt als verwaist, wenn alle drei Bedingungen zutreffen:
-    - kein Branch feature/issue-<N>-* (Namensschema aus issue_branch()),
-    - kein offener PR mit Closes #<N> / Branch dieses Schemas,
-    - das Label ist länger als ORPHAN_MINUTEN gesetzt UND kein Slot arbeitet gerade daran.
+    - kein offener PR mit Branch issue_branch(N) (ein Branch auf GitHub zählt nicht!),
+    - das Issue (updatedAt) ist länger als ORPHAN_MINUTEN unverändert,
+    - keine lebende Belegung hält den Auftrag (CLAIM_DIR, Schlüssel PREFIX + f"issue{N}").
 
     Ein verwaister Claim wird auf 'bereit' zurückgesetzt, alarmiert Stephan via alarm()
     und erzeugt ein audit()-Ereignis 'orphan_claim_released'.
     Er zählt nicht mehr zu den aktiven Aufträgen und wird aus der Rückgabeliste entfernt.
-    Scheitert eine GitHub-Abfrage (Alter/Branches/PRs), bleibt die Lage unbekannt,
+    Scheitert eine GitHub-Abfrage (PRs/Alter), bleibt die Lage unbekannt,
     nichts wird freigegeben und eine Warnung wird geloggt.
     """
     if not active:
@@ -1166,10 +1147,6 @@ def cleanup_orphan_claims(active: list[dict], now: float | None = None) -> list[
 
     open_prs = open_prs_for_issue_check()
     if open_prs is None:
-        return active
-
-    repo_branches = repo_branches_for_issue_check()
-    if repo_branches is None:
         return active
 
     remaining: list[dict] = []
@@ -1186,27 +1163,17 @@ def cleanup_orphan_claims(active: list[dict], now: float | None = None) -> list[
             remaining.append(a)
             continue
 
-        # 1. Branch vorhanden?
-        has_branch = any(
-            b == f"feature/issue-{n}" or b.startswith(f"feature/issue-{n}-")
-            for b in repo_branches
-        )
-        if has_branch:
+        # 1. Offener PR mit Branch issue_branch(n) vorhanden? (Ein Branch auf GitHub zählt nicht)
+        if any(pr_matches_issue(pr, n) for pr in open_prs):
             remaining.append(a)
             continue
 
-        # 2. Offener PR vorhanden?
-        has_pr = any(pr_matches_issue(pr, n) for pr in open_prs)
-        if has_pr:
-            remaining.append(a)
-            continue
-
-        # 3. Aktiver Slot vorhanden?
+        # 2. Aktive lebende Belegung in CLAIM_DIR vorhanden?
         if issue_has_active_slot(n):
             remaining.append(a)
             continue
 
-        # 4. Alter des Labels
+        # 3. Alter aus GitHub (updatedAt) >= ORPHAN_MINUTEN?
         age = issue_label_age_minuten(n, a, now=now)
         if age is None or age < ORPHAN_MINUTEN:
             remaining.append(a)

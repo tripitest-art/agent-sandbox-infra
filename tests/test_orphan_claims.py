@@ -167,8 +167,9 @@ def test_claim_juenger_als_orphan_minuten_bleibt_aktiv(monkeypatch, capsys):
     assert "Datei-Kollision mit aktivem Auftrag" in out
 
 
-def test_claim_mit_branch_bleibt_aktiv(monkeypatch, capsys):
-    """Claim mit Branch feature/issue-324-* -> nie freigegeben."""
+def test_branch_auf_github_zaehlt_nicht_und_verhindert_freigabe_nicht(monkeypatch, capsys):
+    """Ein Branch auf GitHub zählt nicht: der Takt pusht erst nach dem Lauf.
+    Ein Issue mit Branch auf GitHub, aber ohne PR/Slot und älter als ORPHAN_MINUTEN wird freigegeben."""
     aktives_issue = _issue_dict(324, alter_minuten=50)
     kandidat = _issue_dict(364, alter_minuten=5, labels=("worker-task", "bereit", "agent-qwen"))
     mock = MockGH(
@@ -180,21 +181,21 @@ def test_claim_mit_branch_bleibt_aktiv(monkeypatch, capsys):
     )
     monkeypatch.setattr(w, "gh", mock)
 
-    job = w.issue_job(now=T0)
-    assert job is None
-    assert mock.edits == []
+    key, task, pr_no, before = w.issue_job(now=T0)
+    assert key == "issue364"
+    assert any(call[:3] == ("issue", "edit", "324") for call in mock.edits)
     out = capsys.readouterr().out
-    assert "⚠ Stephan:" not in out
+    assert "⚠ Stephan:" in out and "324" in out
 
 
 def test_claim_mit_offenem_pr_bleibt_aktiv(monkeypatch, capsys):
-    """Claim mit offenem PR (entweder Branch feature/issue-324 oder Closes #324 im Text) -> nie freigegeben."""
+    """Claim mit offenem PR auf issue_branch(324) -> nie freigegeben."""
     aktives_issue = _issue_dict(324, alter_minuten=50)
     kandidat = _issue_dict(364, alter_minuten=5, labels=("worker-task", "bereit", "agent-qwen"))
     mock = MockGH(
         active=[aktives_issue],
         issues=[kandidat],
-        prs=[{"number": 99, "headRefName": "other-branch", "body": "Fixes #324\n"}],
+        prs=[{"number": 99, "headRefName": "feature/issue-324"}],
         branches=["main"],
         events={324: _events_with_labeled(50)},
     )
@@ -234,8 +235,9 @@ def test_claim_mit_aktivem_slot_bleibt_aktiv(monkeypatch, capsys):
 
 
 def test_abfrage_alter_scheitert_nichts_freigegeben(monkeypatch, capsys):
-    """GitHub-Abfrage für Alter scheitert -> nichts freigegeben, Warnung im Log."""
+    """GitHub-Abfrage für Alter scheitert (kein updatedAt, Events werfen) -> nichts freigegeben, Warnung im Log."""
     aktives_issue = _issue_dict(324, alter_minuten=50)
+    del aktives_issue["updatedAt"]
     kandidat = _issue_dict(364, alter_minuten=5, labels=("worker-task", "bereit", "agent-qwen"))
     mock = MockGH(
         active=[aktives_issue],
@@ -254,25 +256,23 @@ def test_abfrage_alter_scheitert_nichts_freigegeben(monkeypatch, capsys):
     assert "⚠ Stephan:" not in out
 
 
-def test_abfrage_branches_scheitert_nichts_freigegeben(monkeypatch, capsys):
-    """GitHub-Abfrage für Branches scheitert -> nichts freigegeben, Warnung im Log."""
+def test_alter_aus_updated_at_genuegt_ohne_extra_events_abfrage(monkeypatch, capsys):
+    """updatedAt aus GitHub (gh issue list) bestimmt das Alter direkt ohne zusätzliche Events-API."""
     aktives_issue = _issue_dict(324, alter_minuten=50)
     kandidat = _issue_dict(364, alter_minuten=5, labels=("worker-task", "bereit", "agent-qwen"))
     mock = MockGH(
         active=[aktives_issue],
         issues=[kandidat],
         prs=[],
-        fail_branches=True,
-        events={324: _events_with_labeled(50)},
+        fail_events=True,  # Even if events endpoint fails, updatedAt from issue is used
     )
     monkeypatch.setattr(w, "gh", mock)
 
-    job = w.issue_job(now=T0)
-    assert job is None
-    assert mock.edits == []
+    key, task, pr_no, before = w.issue_job(now=T0)
+    assert key == "issue364"
+    assert any(call[:3] == ("issue", "edit", "324") for call in mock.edits)
     out = capsys.readouterr().out
-    assert "Warnung:" in out
-    assert "⚠ Stephan:" not in out
+    assert "⚠ Stephan:" in out and "324" in out
 
 
 def test_abfrage_prs_scheitert_nichts_freigegeben(monkeypatch, capsys):
