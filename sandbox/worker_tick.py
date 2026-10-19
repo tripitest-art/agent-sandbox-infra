@@ -28,6 +28,7 @@ Worker-Zeile nennt dann dieses Modell. Antwortet keins, wartet er, ohne einen Ve
 LiteLLMs eigener Fallback reicht nicht: Bei der DeepSeek-Störung am 01.10. kam HTTP 200, dann
 hing der Stream ohne Daten; stream_timeout griff nicht.
 """
+import inspect
 import json
 import os
 import re
@@ -1489,6 +1490,7 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
     # Unbekannt heißt blockieren: Ohne belegte Lage baut der Takt keinen Auftrag (#32).
     active = active_in_progress_issues()
     if active is None:
+        # Lage unbekannt (gh-Fehler): _kollision:-Einträge bleiben absichtlich erhalten.
         log("Kein Auftrag: aktive Aufträge nicht abfragbar (Regel 8 nicht beurteilbar).")
         return None
 
@@ -1500,6 +1502,7 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
     for a in active:
         a_files = parse_affected_files(a.get("body", ""))
         if a_files is None:
+            # Dateiliste unbekannt: keine Lagebeurteilung möglich, _kollision:-Einträge bleiben erhalten.
             log(f"Kein Auftrag: aktiver Auftrag #{a.get('number')} hat keine belegte "
                 "Dateiliste (Regel 8 nicht beurteilbar).")
             return None
@@ -2396,10 +2399,15 @@ def find_job(state: dict):
     job = rework_job(project_done(state), skip) or text_fix_job(skip)
     if job:
         return job
+    # issue_job erhält den Takt-Zustand (#206). Ältere, eingefrorene Akzeptanztests
+    # (#59) mocken issue_job per lambda skip=None; Signatur vorab per inspect prüfen,
+    # damit keine echten Fehler im Rumpf von issue_job verschluckt werden (Regel 7).
     try:
-        job = issue_job(skip, state=state)
-    except TypeError:
-        job = issue_job(skip)
+        params = inspect.signature(issue_job).parameters
+        takes_state = "state" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    except (ValueError, TypeError):
+        takes_state = True
+    job = issue_job(skip, state=state) if takes_state else issue_job(skip)
     if job and main_is_red(state):
         return None
     return job

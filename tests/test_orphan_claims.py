@@ -525,3 +525,17 @@ def test_kollision_wird_aufgeraeumt_wenn_keine_kandidaten_mehr_vorhanden(monkeyp
     job = w.issue_job(state=state)
     assert job is None
     assert f"{w.KOLLISION}364:324" not in state
+
+
+def test_find_job_verschluckt_keinen_type_error_aus_issue_job(monkeypatch):
+    """Regel 7: Ein TypeError im Rumpf von issue_job wird nicht gefangen oder verschluckt."""
+    monkeypatch.setattr(w, "rework_job", lambda *a, **k: None)
+    monkeypatch.setattr(w, "text_fix_job", lambda *a, **k: None)
+
+    def fehlerhafter_issue_job(skip=None, state=None):
+        raise TypeError("simulierter Fehler im Rumpf")
+
+    monkeypatch.setattr(w, "issue_job", fehlerhafter_issue_job)
+    with pytest.raises(TypeError, match="simulierter Fehler im Rumpf"):
+        w.find_job({})
+
