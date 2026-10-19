@@ -527,6 +527,28 @@ def test_kollision_wird_aufgeraeumt_wenn_keine_kandidaten_mehr_vorhanden(monkeyp
     assert f"{w.KOLLISION}364:324" not in state
 
 
+def test_find_job_gibt_verwaisten_claim_ohne_kandidaten_frei(monkeypatch, capsys):
+    """#207: Über find_job (den Weg des Takts) wird ein verwaister Claim auch dann freigegeben,
+    wenn es keinen `bereit`-Kandidaten gibt (z.B. alle übrigen Issues `blockiert`)."""
+    monkeypatch.setattr(w, "rework_job", lambda *a, **k: None)
+    monkeypatch.setattr(w, "text_fix_job", lambda *a, **k: None)
+    aktives_issue = _issue_dict(324, alter_minuten=50)
+    mock = MockGH(
+        active=[aktives_issue],
+        issues=[],  # kein `bereit`-Kandidat
+        prs=[],
+    )
+    monkeypatch.setattr(w, "gh", mock)
+
+    job = w.find_job({})
+
+    assert job is None
+    assert any(call[:3] == ("issue", "edit", "324") and "--add-label" in call and "bereit" in call
+               and "--remove-label" in call and "in-arbeit" in call for call in mock.edits)
+    out = capsys.readouterr().out
+    assert "⚠ Stephan:" in out and "324" in out
+
+
 def test_find_job_verschluckt_keinen_type_error_aus_issue_job(monkeypatch):
     """Regel 7: Ein TypeError im Rumpf von issue_job wird nicht gefangen oder verschluckt."""
     monkeypatch.setattr(w, "rework_job", lambda *a, **k: None)
