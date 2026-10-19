@@ -28,6 +28,7 @@ Worker-Zeile nennt dann dieses Modell. Antwortet keins, wartet er, ohne einen Ve
 LiteLLMs eigener Fallback reicht nicht: Bei der DeepSeek-Störung am 01.10. kam HTTP 200, dann
 hing der Stream ohne Daten; stream_timeout griff nicht.
 """
+import inspect
 import json
 import os
 import re
@@ -136,6 +137,29 @@ VERWAIST = "_verwaist:"      # Vorsatz der Schlüssel im Zustand: f"_verwaist:{n
 # Verzeichnisse, für die claim_job schon eine „⚠ Stephan:“-Zeile geschrieben hat. Eigener Merker,
 # weil claim_job keinen Zustand bekommt; der Takt ist ein kurzer Prozess je Auftrag.
 _CLAIM_WARNED: set[str] = set()
+
+# Verwaiste in-arbeit-Claims automatisch freigeben (#206 / Vorfall 2026-10-19):
+# Ein Issue mit `in-arbeit` ohne Branch, ohne PR und ohne lebenden Slot gilt ab diesem
+# Alter (Minuten) als verwaist.
+ORPHAN_MINUTEN = 45
+
+# Dauerkollision melden (#206): Ab dieser Dauer (Minuten) ununterbrochener Kollision
+# mit demselben aktiven Auftrag genau einmal alarmieren. Gespeichert im Zustand (state),
+# damit der Merker über die Takt-Prozesse hinweg erhalten bleibt.
+KOLLISION_MELDUNG_MINUTEN = 60
+KOLLISION = "_kollision:"  # Vorsatz im Zustand: f"_kollision:{cand_no}:{blocker_no}"
+
+
+def reset_kollision_merker(state: dict | None = None) -> None:
+    """Setzt die Kollisionsmerker im Zustand zurück (vor allem für Tests)."""
+    if state is None:
+        state = load_state()
+    for k in list(state.keys()):
+        if k.startswith(KOLLISION):
+            del state[k]
+    save_state(state)
+
+
 # Gründe der im letzten Takt von issue_job übersprungenen Kandidaten (#187). main() zeigt sie in
 # der Slot-Telemetrie im Leerlauf, weil sie bisher nur im Log standen und den echten Grund der
 # Untätigkeit verdeckten. issue_job leert die Liste zu Beginn jedes Aufrufs.
@@ -526,7 +550,8 @@ def gh(*args: str, repo: str | None = None):
     Projektvorsätze im Zustand (`<projekt>/prN@…`) brauchen die ausdrückliche Angabe, weil sie
     nicht zum gerade aktiven Projekt gehören müssen."""
     try:
-        out = subprocess.run(["gh", *args, "--repo", repo or REPO], capture_output=True, text=True, check=True, env=ENV)
+        repo_args = ["--repo", repo or REPO]
+        out = subprocess.run(["gh", *args, *repo_args], capture_output=True, text=True, check=True, env=ENV)
     except subprocess.CalledProcessError as exc:
         if exc.returncode == 4 and "GH_TOKEN" in (getattr(exc, "stderr", None) or ""):
             return None
@@ -1001,7 +1026,7 @@ def active_in_progress_issues() -> list[dict] | None:
     try:
         active = gh("issue", "list", "--state", "open", "--label", "in-arbeit",
                     "--limit", str(ISSUE_LIST_LIMIT),
-                    "--json", "number,title,body,author,labels")
+                    "--json", "number,title,body,author,labels,updatedAt")
         return [i for i in active or [] if (i.get("author") or {}).get("login") == OWNER]
     except Exception as e:
         # Nicht still scheitern: Früher lieferte dieser Zweig [], und ein zweiter Agent startete
@@ -1009,6 +1034,182 @@ def active_in_progress_issues() -> list[dict] | None:
         log(f"Warnung: Abfrage aktiver Issues fehlgeschlagen ({type(e).__name__}: {e}); "
             "Lage unbekannt, kein Auftrag.")
         return None
+
+
+def open_prs_for_issue_check() -> list[dict] | None:
+    """Holt offene PRs des Repositories mit number und headRefName.
+
+    None bei Fehlern (Netz, Rate-Limit, gh-Fehler) oder wenn die Abfrage >= PR_LIST_LIMIT
+    Einträge liefert (weitere PRs möglich -> Lage unbekannt); nichts freigeben.
+    """
+    try:
+        prs = gh("pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT),
+                 "--json", "number,headRefName")
+        if not isinstance(prs, list):
+            return None
+        if len(prs) >= PR_LIST_LIMIT:
+            log(f"Warnung: Abfrage offener PRs erreicht Limit ({PR_LIST_LIMIT}); "
+                "weitere PRs möglich, Lage unbekannt, nichts freigeben.")
+            return None
+        return prs
+    except Exception as e:
+        log(f"Warnung: Abfrage offener PRs fehlgeschlagen ({type(e).__name__}: {e}); Lage unbekannt, nichts freigeben.")
+        return None
+
+
+def issue_label_age_minuten(n: int, issue: dict | None = None, now: float | None = None) -> float | None:
+    """Alter des Labels `in-arbeit` eines Issues in Minuten.
+
+    Liest das Alter direkt aus updatedAt des Issues aus GitHub (gh issue list).
+    None, wenn das Alter nicht ermittelbar ist (Lage unbekannt).
+    """
+    if now is None:
+        now = jetzt_s()
+    # Schneller Pfad: vorab belegtes labeled_at im Dict (z. B. in Tests)
+    if isinstance(issue, dict) and issue.get("labeled_at"):
+        ts = _iso_sekunden(issue.get("labeled_at"))
+        if ts is not None:
+            return max(0.0, (now - ts) / 60.0)
+
+    # Direkt aus updatedAt des Issues (aus gh issue list --json ... updatedAt)
+    if isinstance(issue, dict) and issue.get("updatedAt"):
+        ts = _iso_sekunden(issue.get("updatedAt"))
+        if ts is not None:
+            return max(0.0, (now - ts) / 60.0)
+
+    log(f"Warnung: Alter von Issue #{n} nicht abfragbar; Lage unbekannt, nichts freigeben.")
+    return None
+
+
+def issue_has_active_slot(n: int) -> bool:
+    """Prüft, ob ein Slot (Auftrags-Belegung/CLAIM_DIR) gerade an diesem Issue arbeitet."""
+    skey = PREFIX + f"issue{n}"
+    besitzer = _claim_owner(claim_path(skey))
+    return besitzer is not None and _pid_alive(besitzer)
+
+
+def pr_matches_issue(pr: dict, n: int) -> bool:
+    """Prüft, ob ein offener PR mit Branch issue_branch(n) oder feature/issue-n-* existiert."""
+    if not isinstance(pr, dict):
+        return False
+    target = issue_branch(n)
+    branch = pr.get("headRefName") or ""
+    return branch == target or branch.startswith(f"{target}-")
+
+
+def release_orphan_claim(n: int, alter_minuten: int) -> bool:
+    """Setzt das Label eines verwaisten Claims zurück (in-arbeit -> bereit).
+
+    Schreibt eine „⚠ Stephan:“-Zeile über alarm() und ein audit()-Ereignis orphan_claim_released.
+    True bei Erfolg (Label erfolgreich geändert), False bei Fehler.
+    """
+    try:
+        # Idempotenz-Schutz vor doppelter Freigabe durch zwei parallele Slots im selben Takt
+        view = gh("issue", "view", str(n), "--json", "labels")
+        if isinstance(view, dict) and "labels" in view:
+            labels = {lab.get("name") for lab in view["labels"] if isinstance(lab, dict)}
+            if "in-arbeit" not in labels:
+                return True
+        gh("issue", "edit", str(n), "--add-label", "bereit", "--remove-label", "in-arbeit")
+        log(f"Verwaister Claim von Issue #{n} ({alter_minuten} min) erfolgreich auf 'bereit' zurückgesetzt.")
+        alarm(f"issue{n}", f"Verwaister Claim #{n} ({alter_minuten} min) freigegeben (in-arbeit -> bereit)")
+        audit("orphan_claim_released", issue=n, age_minutes=alter_minuten)
+        return True
+    except Exception as e:
+        detail = ((getattr(e, "stderr", None) or "").strip().splitlines() or [""])[0][:200]
+        log(f"Freigabe von verwaistem Issue #{n} fehlgeschlagen: {e}" + (f" ({detail})" if detail else ""))
+        return False
+
+
+def cleanup_orphan_claims(active: list[dict], now: float | None = None) -> list[dict]:
+    """Prüft aktive Aufträge (in-arbeit von OWNER) auf verwaiste Claims und gibt sie frei.
+
+    Ein offenes Issue gilt als verwaist, wenn alle drei Bedingungen zutreffen:
+    - kein offener PR mit Branch issue_branch(N) (ein Branch auf GitHub zählt nicht!),
+    - das Issue (updatedAt) ist länger als ORPHAN_MINUTEN unverändert,
+    - keine lebende Belegung hält den Auftrag (CLAIM_DIR, Schlüssel PREFIX + f"issue{N}").
+
+    Ein verwaister Claim wird auf 'bereit' zurückgesetzt, alarmiert Stephan via alarm()
+    und erzeugt ein audit()-Ereignis 'orphan_claim_released'.
+    Er zählt nicht mehr zu den aktiven Aufträgen und wird aus der Rückgabeliste entfernt.
+    Scheitert eine GitHub-Abfrage (PRs/Alter), bleibt die Lage unbekannt,
+    nichts wird freigegeben und eine Warnung wird geloggt.
+    """
+    if not active:
+        return active
+    if now is None:
+        now = jetzt_s()
+
+    open_prs = open_prs_for_issue_check()
+    if open_prs is None:
+        return active
+
+    remaining: list[dict] = []
+    for a in active:
+        if not isinstance(a, dict):
+            continue
+        # Fremdes Issue nie anfassen
+        if (a.get("author") or {}).get("login") != OWNER:
+            remaining.append(a)
+            continue
+        try:
+            n = int(a.get("number"))
+        except (TypeError, ValueError):
+            remaining.append(a)
+            continue
+
+        # 1. Offener PR mit Branch issue_branch(n) vorhanden? (Ein Branch auf GitHub zählt nicht)
+        if any(pr_matches_issue(pr, n) for pr in open_prs):
+            remaining.append(a)
+            continue
+
+        # 2. Aktive lebende Belegung in CLAIM_DIR vorhanden?
+        if issue_has_active_slot(n):
+            remaining.append(a)
+            continue
+
+        # 3. Alter aus GitHub (updatedAt) >= ORPHAN_MINUTEN?
+        age = issue_label_age_minuten(n, a, now=now)
+        if age is None or age < ORPHAN_MINUTEN:
+            remaining.append(a)
+            continue
+
+        # Alle Bedingungen erfüllt: verwaister Claim freigeben
+        if release_orphan_claim(n, int(age)):
+            # Erfolgreich freigegeben -> zählt nicht mehr zu active_files
+            continue
+        remaining.append(a)
+
+    return remaining
+
+
+def _track_kollision(cand_no: int, blocker_no: int | None, now: float,
+                     current_collisions: set[tuple[int, int]],
+                     state: dict) -> bool:
+    """Verfolgt eine Datei-Kollision im Zustand und meldet Dauerkollision ab KOLLISION_MELDUNG_MINUTEN genau einmal.
+
+    Gibt True zurück, wenn state geändert wurde.
+    """
+    if blocker_no is None:
+        return False
+    key = (cand_no, blocker_no)
+    current_collisions.add(key)
+    state_key = f"{KOLLISION}{cand_no}:{blocker_no}"
+    geaendert = False
+    if state_key not in state or not isinstance(state[state_key], dict):
+        state[state_key] = {"start": now, "warned": False}
+        geaendert = True
+
+    entry = state[state_key]
+    dauer = now - entry.get("start", now)
+    if dauer >= KOLLISION_MELDUNG_MINUTEN * 60:
+        if not entry.get("warned"):
+            entry["warned"] = True
+            geaendert = True
+            minuten = int(dauer // 60)
+            alarm(f"issue{cand_no}",
+                  f"Dauerkollision seit {minuten} Minuten mit aktiver Aufgabe #{blocker_no} (Regel 8)")
+    return geaendert
 
 
 def claim_issue(n: int) -> bool:
@@ -1242,7 +1443,8 @@ def open_pr(n: int) -> bool:
     return True
 
 
-def issue_job(skip: Callable[[str], bool] | None = None):
+def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = None,
+              state: dict | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
 
     Neu: die Auswahl ändert KEINE Labels mehr — kein claim_issue-Aufruf. Der Auftragstext bleibt
@@ -1263,6 +1465,10 @@ def issue_job(skip: Callable[[str], bool] | None = None):
     nächste Aufgabe nach AGENTS.md“ übersprang Qwen Label, Branch und Akzeptanz-Commit, arbeitete
     auf main und hörte beim ersten roten Test auf (#102, erster Lauf).
     """
+    if now is None:
+        now = jetzt_s()
+    if state is None:
+        state = load_state()
     SKIPPED.clear()
     issues = gh("issue", "list", "--state", "open", "--label", "worker-task", "--label", "bereit",
                 "--label", LABEL, "--limit", str(ISSUE_LIST_LIMIT),
@@ -1271,19 +1477,32 @@ def issue_job(skip: Callable[[str], bool] | None = None):
     # Wie bei Reviews: Nur Issues von Stephans Konto werden zum Auftrag mit Schreibrecht.
     issues = [i for i in issues or [] if (i.get("author") or {}).get("login") == OWNER]
     if not issues:
+        kollision_geaendert = False
+        for k in list(state.keys()):
+            if k.startswith(KOLLISION):
+                del state[k]
+                kollision_geaendert = True
+        if kollision_geaendert:
+            save_state(state)
         return None
 
     # Konfliktprüfung mit aktiven Aufträgen (Regel 8: main.py und dieselben Dateien).
     # Unbekannt heißt blockieren: Ohne belegte Lage baut der Takt keinen Auftrag (#32).
     active = active_in_progress_issues()
     if active is None:
+        # Lage unbekannt (gh-Fehler): _kollision:-Einträge bleiben absichtlich erhalten.
         log("Kein Auftrag: aktive Aufträge nicht abfragbar (Regel 8 nicht beurteilbar).")
         return None
+
+    if active:
+        active = cleanup_orphan_claims(active, now=now)
+
     active_touches_main = any(touches_main_py(a) for a in active)
     active_files = set()
     for a in active:
         a_files = parse_affected_files(a.get("body", ""))
         if a_files is None:
+            # Dateiliste unbekannt: keine Lagebeurteilung möglich, _kollision:-Einträge bleiben erhalten.
             log(f"Kein Auftrag: aktiver Auftrag #{a.get('number')} hat keine belegte "
                 "Dateiliste (Regel 8 nicht beurteilbar).")
             return None
@@ -1291,6 +1510,8 @@ def issue_job(skip: Callable[[str], bool] | None = None):
         if touches_main_py(a):
             active_files.add(HOTSPOT)
 
+    current_collisions: set[tuple[int, int]] = set()
+    kollision_geaendert = False
     selected = None
     for cand in issues:
         cand_no = cand["number"]
@@ -1312,6 +1533,10 @@ def issue_job(skip: Callable[[str], bool] | None = None):
                 f"an {HOTSPOT} in Arbeit ist (Regel 8).")
             SKIPPED.append(f"#{cand_no}: berührt {HOTSPOT}, während bereits ein Auftrag "
                            f"an {HOTSPOT} in Arbeit ist")
+            for a in active:
+                if touches_main_py(a):
+                    if _track_kollision(cand_no, a.get("number"), now, current_collisions, state):
+                        kollision_geaendert = True
             continue
 
         # Regel 8: Keine zwei Agenten in denselben Dateien; Doku-Pflichtzeilen und der
@@ -1324,10 +1549,26 @@ def issue_job(skip: Callable[[str], bool] | None = None):
                 f"{', '.join(sorted(overlap))} (Regel 8).")
             SKIPPED.append(f"#{cand_no}: Datei-Kollision mit aktivem Auftrag auf "
                            f"{', '.join(sorted(overlap))}")
+            for a in active:
+                a_files = parse_affected_files(a.get("body", "")) or set()
+                if touches_main_py(a):
+                    a_files.add(HOTSPOT)
+                if collision_files(cand_files) & collision_files(a_files):
+                    if _track_kollision(cand_no, a.get("number"), now, current_collisions, state):
+                        kollision_geaendert = True
             continue
 
         selected = cand
         break
+
+    active_kollision_keys = {f"{KOLLISION}{c}:{b}" for (c, b) in current_collisions}
+    for k in list(state.keys()):
+        if k.startswith(KOLLISION) and k not in active_kollision_keys:
+            del state[k]
+            kollision_geaendert = True
+
+    if kollision_geaendert:
+        save_state(state)
 
     if not selected:
         return None
@@ -2158,7 +2399,15 @@ def find_job(state: dict):
     job = rework_job(project_done(state), skip) or text_fix_job(skip)
     if job:
         return job
-    job = issue_job(skip)
+    # issue_job erhält den Takt-Zustand (#206). Ältere, eingefrorene Akzeptanztests
+    # (#59) mocken issue_job per lambda skip=None; Signatur vorab per inspect prüfen,
+    # damit keine echten Fehler im Rumpf von issue_job verschluckt werden (Regel 7).
+    try:
+        params = inspect.signature(issue_job).parameters
+        takes_state = "state" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    except (ValueError, TypeError):
+        takes_state = True
+    job = issue_job(skip, state=state) if takes_state else issue_job(skip)
     if job and main_is_red(state):
         return None
     return job

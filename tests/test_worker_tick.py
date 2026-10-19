@@ -126,6 +126,8 @@ class FakeGH:
             return None
         if args[:2] == ("run", "list"):
             return self.runs
+        if args and args[0] == "api":
+            return []
         raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
 
 
@@ -2571,7 +2573,7 @@ def test_find_job_ueberspringt_belegte_und_erledigte_auftraege(monkeypatch, tmp_
 
     monkeypatch.setattr(w, "rework_job", rework)
     monkeypatch.setattr(w, "text_fix_job", lambda skip=None: None)
-    monkeypatch.setattr(w, "issue_job", lambda skip=None: None)
+    monkeypatch.setattr(w, "issue_job", lambda skip=None, **kw: None)
     assert w.find_job({})[0] == key              # frei: der Auftrag kommt dran
     os.makedirs(w.CLAIM_DIR, exist_ok=True)
     with open(w.claim_path(key), "w", encoding="utf-8") as fh:
