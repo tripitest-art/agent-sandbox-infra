@@ -136,6 +136,28 @@ VERWAIST = "_verwaist:"      # Vorsatz der Schlüssel im Zustand: f"_verwaist:{n
 # Verzeichnisse, für die claim_job schon eine „⚠ Stephan:“-Zeile geschrieben hat. Eigener Merker,
 # weil claim_job keinen Zustand bekommt; der Takt ist ein kurzer Prozess je Auftrag.
 _CLAIM_WARNED: set[str] = set()
+
+# Verwaiste in-arbeit-Claims automatisch freigeben (#206 / Vorfall 2026-10-19):
+# Ein Issue mit `in-arbeit` ohne Branch, ohne PR und ohne lebenden Slot gilt ab diesem
+# Alter (Minuten) als verwaist.
+ORPHAN_MINUTEN = 45
+
+# Dauerkollision melden (#206): Ab dieser Dauer (Minuten) ununterbrochener Kollision
+# mit demselben aktiven Auftrag genau einmal alarmieren.
+KOLLISION_MELDUNG_MINUTEN = 60
+
+# Merker für andauernde Kollisionen: (Kandidaten-Issue, Blocker-Issue) -> Startzeitpunkt (jetzt_s())
+_KOLLISION_START: dict[tuple[int, int], float] = {}
+# Merker für bereits alarmierte Dauerkollisionen: (Kandidaten-Issue, Blocker-Issue)
+_KOLLISION_WARNED: set[tuple[int, int]] = set()
+
+
+def reset_kollision_merker() -> None:
+    """Setzt die Merker für Dauerkollisionen zurück (vor allem für Tests)."""
+    _KOLLISION_START.clear()
+    _KOLLISION_WARNED.clear()
+
+
 # Gründe der im letzten Takt von issue_job übersprungenen Kandidaten (#187). main() zeigt sie in
 # der Slot-Telemetrie im Leerlauf, weil sie bisher nur im Log standen und den echten Grund der
 # Untätigkeit verdeckten. issue_job leert die Liste zu Beginn jedes Aufrufs.
@@ -526,7 +548,8 @@ def gh(*args: str, repo: str | None = None):
     Projektvorsätze im Zustand (`<projekt>/prN@…`) brauchen die ausdrückliche Angabe, weil sie
     nicht zum gerade aktiven Projekt gehören müssen."""
     try:
-        out = subprocess.run(["gh", *args, "--repo", repo or REPO], capture_output=True, text=True, check=True, env=ENV)
+        repo_args = [] if args and args[0] == "api" else ["--repo", repo or REPO]
+        out = subprocess.run(["gh", *args, *repo_args], capture_output=True, text=True, check=True, env=ENV)
     except subprocess.CalledProcessError as exc:
         if exc.returncode == 4 and "GH_TOKEN" in (getattr(exc, "stderr", None) or ""):
             return None
@@ -1001,7 +1024,7 @@ def active_in_progress_issues() -> list[dict] | None:
     try:
         active = gh("issue", "list", "--state", "open", "--label", "in-arbeit",
                     "--limit", str(ISSUE_LIST_LIMIT),
-                    "--json", "number,title,body,author,labels")
+                    "--json", "number,title,body,author,labels,updatedAt")
         return [i for i in active or [] if (i.get("author") or {}).get("login") == OWNER]
     except Exception as e:
         # Nicht still scheitern: Früher lieferte dieser Zweig [], und ein zweiter Agent startete
@@ -1009,6 +1032,211 @@ def active_in_progress_issues() -> list[dict] | None:
         log(f"Warnung: Abfrage aktiver Issues fehlgeschlagen ({type(e).__name__}: {e}); "
             "Lage unbekannt, kein Auftrag.")
         return None
+
+
+def repo_branches_for_issue_check() -> list[str] | None:
+    """Holt die Liste aller Remote-Branches des aktiven Repositories.
+
+    None bei Fehlern (Netz, Rate-Limit, gh-Fehler); Lage unbekannt.
+    """
+    try:
+        data = gh("api", f"repos/{REPO}/branches?per_page=100")
+        if not isinstance(data, list):
+            return None
+        return [b["name"] if isinstance(b, dict) and "name" in b else str(b) for b in data]
+    except Exception as e:
+        log(f"Warnung: Abfrage der Branches fehlgeschlagen ({type(e).__name__}: {e}); Lage unbekannt, nichts freigeben.")
+        return None
+
+
+def open_prs_for_issue_check() -> list[dict] | None:
+    """Holt offene PRs des Repositories mit number, headRefName und body.
+
+    None bei Fehlern (Netz, Rate-Limit, gh-Fehler); Lage unbekannt.
+    """
+    try:
+        prs = gh("pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT),
+                 "--json", "number,headRefName,body")
+        return prs if isinstance(prs, list) else []
+    except Exception as e:
+        log(f"Warnung: Abfrage offener PRs fehlgeschlagen ({type(e).__name__}: {e}); Lage unbekannt, nichts freigeben.")
+        return None
+
+
+def issue_label_age_minuten(n: int, issue: dict | None = None, now: float | None = None) -> float | None:
+    """Alter des Labels `in-arbeit` eines Issues in Minuten.
+
+    Liest den Zeitpunkt des Labelwechsels aus GitHub (Events-API oder updatedAt).
+    None, wenn das Alter nicht ermittelbar ist (Lage unbekannt).
+    """
+    if now is None:
+        now = jetzt_s()
+    # Schneller Pfad: vorab belegtes labeled_at im Dict (z. B. in Tests)
+    if isinstance(issue, dict) and issue.get("labeled_at"):
+        ts = _iso_sekunden(issue.get("labeled_at"))
+        if ts is not None:
+            return max(0.0, (now - ts) / 60.0)
+
+    try:
+        events = gh("api", f"repos/{REPO}/issues/{n}/events")
+    except Exception as e:
+        log(f"Warnung: Abfrage des Label-Alters für Issue #{n} fehlgeschlagen ({type(e).__name__}: {e}); Lage unbekannt, nichts freigeben.")
+        return None
+
+    if isinstance(events, list):
+        labeled_events = [
+            e for e in events
+            if isinstance(e, dict)
+            and e.get("event") == "labeled"
+            and isinstance(e.get("label"), dict)
+            and e["label"].get("name") == "in-arbeit"
+        ]
+        if labeled_events:
+            latest = max(labeled_events, key=lambda e: str(e.get("created_at") or ""))
+            ts = _iso_sekunden(latest.get("created_at"))
+            if ts is not None:
+                return max(0.0, (now - ts) / 60.0)
+
+    # Rückfall: updatedAt aus issue, falls vorhanden
+    if isinstance(issue, dict) and issue.get("updatedAt"):
+        ts = _iso_sekunden(issue.get("updatedAt"))
+        if ts is not None:
+            return max(0.0, (now - ts) / 60.0)
+
+    log(f"Warnung: Alter von Issue #{n} nicht abfragbar; Lage unbekannt, nichts freigeben.")
+    return None
+
+
+def issue_has_active_slot(n: int) -> bool:
+    """Prüft, ob ein Slot (Auftrags-Belegung/CLAIM_DIR) gerade an diesem Issue arbeitet."""
+    skey = PREFIX + f"issue{n}"
+    besitzer = _claim_owner(claim_path(skey))
+    return besitzer is not None and _pid_alive(besitzer)
+
+
+def pr_matches_issue(pr: dict, n: int) -> bool:
+    """Prüft, ob ein offener PR zu Issue n gehört (Branch feature/issue-n-* oder Closes #n im Text)."""
+    if not isinstance(pr, dict):
+        return False
+    branch = pr.get("headRefName") or ""
+    if branch == f"feature/issue-{n}" or branch.startswith(f"feature/issue-{n}-"):
+        return True
+    body = pr.get("body") or ""
+    clean_body = _HTML_COMMENT_RE.sub("", body)
+    linked = _LINK_RE.findall(clean_body)
+    return str(n) in linked
+
+
+def release_orphan_claim(n: int, alter_minuten: int) -> bool:
+    """Setzt das Label eines verwaisten Claims zurück (in-arbeit -> bereit).
+
+    Schreibt eine „⚠ Stephan:“-Zeile über alarm() und ein audit()-Ereignis orphan_claim_released.
+    True bei Erfolg (Label erfolgreich geändert), False bei Fehler.
+    """
+    try:
+        gh("issue", "edit", str(n), "--add-label", "bereit", "--remove-label", "in-arbeit")
+        log(f"Verwaister Claim von Issue #{n} ({alter_minuten} min) erfolgreich auf 'bereit' zurückgesetzt.")
+        alarm(f"issue{n}", f"Verwaister Claim #{n} ({alter_minuten} min) freigegeben (in-arbeit -> bereit)")
+        audit("orphan_claim_released", issue=n, age_minutes=alter_minuten)
+        return True
+    except Exception as e:
+        detail = ((getattr(e, "stderr", None) or "").strip().splitlines() or [""])[0][:200]
+        log(f"Freigabe von verwaistem Issue #{n} fehlgeschlagen: {e}" + (f" ({detail})" if detail else ""))
+        return False
+
+
+def cleanup_orphan_claims(active: list[dict], now: float | None = None) -> list[dict]:
+    """Prüft aktive Aufträge (in-arbeit von OWNER) auf verwaiste Claims und gibt sie frei.
+
+    Ein offenes Issue gilt als verwaist, wenn alle drei Bedingungen zutreffen:
+    - kein Branch feature/issue-<N>-* (Namensschema aus issue_branch()),
+    - kein offener PR mit Closes #<N> / Branch dieses Schemas,
+    - das Label ist länger als ORPHAN_MINUTEN gesetzt UND kein Slot arbeitet gerade daran.
+
+    Ein verwaister Claim wird auf 'bereit' zurückgesetzt, alarmiert Stephan via alarm()
+    und erzeugt ein audit()-Ereignis 'orphan_claim_released'.
+    Er zählt nicht mehr zu den aktiven Aufträgen und wird aus der Rückgabeliste entfernt.
+    Scheitert eine GitHub-Abfrage (Alter/Branches/PRs), bleibt die Lage unbekannt,
+    nichts wird freigegeben und eine Warnung wird geloggt.
+    """
+    if not active:
+        return active
+    if now is None:
+        now = jetzt_s()
+
+    open_prs = open_prs_for_issue_check()
+    if open_prs is None:
+        return active
+
+    repo_branches = repo_branches_for_issue_check()
+    if repo_branches is None:
+        return active
+
+    remaining: list[dict] = []
+    for a in active:
+        if not isinstance(a, dict):
+            continue
+        # Fremdes Issue nie anfassen
+        if (a.get("author") or {}).get("login") != OWNER:
+            remaining.append(a)
+            continue
+        try:
+            n = int(a.get("number"))
+        except (TypeError, ValueError):
+            remaining.append(a)
+            continue
+
+        # 1. Branch vorhanden?
+        has_branch = any(
+            b == f"feature/issue-{n}" or b.startswith(f"feature/issue-{n}-")
+            for b in repo_branches
+        )
+        if has_branch:
+            remaining.append(a)
+            continue
+
+        # 2. Offener PR vorhanden?
+        has_pr = any(pr_matches_issue(pr, n) for pr in open_prs)
+        if has_pr:
+            remaining.append(a)
+            continue
+
+        # 3. Aktiver Slot vorhanden?
+        if issue_has_active_slot(n):
+            remaining.append(a)
+            continue
+
+        # 4. Alter des Labels
+        age = issue_label_age_minuten(n, a, now=now)
+        if age is None or age < ORPHAN_MINUTEN:
+            remaining.append(a)
+            continue
+
+        # Alle Bedingungen erfüllt: verwaister Claim freigeben
+        if release_orphan_claim(n, int(age)):
+            # Erfolgreich freigegeben -> zählt nicht mehr zu active_files
+            continue
+        remaining.append(a)
+
+    return remaining
+
+
+def _track_kollision(cand_no: int, blocker_no: int | None, now: float,
+                     current_collisions: set[tuple[int, int]]) -> None:
+    """Verfolgt eine Datei-Kollision und meldet Dauerkollision ab KOLLISION_MELDUNG_MINUTEN genau einmal."""
+    if blocker_no is None:
+        return
+    key = (cand_no, blocker_no)
+    current_collisions.add(key)
+    if key not in _KOLLISION_START:
+        _KOLLISION_START[key] = now
+    dauer = now - _KOLLISION_START[key]
+    if dauer >= KOLLISION_MELDUNG_MINUTEN * 60:
+        if key not in _KOLLISION_WARNED:
+            _KOLLISION_WARNED.add(key)
+            minuten = int(dauer // 60)
+            alarm(f"issue{cand_no}",
+                  f"Dauerkollision seit {minuten} Minuten mit aktiver Aufgabe #{blocker_no} (Regel 8)")
 
 
 def claim_issue(n: int) -> bool:
@@ -1242,7 +1470,7 @@ def open_pr(n: int) -> bool:
     return True
 
 
-def issue_job(skip: Callable[[str], bool] | None = None):
+def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
 
     Neu: die Auswahl ändert KEINE Labels mehr — kein claim_issue-Aufruf. Der Auftragstext bleibt
@@ -1263,6 +1491,8 @@ def issue_job(skip: Callable[[str], bool] | None = None):
     nächste Aufgabe nach AGENTS.md“ übersprang Qwen Label, Branch und Akzeptanz-Commit, arbeitete
     auf main und hörte beim ersten roten Test auf (#102, erster Lauf).
     """
+    if now is None:
+        now = jetzt_s()
     SKIPPED.clear()
     issues = gh("issue", "list", "--state", "open", "--label", "worker-task", "--label", "bereit",
                 "--label", LABEL, "--limit", str(ISSUE_LIST_LIMIT),
@@ -1279,6 +1509,10 @@ def issue_job(skip: Callable[[str], bool] | None = None):
     if active is None:
         log("Kein Auftrag: aktive Aufträge nicht abfragbar (Regel 8 nicht beurteilbar).")
         return None
+
+    if active:
+        active = cleanup_orphan_claims(active, now=now)
+
     active_touches_main = any(touches_main_py(a) for a in active)
     active_files = set()
     for a in active:
@@ -1291,6 +1525,7 @@ def issue_job(skip: Callable[[str], bool] | None = None):
         if touches_main_py(a):
             active_files.add(HOTSPOT)
 
+    current_collisions: set[tuple[int, int]] = set()
     selected = None
     for cand in issues:
         cand_no = cand["number"]
@@ -1312,6 +1547,9 @@ def issue_job(skip: Callable[[str], bool] | None = None):
                 f"an {HOTSPOT} in Arbeit ist (Regel 8).")
             SKIPPED.append(f"#{cand_no}: berührt {HOTSPOT}, während bereits ein Auftrag "
                            f"an {HOTSPOT} in Arbeit ist")
+            for a in active:
+                if touches_main_py(a):
+                    _track_kollision(cand_no, a.get("number"), now, current_collisions)
             continue
 
         # Regel 8: Keine zwei Agenten in denselben Dateien; Doku-Pflichtzeilen und der
@@ -1324,10 +1562,21 @@ def issue_job(skip: Callable[[str], bool] | None = None):
                 f"{', '.join(sorted(overlap))} (Regel 8).")
             SKIPPED.append(f"#{cand_no}: Datei-Kollision mit aktivem Auftrag auf "
                            f"{', '.join(sorted(overlap))}")
+            for a in active:
+                a_files = parse_affected_files(a.get("body", "")) or set()
+                if touches_main_py(a):
+                    a_files.add(HOTSPOT)
+                if collision_files(cand_files) & collision_files(a_files):
+                    _track_kollision(cand_no, a.get("number"), now, current_collisions)
             continue
 
         selected = cand
         break
+
+    for k in list(_KOLLISION_START):
+        if k not in current_collisions:
+            del _KOLLISION_START[k]
+            _KOLLISION_WARNED.discard(k)
 
     if not selected:
         return None

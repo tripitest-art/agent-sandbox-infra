@@ -126,6 +126,8 @@ class FakeGH:
             return None
         if args[:2] == ("run", "list"):
             return self.runs
+        if args and args[0] == "api":
+            return []
         raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
 
 

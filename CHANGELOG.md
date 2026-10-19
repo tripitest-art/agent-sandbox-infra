@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `worker_tick`: Verwaiste „in-arbeit“-Claims ohne Branch, PR oder aktiven Slot nach `ORPHAN_MINUTEN` (45 min) automatisch freigeben (Label zurück auf `bereit`, `alarm()`- und `audit()`-Meldung); Dauerkollisionen ab `KOLLISION_MELDUNG_MINUTEN` (60 min) genau einmal als `alarm()` melden (#206).
 - `worker_tick`: Die Listenabfragen der offenen PRs (`rework_job`, `text_fix_job`) und Issues (`active_in_progress_issues`, `issue_job`) sind mit `--limit` begrenzt (10 PRs, 20 Issues), damit die verschachtelten Felder das GitHub-GraphQL-Kontingent nicht vorzeitig verbrauchen; die einmalige Abfrage in `open_pr` bleibt ohne Grenze, weil ihr Aufruf in einem gemergten Akzeptanztest zeichengenau geprüft wird (#203).
 - `review_tick`: nutzt `--limit` für PR- (`PR_LIST_LIMIT=10`) und Issue-Listen (`BLOCKED_ISSUES_LIMIT=20`), um das GitHub-GraphQL-Kontingent bei jedem Takt zu schonen (#197).
 - `install.sh`: merkt sich `TAKT` und `REVIEW_TAKT` in `/etc/agent-sandbox.conf` und liest sie per `conf_get`, damit ein erneuter Lauf (z. B. durch autodeploy) die Timer-Intervalle nicht auf die Vorgabe 2min zurücksetzt (#201).
