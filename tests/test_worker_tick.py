@@ -69,6 +69,9 @@ def _repo_workdir(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "git_hooks_dir", lambda cwd: str(tmp_path / "git-hooks"))
     # #171: prepare_issue_branch legt Zweige und Akzeptanztests in WORKDIR an. Nie im Test ins Repo.
     monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+    # #208: sync_issue_branch_with_main merged origin/main in WORKDIR; in Tests ist das dieses Repo.
+    # Nie echter git-Verkehr aus einem Test heraus.
+    monkeypatch.setattr(w, "sync_issue_branch_with_main", lambda n: True)
     # #172: open_pr legt den PR nach dem Agentenlauf an. Nie im Test ins echte GitHub.
     monkeypatch.setattr(w, "open_pr", lambda n: True)
     # #183: verwaiste_melden fragt GitHub (issue list, pr list). Im Test nie ins echte GitHub;
@@ -78,6 +81,7 @@ def _repo_workdir(monkeypatch, tmp_path):
 
 _ECHTE_GIT_HOOKS_DIR = w.git_hooks_dir    # vor dem Autouse-Fixture gesichert (#68)
 _ECHTE_PREPARE_ISSUE_BRANCH = w.prepare_issue_branch  # vor dem Autouse-Fixture gesichert (#171)
+_ECHTE_SYNC_ISSUE_BRANCH = w.sync_issue_branch_with_main  # vor dem Autouse-Fixture gesichert (#208)
 _ECHTE_OPEN_PR = w.open_pr  # vor dem Autouse-Fixture gesichert (#172)
 _ECHTE_VERWAISTE_MELDEN = w.verwaiste_melden  # vor dem Autouse-Fixture gesichert (#183)
 
@@ -1689,6 +1693,84 @@ def test_main_startet_agent_nicht_wenn_prepare_issue_branch_false(monkeypatch, t
     assert "⚠ Stephan:" in out
     assert "Akzeptanztest-Block im Issue nicht lesbar" in out
     assert any(a == ("idle",) for a, _ in status_calls)
+
+
+def _lauf_mit_branch_sync(monkeypatch, tmp_path, prepare_ok=True, workdir_existiert=True):
+    """main() mit einem Issue-Auftrag; zeichnet prepare_issue_branch, sync und Agent in `schritte` auf."""
+    schritte = []
+    arbeit = tmp_path / "wt"
+    if workdir_existiert:
+        arbeit.mkdir()
+    monkeypatch.setattr(w, "WORKDIR", str(arbeit))
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+    monkeypatch.setattr(w, "check_issue_result", lambda k: None)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: schritte.append("workdir"))
+    monkeypatch.setattr(w, "ensure_pre_push_hook", lambda: schritte.append("hook"))
+    monkeypatch.setattr(w, "prepare_issue_branch",
+                        lambda n: schritte.append(f"branch_{n}") or prepare_ok)
+    monkeypatch.setattr(w, "sync_issue_branch_with_main",
+                        lambda n: schritte.append(f"sync_{n}") or True)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: schritte.append("agent") or 0)
+    return schritte
+
+
+def test_main_synct_origin_main_nach_erfolgreicher_branchvorbereitung(monkeypatch, tmp_path):
+    """#208: sync_issue_branch_with_main läuft einmal direkt nach prepare_issue_branch und vor dem Agenten."""
+    schritte = _lauf_mit_branch_sync(monkeypatch, tmp_path)
+    assert w.main() == 0
+    assert schritte == ["workdir", "hook", "branch_7", "sync_7", "agent"]
+
+
+def test_main_synct_nicht_wenn_branchvorbereitung_scheitert(monkeypatch, tmp_path, capsys):
+    """#208: Ohne Branchvorbereitung (False) gibt es keinen Merge und keinen Agentenlauf."""
+    schritte = _lauf_mit_branch_sync(monkeypatch, tmp_path, prepare_ok=False)
+    assert w.main() == 0
+    assert schritte == ["workdir", "hook", "branch_7"]
+    assert "Akzeptanztest-Block im Issue nicht lesbar" in capsys.readouterr().out
+
+
+def test_main_synct_nicht_ohne_workdir(monkeypatch, tmp_path):
+    """#208: Fehlt WORKDIR (gefaktes prepare_workdir), wird weder Branch noch main angefasst."""
+    schritte = _lauf_mit_branch_sync(monkeypatch, tmp_path, workdir_existiert=False)
+    assert w.main() == 0
+    assert schritte == ["workdir", "hook", "agent"]
+
+
+def test_sync_issue_branch_with_main_nutzt_env_cwd_und_check(monkeypatch, tmp_path):
+    """#208: fetch prüft den Exit, merge-base und merge nicht; bei Konflikt folgt merge --abort und False."""
+    monkeypatch.setattr(w, "sync_issue_branch_with_main", _ECHTE_SYNC_ISSUE_BRANCH)
+    arbeit = tmp_path / "wt"
+    arbeit.mkdir()
+    monkeypatch.setattr(w, "WORKDIR", str(arbeit))
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((list(cmd), kw))
+        rc = 1 if cmd[:2] in (["git", "merge-base"], ["git", "merge"]) else 0
+        return subprocess.CompletedProcess(cmd, rc, "", "")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    assert w.sync_issue_branch_with_main(7) is False
+
+    assert [c for c, _ in calls] == [
+        ["git", "fetch", "-q", "origin"],
+        ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+        ["git", "merge", "--no-edit", "origin/main"],
+        ["git", "merge", "--abort"],
+    ]
+    assert all(kw.get("cwd") == str(arbeit) for _, kw in calls)
+    assert all(kw.get("env") == w.ENV for _, kw in calls)
+    assert calls[0][1].get("check") is True
+    assert all(kw.get("check") is False for _, kw in calls[1:])
 
 
 def test_prepare_issue_branch_verwendet_env_und_check(monkeypatch, tmp_path):
