@@ -1367,6 +1367,41 @@ def prepare_issue_branch(n: int) -> bool:
     return True
 
 
+def sync_issue_branch_with_main(n: int) -> bool:
+    """Führt origin/main in den Branch von WORKDIR zusammen.
+
+    Mit cwd=WORKDIR, env=ENV:
+      1. ["git", "fetch", "-q", "origin"]                                   (check=True)
+      2. ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"]        (check=False)
+         Exit 0 -> schon aktuell: True, ohne weiteren Befehl.
+      3. ["git", "merge", "--no-edit", "origin/main"]                        (check=False)
+         Exit 0 -> True.
+      4. sonst ["git", "merge", "--abort"] (check=False), Logzeile
+         „Warnung: issue<N>: origin/main lässt sich nicht in den Branch mergen (Konflikt).“ und False.
+    Kein Fehler dieser Funktion bricht den Lauf ab: bei False arbeitet der Agent auf dem unveränderten
+    Branch weiter. Ein Zweig auf einem alten main lief sonst in den Pre-Push-Hook, der rote Tests
+    meldet, obwohl der Fix längst auf main liegt (#208)."""
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=WORKDIR, env=ENV, check=True)
+    aktuell = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+        cwd=WORKDIR,
+        env=ENV,
+        check=False,
+    )
+    if aktuell.returncode == 0:
+        return True
+
+    gemergt = subprocess.run(["git", "merge", "--no-edit", "origin/main"],
+                             cwd=WORKDIR, env=ENV, check=False)
+    if gemergt.returncode == 0:
+        return True
+
+    # Nichts automatisch auflösen: der Agent entscheidet im Lauf, der Branch bleibt unverändert.
+    subprocess.run(["git", "merge", "--abort"], cwd=WORKDIR, env=ENV, check=False)
+    log(f"Warnung: issue{n}: origin/main lässt sich nicht in den Branch mergen (Konflikt).")
+    return False
+
+
 def open_pr(n: int) -> bool:
     """Legt nach dem Agentenlauf den PR zu Issue n an. True, wenn es danach einen offenen PR von
     issue_branch(n) gibt, sonst False.
@@ -2703,13 +2738,16 @@ def main() -> int:
         # Jeder Lauf startet auf sauberem main; Reste eines abgebrochenen Laufs stören sonst.
         prepare_workdir()
         ensure_pre_push_hook()   # #68: vor dem Agenten, damit schon sein erster Push geprüft wird
-        if n is not None:
+        if n is not None and os.path.isdir(WORKDIR):
             # #171 / #68: Gibt es WORKDIR nicht (gefaktes prepare_workdir in bestehenden Tests),
             # entfällt die Vorbereitung des Branches vor dem Agentenlauf.
-            if os.path.isdir(WORKDIR) and not prepare_issue_branch(n):
+            if not prepare_issue_branch(n):
                 alarm(skey, "Akzeptanztest-Block im Issue nicht lesbar")
                 slot_status("idle", project=PROJECT)
                 return 0
+            # #208: Ein fortgesetzter Branch kann auf einem alten main stehen; der Pre-Push-Hook
+            # würde sonst wegen längst behobener Tests jeden Push ablehnen.
+            sync_issue_branch_with_main(n)
 
         prompt = (f"{task}\n\n"
                   "WICHTIGE REGELN FÜR DIESEN LAUF:\n"
