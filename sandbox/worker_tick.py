@@ -2556,10 +2556,18 @@ def pre_push_hook(test_cmd: str) -> str:
     Absichtlich sh ohne Zusatzbefehle: Der Hook läuft beim `git push` des Agenten und muss
     ohne Netz, ohne gh und mit jedem git auf dem Server funktionieren. `--no-verify` steht
     hier bewusst nicht, weil die Umgehung nur der Eskalation im Auftrag erlaubt ist.
+
+    Die GIT_*-Variablen werden vor dem Testbefehl zurückgesetzt: Beim Push aus einem Worktree
+    (Slots w1/w2) setzt git im Hook GIT_DIR auf <klon>/.git/worktrees/<name> und dazu GIT_PREFIX.
+    Die Tests legen sonst ihre Wegwerf-Repos im echten Klon an statt im tmp_path, und `git commit`
+    hinterlässt einen Fremdcommit im gepushten Branch (#212). Das `unset` gilt nur im Hook-Prozess;
+    der laufende `git push` behält seine Umgebung.
     """
     return (
         "#!/bin/sh\n"
         "# Erzeugt von worker_tick.ensure_pre_push_hook(): kein Push mit roten Tests (#68).\n"
+        "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY"
+        " GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_QUARANTINE_PATH\n"
         f"{test_cmd}\n"
         "if [ $? -ne 0 ]; then\n"
         "    echo \"pre-push: Tests fehlgeschlagen, Push abgelehnt."
