@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `worker_frame`: neues Modul legt den Ziel-Branch `feature/issue-<N>` an, schreibt den Akzeptanztest-Block aus dem Issue zeichengenau als ersten Commit und baut aus der PR-Vorlage einen vertragskonformen PR-Text; im Takt noch nicht eingehängt (#233).
 - `worker_tick`: Verwaiste „in-arbeit“-Claims ohne offenen PR auf `issue_branch(N)` oder lebende Belegung nach `ORPHAN_MINUTEN` (45 min) automatisch freigeben (Label zurück auf `bereit`, `alarm()`- und `audit()`-Meldung; Branches auf GitHub zählen nicht); Dauerkollisionen ab `KOLLISION_MELDUNG_MINUTEN` (60 min) genau einmal als `alarm()` melden (#206).
 - `worker_tick`: Die Listenabfragen der offenen PRs (`rework_job`, `text_fix_job`) und Issues (`active_in_progress_issues`, `issue_job`) sind mit `--limit` begrenzt (10 PRs, 20 Issues), damit die verschachtelten Felder das GitHub-GraphQL-Kontingent nicht vorzeitig verbrauchen; die einmalige Abfrage in `open_pr` bleibt ohne Grenze, weil ihr Aufruf in einem gemergten Akzeptanztest zeichengenau geprüft wird (#203).
 - `review_tick`: nutzt `--limit` für PR- (`PR_LIST_LIMIT=10`) und Issue-Listen (`BLOCKED_ISSUES_LIMIT=20`), um das GitHub-GraphQL-Kontingent bei jedem Takt zu schonen (#197).
