@@ -31,6 +31,10 @@ hing der Stream ohne Daten; stream_timeout griff nicht.
 import inspect
 import json
 import os
+try:                        # POSIX-Nutzerdatenbank für den Rechte-Drop des Agenten (#217)
+    import pwd
+except ImportError:         # Windows kennt kein pwd; dort läuft der Takt nicht
+    pwd = None  # type: ignore[assignment]
 import re
 import subprocess
 import sys
@@ -105,6 +109,10 @@ DONE = "erledigt"           # Schlüssel in STATE: angekommene Nacharbeiten, nic
 # kostet Token; 90 min hat bei #122 nur Zeit verbrannt.
 RUN_TIMEOUT = int(os.environ.get("RUN_TIMEOUT_MIN", "30" if BACKEND == "litellm" else "90")) * 60
 AGENT = os.environ.get("AGENT", "qwen-code")   # oder "opencode"
+# #217: Der Agentenprozess läuft nicht als root, sondern als eigener unprivilegierter Nutzer.
+# Damit kann das Modell über Shell-Aufrufe weder /etc/*.env (600 root) noch /root/.config/gh
+# oder fremde Worktrees lesen. Den Nutzer legt sandbox/install.sh an.
+AGENT_USER = os.environ.get("AGENT_USER", "worker")
 PR_TEMPLATE = ".github/pull_request_template.md"
 TOOL_OUTPUT_LINES = 15      # so viele Zeilen je Werkzeugausgabe ins Log
 # Obergrenzen der Listenabfragen (#200): Ohne --limit fordert gh bis zu 30 Einträge an, bei
@@ -1818,16 +1826,54 @@ def log_stream_line(line: str) -> None:
             f"{round((event.get('duration_ms') or 0) / 1000)} s{format_usage(event.get('usage'))}]")
 
 
+# #217: Fehlt der Agenten-Nutzer, läuft der Agent als root – das ist der ungeschützte Zustand,
+# den #217 beheben soll. Deshalb genau eine „⚠ Stephan:“-Zeile je Takt-Prozess (Push-
+# Benachrichtigung), die Wiederholung nur noch als WARNUNG, damit keine Flut entsteht.
+_IDENTITAET_ALARMIERT = False
+
+
+def agent_identitaet() -> tuple[str | None, str | None]:
+    """(Nutzer, Home) für den Rechte-Drop des Agentenprozesses, sonst (None, None) (#217).
+
+    Nur wenn der Takt selbst als root läuft und `AGENT_USER` existiert, startet der Agent
+    unter diesem Nutzer; sonst erbt er Nutzer und Home des Takts wie bisher. Ein fehlender
+    Nutzer ist ein Einrichtungsfehler (sandbox/install.sh legt ihn an) und läuft deshalb
+    nicht still als root weiter: die erste Meldung ist eine „⚠ Stephan:“-Zeile (Regel 7)."""
+    global _IDENTITAET_ALARMIERT
+    if os.name == "nt" or os.geteuid() != 0:
+        return None, None
+    try:
+        eintrag = pwd.getpwnam(AGENT_USER)
+    except KeyError:
+        text = (f"Nutzer {AGENT_USER} fehlt; der Agent läuft als root. "
+                "sandbox/install.sh legt ihn an.")
+        if _IDENTITAET_ALARMIERT:
+            log(f"WARNUNG: {text}")
+        else:
+            _IDENTITAET_ALARMIERT = True
+            log(f"⚠ Stephan: Agent: Einrichtung: {text}")
+        return None, None
+    return AGENT_USER, eintrag.pw_dir
+
+
 def run_agent(prompt: str) -> int:
     """Startet den Agenten; `timeout` beendet ihn hart, falls er selbst nicht aufhört.
 
     Der Agentenprozess bekommt `agent_env(ENV)` statt `ENV`: nur die Allowlist und der
     Modellschlüssel, sonst keine Geheimnisse (#35). `ENV` statt `os.environ` ist nötig, weil nur dort der PATH-Zusatz
     `/root/venv/bin:/root/.opencode/bin` steht; die Worker-Units setzen keinen PATH, und
-    `pytest` liegt nur im venv (#72). Die bei OpenCode ungefiltert gedruckte Ausgabe läuft
-    durch `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home Assistant kommt."""
+    `pytest` liegt nur im venv (#72). Läuft der Takt als root, startet der Agent als
+    `AGENT_USER` mit dessen Home (#217); damit reicht ein Ausbruch aus dem Werkzeugkasten
+    nicht mehr an die Geheimnisse des Hosts. Die bei OpenCode ungefiltert gedruckte Ausgabe
+    läuft durch `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home
+    Assistant kommt."""
     cmd = ["timeout", "-k", "30", str(RUN_TIMEOUT + 60), *agent_cmd(prompt)]
-    with subprocess.Popen(cmd, cwd=WORKDIR, env=agent_env(ENV), stdout=subprocess.PIPE,
+    env = agent_env(ENV)
+    user, home = agent_identitaet()
+    if user:
+        # gh und qwen suchen ihre Konfiguration im Home des laufenden Nutzers, nicht in /root.
+        env["HOME"] = home
+    with subprocess.Popen(cmd, cwd=WORKDIR, env=env, user=user, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                           errors="replace") as proc:
         for line in proc.stdout:
