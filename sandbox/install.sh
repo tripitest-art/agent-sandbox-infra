@@ -141,8 +141,9 @@ grep -q 'source /root/venv/bin/activate' /root/.bashrc || echo 'source /root/ven
 echo "== Agenten-Nutzer (Rechte-Drop)"
 # #217: Der Agentenprozess läuft nicht als root, sondern als eigener unprivilegierter Nutzer
 # (worker_tick.AGENT_USER). Shell-Aufrufe des Modells kommen damit nicht mehr an /etc/*.env
-# (600 root), /root/.config/gh oder die Worktrees der anderen Slots; das ist die Absicherung
-# auf Betriebssystemebene unterhalb von agent_env().
+# (600 root) oder /root/.config/gh; das ist die Absicherung auf Betriebssystemebene unterhalb
+# von agent_env(). Die Worktrees der anderen Slots gehören (siehe unten) demselben Nutzer und
+# bleiben für den Agenten lesbar – echte Isolation je Slot wäre eine eigene Aufgabe.
 AGENT_USER=${AGENT_USER:-worker}
 if id -u "$AGENT_USER" &>/dev/null; then
   echo "Nutzer $AGENT_USER: vorhanden"
@@ -186,9 +187,12 @@ for dir in $(project_workdirs); do
   done
 done
 # /root ist 700: ohne Durchqueren käme der Agent nicht einmal in seinen Worktree. Die Gruppe
-# darf nur durch (/root bleibt unlesbar); /etc/*.env und gh-hosts.yml bleiben 600 root.
+# darf nur durch (/root selbst bleibt ohne r, ein Verzeichnis-Listing ist also nicht möglich);
+# /etc/*.env und gh-hosts.yml bleiben 600 root. Dateien unter /root sind davon unberührt –
+# systemd legt worker.log mit 644 an, deshalb hier ausdrücklich nur für root lesbar.
 chgrp "$AGENT_USER" /root
 chmod g+x /root
+chmod 600 /root/worker.log /root/audit.jsonl 2>/dev/null || true
 # Geheimnisdateien unlesbar für andere Nutzer halten (Regel 5). Fehlen sie, ist das kein Fehler:
 # qwen-reviewer.env gibt es nur mit Review-Key, agent-dashboard.env nur mit DASHBOARD=1.
 chmod 600 /etc/qwen-reviewer.env /etc/agent-dashboard.env 2>/dev/null || true

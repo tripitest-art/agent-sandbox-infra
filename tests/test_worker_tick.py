@@ -2375,6 +2375,35 @@ def test_alarm_kuerzt_lange_mehrzeilige_meldung(capsys):
     assert line.endswith("…")
 
 
+def test_agent_identitaet_meldet_fehlenden_nutzer_einmal_kritisch(monkeypatch, capsys):
+    """#217/Regel 7: Fehlt der Agenten-Nutzer, läuft der Agent als root – das ist einmal eine
+    „⚠ Stephan:“-Zeile, danach nur noch eine WARNUNG (keine Benachrichtigungs-Flut)."""
+    def fehlt(name):
+        raise KeyError(name)
+
+    monkeypatch.setattr(w.os, "name", "posix")
+    monkeypatch.setattr(w.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(w.pwd, "getpwnam", fehlt)
+    monkeypatch.setattr(w, "_IDENTITAET_ALARMIERT", False)
+
+    assert w.agent_identitaet() == (None, None)
+    out = capsys.readouterr().out
+    assert out.count("⚠ Stephan:") == 1
+    assert f"Nutzer {w.AGENT_USER} fehlt" in out and "root" in out
+
+    assert w.agent_identitaet() == (None, None)
+    out = capsys.readouterr().out
+    assert "⚠ Stephan:" not in out
+    assert "WARNUNG:" in out
+
+
+def test_agent_identitaet_ohne_root_bleibt_beim_takt(monkeypatch):
+    """Ohne root-Rechte gibt es keinen Rechte-Drop: Nutzer und Home erbt der Agent wie bisher."""
+    monkeypatch.setattr(w.os, "name", "posix")
+    monkeypatch.setattr(w.os, "geteuid", lambda: 1000)
+    assert w.agent_identitaet() == (None, None)
+
+
 def test_main_meldet_absturz_der_auftragsausfuehrung(monkeypatch, capsys):
     """Regel 7: der Absturz mitten im Auftrag wird mit dem Schlüssel der Arbeit gemeldet."""
     def boom():

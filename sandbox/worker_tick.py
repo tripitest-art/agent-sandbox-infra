@@ -1826,20 +1826,32 @@ def log_stream_line(line: str) -> None:
             f"{round((event.get('duration_ms') or 0) / 1000)} s{format_usage(event.get('usage'))}]")
 
 
+# #217: Fehlt der Agenten-Nutzer, läuft der Agent als root – das ist der ungeschützte Zustand,
+# den #217 beheben soll. Deshalb genau eine „⚠ Stephan:“-Zeile je Takt-Prozess (Push-
+# Benachrichtigung), die Wiederholung nur noch als WARNUNG, damit keine Flut entsteht.
+_IDENTITAET_ALARMIERT = False
+
+
 def agent_identitaet() -> tuple[str | None, str | None]:
     """(Nutzer, Home) für den Rechte-Drop des Agentenprozesses, sonst (None, None) (#217).
 
     Nur wenn der Takt selbst als root läuft und `AGENT_USER` existiert, startet der Agent
     unter diesem Nutzer; sonst erbt er Nutzer und Home des Takts wie bisher. Ein fehlender
-    Nutzer ist ein Einrichtungsfehler (sandbox/install.sh legt ihn an) und wird deshalb
-    geloggt, statt still ohne die Absicherung als root weiterzulaufen."""
+    Nutzer ist ein Einrichtungsfehler (sandbox/install.sh legt ihn an) und läuft deshalb
+    nicht still als root weiter: die erste Meldung ist eine „⚠ Stephan:“-Zeile (Regel 7)."""
+    global _IDENTITAET_ALARMIERT
     if os.name == "nt" or os.geteuid() != 0:
         return None, None
     try:
         eintrag = pwd.getpwnam(AGENT_USER)
     except KeyError:
-        log(f"WARNUNG: Nutzer {AGENT_USER} fehlt; der Agent läuft als root. "
-            "sandbox/install.sh legt ihn an.")
+        text = (f"Nutzer {AGENT_USER} fehlt; der Agent läuft als root. "
+                "sandbox/install.sh legt ihn an.")
+        if _IDENTITAET_ALARMIERT:
+            log(f"WARNUNG: {text}")
+        else:
+            _IDENTITAET_ALARMIERT = True
+            log(f"⚠ Stephan: Agent: Einrichtung: {text}")
         return None, None
     return AGENT_USER, eintrag.pw_dir
 
