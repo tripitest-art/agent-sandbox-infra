@@ -135,6 +135,40 @@ def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{tag}] {msg}", flush=True)
 
 
+# Audit-Log (#235): je Ereignis eine JSON-Zeile wie in worker_tick (#85) — maschinell auswertbar,
+# anders als der Fließtext im Log. audit() liest den Pfad bei jedem Aufruf aus dem Modulglobal neu,
+# damit Tests ihn belegen können, und legt die Datei bei Bedarf an.
+AUDIT_LOG: str = os.environ.get("AUDIT_LOG", "/root/audit.jsonl")
+# Feldnamen, deren Wert nie im Klartext ins Audit-Log geht (Regel 5); Groß-/Kleinschreibung egal.
+_AUDIT_SECRET_KEYS = frozenset({"password", "secret", "api_key", "authorization", "token"})
+
+
+def audit(event: str, **fields) -> None:
+    """Hängt eine JSON-Zeile an AUDIT_LOG: ts (UTC, ISO 8601), event, repo (REPO),
+    model (REVIEW_MODEL) und fields.
+
+    REPO und REVIEW_MODEL werden bei jedem Aufruf neu gelesen; use_project() schaltet REPO je
+    Projekt um, die Zeile nennt damit das Projekt, das gerade geprüft wird. Die Grundfelder stehen
+    vor fields und sind deshalb überschreibbar: review_finished nennt das Modell, das wirklich
+    geantwortet hat (nach einem Ausweichen ein anderes als REVIEW_MODEL).
+
+    Nicht serialisierbare Werte gehen per `str()` hinein. Felder namens password, secret,
+    api_key, authorization oder token erscheinen als „***“ (Regel 5), alle anderen unverändert.
+    Wirft nie: scheitert das Schreiben, kommt eine log()-Zeile „Audit-Log nicht schreibbar:
+    <Fehlerklasse>“ — ohne den Inhalt der Zeile, damit kein Geheimnis über die Fehlermeldung
+    entweicht."""
+    try:
+        zeile: dict[str, object] = {"ts": datetime.now(timezone.utc).isoformat(),
+                                    "event": event, "repo": REPO, "model": REVIEW_MODEL}
+        for name, value in fields.items():
+            zeile[name] = "***" if name.lower() in _AUDIT_SECRET_KEYS else value
+        text = json.dumps(zeile, ensure_ascii=False, default=str)   # erst serialisieren, dann öffnen
+        with open(AUDIT_LOG, "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    except Exception as e:
+        log(f"Audit-Log nicht schreibbar: {type(e).__name__}")
+
+
 def safe_snippet(text: str | None, limit: int = 60) -> str:
     """Einzeilige, gekürzte Fassung von Fremdtext für Log- und Meldezeilen.
     - None wird zu "".
@@ -734,6 +768,7 @@ def merge_pr(number: int, sha: str) -> bool:
     try:
         gh_text("pr", "merge", str(number), "--squash", "--match-head-commit", sha)
         log(f"PR #{number}: erfolgreich gemergt (--squash).")
+        audit("pr_merged", pr=number, sha=sha)
         return True
     except subprocess.CalledProcessError as exc:
         log(f"PR #{number}: Merge fehlgeschlagen ({safe_snippet(exc.stderr, 160)}).")
@@ -743,6 +778,8 @@ def merge_pr(number: int, sha: str) -> bool:
 def to_stephan(n: int, key: str, reason: str, state: dict) -> None:
     """PR liegt bei Stephan: einmal je Commit melden (Log, mit REVIEW_POST=1 auch Label und Kommentar)."""
     log(f"PR #{n}: ⚠ Stephan: {reason}")
+    # Der Schlüssel ist „pr<N>@<sha>“; andere Schlüssel (Tests, Sonderfälle) nennen keinen Commit.
+    audit("to_stephan", pr=n, sha=key.split("@", 1)[1] if "@" in key else "", reason=reason)
     gemeldet = state.setdefault("gemeldet", [])
     if not POST or key in gemeldet:
         return
@@ -977,6 +1014,9 @@ def _run_pr_review() -> int:
             state.setdefault("erledigt", []).append(key); save_state(state)
             to_stephan(n, key, f"nach {MAX_ROUNDS} Runden „Änderungen nötig“ noch nicht fertig.", state)
             return 0
+        # #235: Erst jetzt beginnt wirklich eine Prüfung. „Checks laufen noch“ (oben) und ein schon
+        # vorliegender Entwurf, der nur noch gepostet wird, sind kein neuer Start auf diesem Commit.
+        audit("review_started", pr=n, sha=pr["headRefOid"])
         if red:
             # Ohne Modellaufruf; REVIEWER_NAME steht hier nur in der Zeile, geprüft wird nichts.
             no_model = True
@@ -1070,6 +1110,13 @@ def _run_pr_review() -> int:
     if problem:
         log(f"PR #{n}: Entwurf {verdict}, aber {safe_snippet(problem, 200)}; nicht gepostet ({path}).")
         return 0
+    # #235: Ein fertiges Review (gepostet oder als Entwurf gespeichert), erst nach dem Verwerfen
+    # oben. `kosten` summiert wie bei review_posted alle Aufrufe, auch den unbrauchbaren vor dem
+    # Ausweichen; model nennt das Modell, das wirklich geantwortet hat (rote Checks: REVIEWER_NAME).
+    audit("review_finished", pr=n, sha=pr["headRefOid"], verdict=verdict,
+          model=letztes_modell or REVIEWER_NAME,
+          usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                 "kosten": round(sum(kosten), 8) if kosten else (0.0 if no_model else None)})
     if POST:
         post_review(n, text)
         post_review_status(pr["headRefOid"], verdict)

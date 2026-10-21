@@ -60,6 +60,9 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setattr(r, "AUTO_MERGE", True)
     # #178: review_posted schreibt ins Audit-Log; je Test nach tmp_path, nie in /root/audit.jsonl.
     monkeypatch.setattr(r.worker_tick, "AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    # #235: dasselbe für das eigene Audit-Log des Review-Takts (review_started, review_finished,
+    # pr_merged, to_stephan) — audit() liest den Pfad aus dem Modulglobal.
+    monkeypatch.setattr(r, "AUDIT_LOG", str(tmp_path / "audit.jsonl"))
 
     def no_network(*a, **k):
         raise urllib.error.URLError("kein Netz im Test")
@@ -1395,4 +1398,106 @@ def test_unblock_nutzt_limit_fuer_blockierte_issues(monkeypatch):
     assert "--limit" in call
     idx = call.index("--limit")
     assert call[idx + 1] == str(r.BLOCKED_ISSUES_LIMIT)
+
+
+# --- Audit-Log des Review-Takts (Issue #235) ---
+
+def _audit_zeilen(path: Path) -> list[dict]:
+    return [json.loads(z) for z in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_audit_schreibt_grundfelder(tmp_path, monkeypatch):
+    """Jede Zeile nennt Zeitstempel (UTC), Ereignis, Repository und Review-Modell — ohne die
+    Angaben müsste die Auswertung wieder das Fließtext-Log parsen."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(r, "AUDIT_LOG", str(f))
+    monkeypatch.setattr(r, "REPO", "tripitest-art/sc-digger")
+    monkeypatch.setattr(r, "REVIEW_MODEL", "coder-glm")
+    r.audit("review_started", pr=7, sha=SHA)
+    z = _audit_zeilen(f)[0]
+    assert z["event"] == "review_started" and z["repo"] == "tripitest-art/sc-digger"
+    assert z["model"] == "coder-glm" and z["pr"] == 7 and z["sha"] == SHA
+    assert z["ts"].endswith("+00:00")
+
+
+def test_audit_ueberschreibt_grundfelder_nur_mit_aufrufer_werten(tmp_path, monkeypatch):
+    """review_finished nennt das Modell, das wirklich geantwortet hat: Aufruferfelder gelten zuletzt,
+    wie in worker_tick.audit()."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(r, "AUDIT_LOG", str(f))
+    monkeypatch.setattr(r, "REVIEW_MODEL", "coder-glm")
+    r.audit("review_finished", model="longctx-lite", usage={"prompt_tokens": 5})
+    z = _audit_zeilen(f)[0]
+    assert z["model"] == "longctx-lite" and z["usage"] == {"prompt_tokens": 5}
+
+
+def test_audit_maskiert_geheimnisse(tmp_path, monkeypatch):
+    """Regel 5: Felder wie token oder api_key stehen nur als „***“ im Audit-Log."""
+    f = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(r, "AUDIT_LOG", str(f))
+    r.audit("x", token="sk-geheim", api_key="secret", Authorization="Bearer geheim", normal=1)
+    z = _audit_zeilen(f)[0]
+    assert z["token"] == "***" and z["api_key"] == "***" and z["Authorization"] == "***"
+    assert z["normal"] == 1
+    assert "geheim" not in f.read_text(encoding="utf-8")
+
+
+def test_audit_wirft_nie_und_nennt_nur_die_fehlerklasse(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(r, "AUDIT_LOG", str(tmp_path / "fehlt" / "audit.jsonl"))
+    r.audit("x", daten="NICHT-LOGGEN")
+    out = capsys.readouterr().out
+    assert "Audit-Log nicht schreibbar: FileNotFoundError" in out
+    assert "NICHT-LOGGEN" not in out
+
+
+def test_review_started_und_finished_im_audit(monkeypatch, tmp_path):
+    """Ein vollständiger Review lässt sich aus dem Audit-Log nachvollziehen: Start mit geprüftem
+    Commit, Ende mit Urteil, antwortendem Modell und Token-Zahlen."""
+    _fake_github(monkeypatch, [_pr()])
+    r.run_once()
+    ev = _audit_zeilen(tmp_path / "audit.jsonl")
+    start = [e for e in ev if e["event"] == "review_started"]
+    ende = [e for e in ev if e["event"] == "review_finished"]
+    assert len(start) == 1 and start[0]["pr"] == 7 and start[0]["sha"] == SHA
+    assert len(ende) == 1
+    e = ende[0]
+    assert e["pr"] == 7 and e["sha"] == SHA and e["verdict"] == "**Freigegeben**"
+    assert e["model"] == "coder-glm"
+    assert e["usage"] == {"prompt_tokens": 1000, "completion_tokens": 100, "kosten": None}
+
+
+def test_review_finished_nennt_die_kosten_des_modellaufrufs(monkeypatch, tmp_path):
+    _fake_github(monkeypatch, [_pr()])
+    monkeypatch.setattr(r, "call_llm", lambda m, msg: (OK_REVIEW, {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.005}))
+    r.run_once()
+    e = [x for x in _audit_zeilen(tmp_path / "audit.jsonl") if x["event"] == "review_finished"][0]
+    assert e["usage"] == {"prompt_tokens": 10, "completion_tokens": 2, "kosten": 0.005}
+
+
+def test_kein_review_started_wenn_die_checks_noch_laufen(monkeypatch, tmp_path):
+    """„Checks laufen noch“ ist kein Review-Start: erst ein prüfbarer PR erzeugt ein Ereignis,
+    sonst zählt jede Warteschleife als Prüfung."""
+    _fake_github(monkeypatch, [_pr(statusCheckRollup=[{"name": "tests", "status": "IN_PROGRESS", "conclusion": None}])])
+    r.run_once()
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+def test_pr_merged_im_audit(monkeypatch, tmp_path):
+    """Nach dem automatischen Squash-Merge nennt das Audit-Log PR und gemergten Commit."""
+    monkeypatch.setattr(r, "POST", True)
+    calls = _github_with_merge(monkeypatch, merge_mode="automatisch")
+    r.run_once()
+    assert calls["merged"] == ["7"]
+    ev = [e for e in _audit_zeilen(tmp_path / "audit.jsonl") if e["event"] == "pr_merged"]
+    assert len(ev) == 1 and ev[0]["pr"] == 7 and ev[0]["sha"] == SHA
+
+
+def test_to_stephan_im_audit(monkeypatch, tmp_path):
+    """Die Übergabe an Stephan steht mit PR und Grund im Audit-Log; der Commit kommt aus dem
+    Zustandsschlüssel „pr<N>@<sha>“."""
+    monkeypatch.setattr(r, "gh_text", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)))
+    r.to_stephan(7, f"pr7@{SHA}", "Freigegeben, Merge-Modus manuell", {})
+    e = _audit_zeilen(tmp_path / "audit.jsonl")[-1]
+    assert e["event"] == "to_stephan" and e["pr"] == 7 and e["sha"] == SHA
+    assert e["reason"] == "Freigegeben, Merge-Modus manuell"
 
