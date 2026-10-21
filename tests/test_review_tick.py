@@ -129,6 +129,8 @@ def test_garbage_after_valid_start_is_not_saved_as_review(monkeypatch, tmp_path)
 
 def test_worker_family_and_same_family():
     assert r.model_family("DeepSeek (LiteLLM coder-fast)") == "deepseek"
+    assert r.model_family("DeepSeek (LiteLLM coder-go, OpenCode Go)") == "deepseek"
+    assert r.model_family("coder-go") == "deepseek"
     assert r.model_family("GLM 5.3 Flash (LiteLLM coder-glm)") == "glm"
     assert r.model_family("Qwen3-Coder 30B") == "qwen"
     assert r.model_family("coder-fast (LiteLLM)") == "deepseek"   # so steht es bei unbekannten Aliasen im PR
@@ -144,6 +146,7 @@ def test_worker_family_and_same_family():
 
 def test_worker_family_resolves_the_names_from_the_worker_table():
     assert r.worker_family("DeepSeek (LiteLLM coder-fast)") == "deepseek"
+    assert r.worker_family("DeepSeek (LiteLLM coder-go, OpenCode Go)") == "deepseek"
     assert r.worker_family("Codestral (LiteLLM coder-free)") == "mistral"
     assert r.worker_family("Qwen 2.5 Coder (LiteLLM coder-nvidia, NVIDIA NIM)") == "qwen"
     assert r.worker_family("Qwen 2.5 Coder (LiteLLM coder-qwen)") == "qwen"

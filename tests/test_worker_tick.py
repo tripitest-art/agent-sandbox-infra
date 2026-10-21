@@ -1180,6 +1180,7 @@ def test_main_litellm_zaehlt_bei_leerem_budget_keinen_versuch(monkeypatch, tmp_p
 
 def test_worker_names():
     assert w.worker_name("coder") == "DeepSeek (LiteLLM coder)"
+    assert w.worker_name("coder-go") == "DeepSeek (LiteLLM coder-go, OpenCode Go)"
     assert w.worker_name("coder-glm") == "GLM 5.3 Flash (LiteLLM coder-glm)"
     assert w.worker_name("coder-qwen") == "Qwen 2.5 Coder (LiteLLM coder-qwen)"
     assert w.worker_name("coder-nvidia") == "Qwen 2.5 Coder (LiteLLM coder-nvidia, NVIDIA NIM)"
@@ -1189,7 +1190,8 @@ def test_worker_names():
 def test_default_fallbacks_prefer_same_model_family():
     # Fällt DeepSeek direkt aus, zuerst dasselbe Modell über OpenRouter, dann Codestral.
     if "LITELLM_FALLBACKS" not in w.os.environ:
-        assert w.LITELLM_FALLBACKS == ["coder-or", "coder-free"]
+        assert w.LITELLM_FALLBACKS == ["coder-go", "coder-or", "coder-free"]
+    assert w.worker_name("coder-go") == "DeepSeek (LiteLLM coder-go, OpenCode Go)"
     assert w.worker_name("coder-or") == "DeepSeek (LiteLLM coder-or, OpenRouter)"
 
 

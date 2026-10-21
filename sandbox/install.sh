@@ -26,7 +26,7 @@ LITELLM=${LITELLM:-http://192.168.0.211:4000}
 LITELLM_MODEL=${LITELLM_MODEL:-coder}           # Alias im LiteLLM-Proxy
 # Ausweichmodelle, wenn LITELLM_MODEL die Probe vor dem Lauf nicht besteht (worker_tick.py)
 # coder-or = dasselbe DeepSeek über OpenRouter (weicht dort auf andere Anbieter aus), dann Codestral
-LITELLM_FALLBACKS=${LITELLM_FALLBACKS:-coder-or,coder-free}
+LITELLM_FALLBACKS=${LITELLM_FALLBACKS:-coder-go,coder-or,coder-free}
 OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
 AGENT=${AGENT:-qwen-code}                       # oder opencode
