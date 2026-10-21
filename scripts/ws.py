@@ -69,8 +69,10 @@ def create(tool: str, repo: str, kurz: str, projects: Path, work: Path) -> Path:
         raise WsError(f"git fetch origin main ist gescheitert (Exit {fetch.returncode}); Zugriff auf origin prüfen")
 
     ziel.parent.mkdir(parents=True, exist_ok=True)
+    # --no-track: Der Branch geht von origin/main aus, soll ihm aber nicht folgen; sonst wäre
+    # origin/main sein Upstream und ein `git push` ohne Ziel würde dorthin zielen.
     add = subprocess.run(
-        ["git", "-C", str(main_clone), "worktree", "add", str(ziel), "-b", f"feature/{kurz}", "origin/main"]
+        ["git", "-C", str(main_clone), "worktree", "add", "--no-track", str(ziel), "-b", f"feature/{kurz}", "origin/main"]
     )
     if add.returncode != 0:
         raise WsError(f"git worktree add ist gescheitert (Exit {add.returncode}); gibt es feature/{kurz} schon?")

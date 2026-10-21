@@ -73,6 +73,15 @@ def test_geht_vom_aktuellen_origin_main_aus_nicht_vom_alten_klon_stand(lage):
     assert git("rev-parse", "HEAD", cwd=ziel) == git("rev-parse", "main", cwd=lage["origin"])
 
 
+def test_neuer_branch_hat_keinen_upstream(lage):
+    """Ohne --no-track folgte feature/<kurz> dem origin/main und ein `git push` wirkte dorthin."""
+    ws.create("claude", "demo", "aufgabe-1", lage["projects"], lage["work"])
+
+    upstream = git("for-each-ref", "--format=%(upstream)", "refs/heads/feature/aufgabe-1", cwd=lage["projects"] / "demo")
+
+    assert upstream == ""
+
+
 def test_jedes_werkzeug_bekommt_seinen_eigenen_ordner(lage):
     a = ws.create("claude", "demo", "eins", lage["projects"], lage["work"])
     b = ws.create("opencode", "demo", "zwei", lage["projects"], lage["work"])
