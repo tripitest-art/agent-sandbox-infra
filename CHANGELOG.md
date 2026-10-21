@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `worker_tick`: Issue-Aufträge bekommen Branch und Akzeptanztest-Commit jetzt über `prepare_issue_frame()` aus `worker_frame` (deterministisch, ohne Modell); `autofix_pr_text()` vervollständigt einen unvollständigen PR-Text direkt per `gh pr edit` und fällt bei einem `gh`-Fehler auf `warn_text()` zurück (PR folgt).
 - Doku: `CLAUDE.md` (Einzeiler `@AGENTS.md`) und README-Abschnitt „Planer-Umgebung (CT 106)“ mit Grenzen, Ordnern, Werkzeugen und Betrieb; keine Änderung an Code oder Aufsichtsdateien (#241).
 - `worker_frame`: neues Modul legt den Ziel-Branch `feature/issue-<N>` an, schreibt den Akzeptanztest-Block aus dem Issue zeichengenau als ersten Commit und baut aus der PR-Vorlage einen vertragskonformen PR-Text; im Takt noch nicht eingehängt (#233).
 - `worker_tick`: Verwaiste „in-arbeit“-Claims ohne offenen PR auf `issue_branch(N)` oder lebende Belegung nach `ORPHAN_MINUTEN` (45 min) automatisch freigeben (Label zurück auf `bereit`, `alarm()`- und `audit()`-Meldung; Branches auf GitHub zählen nicht); Dauerkollisionen ab `KOLLISION_MELDUNG_MINUTEN` (60 min) genau einmal als `alarm()` melden (#206).

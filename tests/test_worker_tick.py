@@ -67,8 +67,9 @@ def _repo_workdir(monkeypatch, tmp_path):
     # (der Hook würde hier jeden Push sperren); Tests, die die Abfrage selbst prüfen, setzen
     # `git_hooks_dir` auf `_ECHTE_GIT_HOOKS_DIR` zurück.
     monkeypatch.setattr(w, "git_hooks_dir", lambda cwd: str(tmp_path / "git-hooks"))
-    # #171: prepare_issue_branch legt Zweige und Akzeptanztests in WORKDIR an. Nie im Test ins Repo.
-    monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+    # #234: prepare_issue_frame (worker_frame) legt Branch und Akzeptanztest-Commit in WORKDIR an.
+    # In Tests ist WORKDIR dieses Repo, ein echter `git checkout -B` gehörte hier nicht hin (#171).
+    monkeypatch.setattr(w, "prepare_issue_frame", lambda n: True)
     # #208: sync_issue_branch_with_main merged origin/main in WORKDIR; in Tests ist das dieses Repo.
     # Nie echter git-Verkehr aus einem Test heraus.
     monkeypatch.setattr(w, "sync_issue_branch_with_main", lambda n: True)
@@ -81,6 +82,7 @@ def _repo_workdir(monkeypatch, tmp_path):
 
 _ECHTE_GIT_HOOKS_DIR = w.git_hooks_dir    # vor dem Autouse-Fixture gesichert (#68)
 _ECHTE_PREPARE_ISSUE_BRANCH = w.prepare_issue_branch  # vor dem Autouse-Fixture gesichert (#171)
+_ECHTE_PREPARE_ISSUE_FRAME = w.prepare_issue_frame  # vor dem Autouse-Fixture gesichert (#234)
 _ECHTE_SYNC_ISSUE_BRANCH = w.sync_issue_branch_with_main  # vor dem Autouse-Fixture gesichert (#208)
 _ECHTE_OPEN_PR = w.open_pr  # vor dem Autouse-Fixture gesichert (#172)
 _ECHTE_VERWAISTE_MELDEN = w.verwaiste_melden  # vor dem Autouse-Fixture gesichert (#183)
@@ -234,16 +236,33 @@ def test_issue_job_ignores_foreign_issue(monkeypatch):
 
 
 def test_check_issue_result(monkeypatch, capsys):
-    fake = FakeGH(prs=[{"number": 111}])
+    """#234: Ein vollständiger PR-Text bleibt unberührt, `gh pr edit` läuft nicht."""
+    fake = FakeGH(prs=[{"number": 111, "body": _good_body(102)}])
     monkeypatch.setattr(w, "gh", fake)
     w.check_issue_result("issue102")
     assert "PR #111 von feature/issue-102 ist offen" in capsys.readouterr().out
     listed = next(c for c in fake.calls if c[:2] == ("pr", "list"))
     assert "feature/issue-102" in listed
+    assert not any(c[:2] == ("pr", "edit") for c in fake.calls)
 
     monkeypatch.setattr(w, "gh", FakeGH(prs=[]))
     w.check_issue_result("issue102")
     assert "WARNUNG issue102: kein PR von feature/issue-102" in capsys.readouterr().out
+
+
+def test_autofix_pr_text_faellt_bei_gh_fehler_auf_warn_text_zurueck(monkeypatch):
+    """#234: Scheitert `gh pr edit`, wird der Text nicht stillschweigend als repariert gemeldet."""
+    def fail(*args):
+        raise RuntimeError("gh nicht erreichbar")
+
+    gemeldet = []
+    monkeypatch.setattr(w, "gh", fail)
+    monkeypatch.setattr(w, "pr_template", lambda: "## Was und warum\n\nCloses #\n")
+    monkeypatch.setattr(w, "warn_text",
+                        lambda key, pr_no, body, issue_no: gemeldet.append((key, pr_no, body, issue_no)))
+
+    assert w.autofix_pr_text(112, 102, "unvollständig") is False
+    assert gemeldet == [("issue102", 112, "unvollständig", 102)]
 
 
 def test_issue_job_none(monkeypatch):
@@ -1606,8 +1625,8 @@ def test_main_startet_den_agenten_nicht_ohne_hook(monkeypatch, tmp_path, capsys)
     assert "⚠ Stephan: issue7: Fehler: " in capsys.readouterr().out
 
 
-def test_main_ruft_prepare_issue_branch_nach_hook_und_vor_agent(monkeypatch, tmp_path):
-    """#171: prepare_issue_branch läuft für Issue-Aufträge genau einmal nach hook und vor run_agent."""
+def test_main_ruft_prepare_issue_frame_nach_hook_und_vor_agent(monkeypatch, tmp_path):
+    """#234: prepare_issue_frame läuft für Issue-Aufträge genau einmal nach hook und vor run_agent."""
     schritte = []
     monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
     monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
@@ -1628,9 +1647,9 @@ def test_main_ruft_prepare_issue_branch_nach_hook_und_vor_agent(monkeypatch, tmp
     def fake_prepare(n):
         schritte.append(f"branch_{n}")
         aufrufe.append(n)
-        return True
+        return tmp_path / f"test_issue_{n}.py"
 
-    monkeypatch.setattr(w, "prepare_issue_branch", fake_prepare)
+    monkeypatch.setattr(w, "prepare_issue_frame", fake_prepare)
     monkeypatch.setattr(w, "run_agent", lambda prompt: schritte.append("agent") or 0)
 
     assert w.main() == 0
@@ -1638,8 +1657,8 @@ def test_main_ruft_prepare_issue_branch_nach_hook_und_vor_agent(monkeypatch, tmp
     assert schritte == ["workdir", "hook", "branch_7", "agent"]
 
 
-def test_main_ruft_prepare_issue_branch_nie_fuer_nacharbeit_oder_text(monkeypatch, tmp_path):
-    """#171: prepare_issue_branch läuft nie für Nacharbeit oder PR-Text."""
+def test_main_ruft_prepare_issue_frame_nie_fuer_nacharbeit_oder_text(monkeypatch, tmp_path):
+    """#234: prepare_issue_frame läuft nie für Nacharbeit oder PR-Text."""
     for job_key, pr_no, before in [
         ("pr103@2026-09-29T21:39:23Z", 103, ("3373e35", "commit")),
         ("text7@3373e35", 7, ("3373e35", "commit")),
@@ -1661,7 +1680,7 @@ def test_main_ruft_prepare_issue_branch_nie_fuer_nacharbeit_oder_text(monkeypatc
         monkeypatch.setattr(w, "warn_text", lambda *a: None)
 
         aufgerufen = []
-        monkeypatch.setattr(w, "prepare_issue_branch", lambda n: aufgerufen.append(n) or True)
+        monkeypatch.setattr(w, "prepare_issue_frame", lambda n: aufgerufen.append(n) or tmp_path / "x")
         monkeypatch.setattr(w, "run_agent", lambda prompt: schritte.append("agent") or 0)
 
         assert w.main() == 0
@@ -1669,8 +1688,8 @@ def test_main_ruft_prepare_issue_branch_nie_fuer_nacharbeit_oder_text(monkeypatc
         assert schritte == ["agent"]
 
 
-def test_main_startet_agent_nicht_wenn_prepare_issue_branch_false(monkeypatch, tmp_path, capsys):
-    """#171: Scheitert prepare_issue_branch, startet kein Agent, Stephan wird alarmiert und Status wird idle."""
+def test_main_startet_agent_nicht_wenn_prepare_issue_frame_none(monkeypatch, tmp_path, capsys):
+    """#234: Ohne Akzeptanztest-Block (None) startet kein Agent, Stephan wird alarmiert, Status idle."""
     schritte = []
     status_calls = []
     monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
@@ -1686,7 +1705,7 @@ def test_main_startet_agent_nicht_wenn_prepare_issue_branch_false(monkeypatch, t
     monkeypatch.setattr(w, "check_issue_result", lambda k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: schritte.append("workdir"))
     monkeypatch.setattr(w, "ensure_pre_push_hook", lambda: schritte.append("hook"))
-    monkeypatch.setattr(w, "prepare_issue_branch", lambda n: False)
+    monkeypatch.setattr(w, "prepare_issue_frame", lambda n: None)
     monkeypatch.setattr(w, "run_agent", lambda prompt: schritte.append("agent") or 0)
 
     assert w.main() == 0
@@ -1698,7 +1717,7 @@ def test_main_startet_agent_nicht_wenn_prepare_issue_branch_false(monkeypatch, t
 
 
 def _lauf_mit_branch_sync(monkeypatch, tmp_path, prepare_ok=True, workdir_existiert=True):
-    """main() mit einem Issue-Auftrag; zeichnet prepare_issue_branch, sync und Agent in `schritte` auf."""
+    """main() mit einem Issue-Auftrag; zeichnet prepare_issue_frame, sync und Agent in `schritte` auf."""
     schritte = []
     arbeit = tmp_path / "wt"
     if workdir_existiert:
@@ -1717,8 +1736,8 @@ def _lauf_mit_branch_sync(monkeypatch, tmp_path, prepare_ok=True, workdir_existi
     monkeypatch.setattr(w, "check_issue_result", lambda k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: schritte.append("workdir"))
     monkeypatch.setattr(w, "ensure_pre_push_hook", lambda: schritte.append("hook"))
-    monkeypatch.setattr(w, "prepare_issue_branch",
-                        lambda n: schritte.append(f"branch_{n}") or prepare_ok)
+    monkeypatch.setattr(w, "prepare_issue_frame",
+                        lambda n: schritte.append(f"branch_{n}") or (tmp_path / "x" if prepare_ok else None))
     monkeypatch.setattr(w, "sync_issue_branch_with_main",
                         lambda n: schritte.append(f"sync_{n}") or True)
     monkeypatch.setattr(w, "run_agent", lambda prompt: schritte.append("agent") or 0)
@@ -1726,14 +1745,14 @@ def _lauf_mit_branch_sync(monkeypatch, tmp_path, prepare_ok=True, workdir_existi
 
 
 def test_main_synct_origin_main_nach_erfolgreicher_branchvorbereitung(monkeypatch, tmp_path):
-    """#208: sync_issue_branch_with_main läuft einmal direkt nach prepare_issue_branch und vor dem Agenten."""
+    """#208: sync_issue_branch_with_main läuft einmal direkt nach prepare_issue_frame und vor dem Agenten."""
     schritte = _lauf_mit_branch_sync(monkeypatch, tmp_path)
     assert w.main() == 0
     assert schritte == ["workdir", "hook", "branch_7", "sync_7", "agent"]
 
 
 def test_main_synct_nicht_wenn_branchvorbereitung_scheitert(monkeypatch, tmp_path, capsys):
-    """#208: Ohne Branchvorbereitung (False) gibt es keinen Merge und keinen Agentenlauf."""
+    """#208/#234: Ohne Akzeptanztest-Block (None) gibt es keinen Merge und keinen Agentenlauf."""
     schritte = _lauf_mit_branch_sync(monkeypatch, tmp_path, prepare_ok=False)
     assert w.main() == 0
     assert schritte == ["workdir", "hook", "branch_7"]
@@ -1820,6 +1839,59 @@ def test_prepare_issue_branch_laesst_called_process_error_durch(monkeypatch, tmp
         w.prepare_issue_branch(7)
 
 
+def test_prepare_issue_frame_legt_branch_und_test_mit_env_und_cwd_an(monkeypatch, tmp_path, capsys):
+    """#234: gh liefert den Issue-Text, git läuft in WORKDIR mit ENV; der Test wird als Commit gesichert."""
+    monkeypatch.setattr(w, "prepare_issue_frame", _ECHTE_PREPARE_ISSUE_FRAME)
+    arbeit = tmp_path / "wt"
+    arbeit.mkdir()
+    monkeypatch.setattr(w, "WORKDIR", str(arbeit))
+    gesehen = []
+    block = "def test_ok():\n    assert True\n"
+    body = "### Akzeptanztests\n\n```python\n" + block + "```\n"
+    monkeypatch.setattr(w, "gh", lambda *args: gesehen.append(args) or {"body": body})
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((list(cmd), kw))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    path = w.prepare_issue_frame(42)
+
+    assert gesehen == [("issue", "view", "42", "--json", "body")]
+    assert path == arbeit / "tests" / "acceptance" / "test_issue_42.py"
+    assert path.read_text(encoding="utf-8") == block
+    assert [c for c, _ in calls] == [
+        ["git", "checkout", "-B", "feature/issue-42"],
+        ["git", "add", "tests/acceptance/test_issue_42.py"],
+        ["git", "commit", "-m", "Akzeptanztests aus #42"],
+    ]
+    assert all(kw.get("cwd") == str(arbeit) for _, kw in calls)
+    assert all(kw.get("env") == w.ENV for _, kw in calls)
+    assert all(kw.get("check") is True for _, kw in calls)
+    assert "issue42: Akzeptanztest vorab als Commit gesichert." in capsys.readouterr().out
+
+
+def test_prepare_issue_frame_ohne_block_meldet_keinen_commit(monkeypatch, tmp_path, capsys):
+    """#234: Ohne Akzeptanztest-Block wird nur der Branch gesetzt, kein Commit gemeldet."""
+    monkeypatch.setattr(w, "prepare_issue_frame", _ECHTE_PREPARE_ISSUE_FRAME)
+    arbeit = tmp_path / "wt"
+    arbeit.mkdir()
+    monkeypatch.setattr(w, "WORKDIR", str(arbeit))
+    monkeypatch.setattr(w, "gh", lambda *args: {"body": "### Ziel\n\nNur Text.\n"})
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    assert w.prepare_issue_frame(42) is None
+    assert calls == [["git", "checkout", "-B", "feature/issue-42"]]
+    assert "Akzeptanztest vorab als Commit gesichert" not in capsys.readouterr().out
+
+
 def test_main_ruft_open_pr_nach_agent_und_vor_check_issue_result(monkeypatch, tmp_path):
     """#172: open_pr läuft für Issue-Aufträge genau einmal nach dem Agentenlauf und vor check_issue_result."""
     schritte = []
@@ -1834,7 +1906,7 @@ def test_main_ruft_open_pr_nach_agent_und_vor_check_issue_result(monkeypatch, tm
     monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: None)
-    monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+    monkeypatch.setattr(w, "prepare_issue_frame", lambda n: True)
     monkeypatch.setattr(w, "run_agent", lambda prompt: schritte.append("agent") or 0)
     aufrufe = []
     monkeypatch.setattr(w, "open_pr", lambda n: aufrufe.append(n) or schritte.append("open_pr") or True)
@@ -1886,7 +1958,7 @@ def test_main_ruft_open_pr_nicht_nach_anbieterfehler(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: None)
-    monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+    monkeypatch.setattr(w, "prepare_issue_frame", lambda n: True)
 
     def run_with_apierr(prompt):
         w.LAST_AGENT_ERROR = "API 429: Budget exceeded"
@@ -1914,7 +1986,7 @@ def test_main_behandelt_ausnahme_aus_open_pr(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: None)
-    monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+    monkeypatch.setattr(w, "prepare_issue_frame", lambda n: True)
     monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
 
     class FailingGH:
@@ -1991,7 +2063,7 @@ def test_main_meldet_fehlendes_workdir_in_open_pr_und_prueft_ergebnis(monkeypatc
     monkeypatch.setattr(w, "claim_issue", lambda n: True)
     monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: None)
-    monkeypatch.setattr(w, "prepare_issue_branch", lambda n: True)
+    monkeypatch.setattr(w, "prepare_issue_frame", lambda n: True)
     monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
     monkeypatch.setattr(w, "gh", lambda *args: [] if args[:2] == ("pr", "list") else {})
 

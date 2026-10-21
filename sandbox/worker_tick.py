@@ -49,6 +49,7 @@ from typing import Callable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py liegt daneben
 import agent_settings  # noqa: E402
 import projects  # noqa: E402
+import worker_frame  # noqa: E402  (#234) deterministischer Rahmen für Branch, Test und PR-Text
 
 PROJECTS = projects.load_projects()   # ohne /etc/agent-projects.json: sc-digger allein
 # Aktives Projekt dieses Laufs. Ohne Projektliste bleiben die Vorgaben und die Umgebung (BASE_WORKDIR,
@@ -1681,14 +1682,37 @@ Du gibst den PR nie selbst frei und mergst nie; das macht der Reviewer.
 
 
 def check_issue_result(key: str) -> None:
-    """Nicht still scheitern: Gibt es nach dem Lauf einen PR vom Branch des Issues?"""
+    """Nicht still scheitern: Gibt es nach dem Lauf einen PR vom Branch des Issues?
+
+    Ein unvollständiger PR-Text wird sofort ohne Modelllauf vervollständigt (#234); erst wenn das
+    scheitert, landet die Warnung im Log und der nächste Takt trägt den Text nach."""
     n = int(key.removeprefix("issue"))
     prs = gh("pr", "list", "--state", "open", "--head", issue_branch(n), "--json", "number,body")
     if prs:
         log(f"{key}: PR #{prs[0]['number']} von {issue_branch(n)} ist offen.")
-        warn_text(key, prs[0]["number"], prs[0].get("body"), n)
+        autofix_pr_text(prs[0]["number"], n, prs[0].get("body"))
     else:
         log(f"WARNUNG {key}: kein PR von {issue_branch(n)}, Issue nicht erledigt.")
+
+
+def autofix_pr_text(pr_no: int, issue_no: int, body: str | None = None) -> bool:
+    """Vervollständigt einen PR-Text ohne Modelllauf (`gh pr edit`), True bei Erfolg.
+
+    Fehlt nichts (`pr_text_problems`), gibt die Funktion False zurück und ruft kein `gh` auf.
+    Sonst baut sie mit `worker_frame.build_pr_body` einen vollständigen Text aus `pr_template()` und
+    `WORKER`, schreibt ihn per `gh("pr", "edit", …)` und loggt die fehlenden Teile. Scheitert `gh`,
+    fällt sie auf `warn_text` zurück (nächster Takt trägt nach) und gibt False zurück."""
+    missing = pr_text_problems(body, issue_no)
+    if not missing:
+        return False
+    text = worker_frame.build_pr_body(pr_template(), issue_no, WORKER)
+    try:
+        gh("pr", "edit", str(pr_no), "--body", text)
+    except Exception:
+        warn_text(f"issue{issue_no}", pr_no, body, issue_no)
+        return False
+    log(f"PR #{pr_no}: PR-Text deterministisch vervollständigt ({', '.join(missing)}).")
+    return True
 
 
 def warn_text(key: str, pr_no: int, body: str | None, issue_no: int) -> None:
@@ -2782,6 +2806,34 @@ def prepare_workdir() -> None:
             subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
 
 
+def prepare_issue_frame(issue_no: int) -> Path | None:
+    """Richtet für `issue_no` nach `prepare_workdir()` und `ensure_pre_push_hook()` im aktuellen
+    `WORKDIR` deterministisch den Branch `feature/issue-<issue_no>` und (falls vorhanden) den
+    ersten Commit mit `tests/acceptance/test_issue_<issue_no>.py` über
+    `worker_frame.setup_issue_branch` ein.
+
+    Existiert `WORKDIR` nicht (`not os.path.isdir(WORKDIR)`), tut die Funktion nichts und gibt
+    `None` zurück (damit bestehenden Tests mit gefaktem Arbeitsbaum keine zusätzlichen `gh`- oder
+    `git`-Aufrufe entstehen). Sonst liest sie den Issue-Text über
+    `gh("issue", "view", str(issue_no), "--json", "body")` und ruft
+    `worker_frame.setup_issue_branch(WORKDIR, issue_no, body, run)` auf, wobei `run` den
+    git-Befehl in `WORKDIR` mit `ENV` ausführt. Bei geschriebenem Akzeptanztest loggt sie
+    `issue<issue_no>: Akzeptanztest vorab als Commit gesichert.`; Rückgabe ist der Rückgabewert
+    von `setup_issue_branch` (Pfad der Datei oder `None` ohne Block)."""
+    if not os.path.isdir(WORKDIR):
+        return None
+    data = gh("issue", "view", str(issue_no), "--json", "body")
+    body = data.get("body") if isinstance(data, dict) else None
+
+    def run(cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, cwd=WORKDIR, env=ENV, check=True)
+
+    path = worker_frame.setup_issue_branch(WORKDIR, issue_no, body, run)
+    if path is not None:
+        log(f"issue{issue_no}: Akzeptanztest vorab als Commit gesichert.")
+    return path
+
+
 def main() -> int:
     global LAST_AGENT_ERROR
     skey = "-"          # Regel 7: vor der Auftragswahl meldet der Takt „-“
@@ -2909,9 +2961,10 @@ def main() -> int:
         prepare_workdir()
         ensure_pre_push_hook()   # #68: vor dem Agenten, damit schon sein erster Push geprüft wird
         if n is not None and os.path.isdir(WORKDIR):
-            # #171 / #68: Gibt es WORKDIR nicht (gefaktes prepare_workdir in bestehenden Tests),
-            # entfällt die Vorbereitung des Branches vor dem Agentenlauf.
-            if not prepare_issue_branch(n):
+            # #234: Branch und Akzeptanztest-Commit legt der deterministische Rahmen aus
+            # worker_frame.py an; ohne Akzeptanztest-Block startet kein Agent. Gibt es WORKDIR
+            # nicht (gefaktes prepare_workdir in bestehenden Tests), entfällt die Vorbereitung.
+            if prepare_issue_frame(n) is None:
                 alarm(skey, "Akzeptanztest-Block im Issue nicht lesbar")
                 slot_status("idle", project=PROJECT)
                 return 0
