@@ -7,8 +7,8 @@ aus `main` wiederherstellbar ist.
 
 ## Sichern
 
-**Container.** Der ganze Container CT 112 wird per Proxmox-Backup gesichert (vzdump, Ziel und Rhythmus
-gehören Stephan: `<von Stephan zu ergänzen>`). Das deckt alles unten Genannte in einem Zug ab. Die
+**Container.** Der ganze Container CT 112 wird per Proxmox-Backup gesichert (vzdump; Ziel und Rhythmus
+legt der Proxmox-Administrator fest). Das deckt alles unten Genannte in einem Zug ab. Die
 folgenden Einzeldateien sind das Minimum, falls nur eine Datei verloren geht oder der Container neu
 entsteht.
 
@@ -20,6 +20,8 @@ entsteht.
 | `/etc/agent-projects.json` | Projektliste (Name, Repository, Arbeitsordner, Hotspot, `auto_merge`, `required_checks`); fehlt sie, kennt der Takt nur sc-digger |
 | `/etc/qwen-worker.env` | `LITELLM_API_KEY` (Worker) |
 | `/etc/qwen-reviewer.env` | `LITELLM_REVIEW_KEY` (Review-Takt) |
+| `/etc/agent-dashboard.env` | `DASHBOARD_WRITE_TOKEN`, `NTFY_URL`, `WAKE_PUBLISH_URL`, optional `LITELLM_MASTER_KEY` (Web-Dashboard) |
+| `/etc/agent-wake.env` | `WAKE_URL` (Wake-Listener `agent-wake`) |
 
 Die Werte stehen im Passwortmanager (Vaultwarden), nicht in einer Sicherung im Klartext außerhalb davon.
 `ask_secret` in `install.sh` fragt fehlende Werte beim nächsten Lauf verdeckt ab.
@@ -44,8 +46,9 @@ Deploy-Schlüssel und die `gh`-Anmeldung im Klartext auf einem fremden Laufwerk.
 
 Reihenfolge, wenn der Container verloren ist:
 
-1. **Container zurückspielen.** Aus dem Proxmox-Backup (`<von Stephan zu ergänzen>`), oder neu anlegen mit
-   `proxmox/host-create.sh` (siehe `proxmox/README.md`). Bei einer Rückspielung ist meist nur Schritt 4 nötig.
+1. **Container zurückspielen.** Aus dem Proxmox-Backup (Wiederherstellung im Proxmox-Web-Interface),
+   oder neu anlegen mit `proxmox/host-create.sh` (siehe `proxmox/README.md`). Bei einer Rückspielung ist
+   meist nur Schritt 4 nötig.
 2. **Repository holen und `install.sh` ausführen.** Nur Stephan, auf dem Server:
    ```bash
    cd /root/agent-sandbox-infra && git pull && bash sandbox/install.sh
@@ -59,12 +62,11 @@ Reihenfolge, wenn der Container verloren ist:
    ausführen.
 4. **`install.sh` erneut ausführen** und die Timer prüfen:
    ```bash
-   systemctl list-timers 'qwen-worker*' qwen-review.timer ha-status.timer --no-pager
+   systemctl list-timers 'qwen-worker*' qwen-review.timer --no-pager
    ```
-   Erwartet sind `qwen-worker@1`, `qwen-worker@2` (bei `MAX_WORKERS=2`), `qwen-review.timer` und
-   `ha-status.timer`.
+   Erwartet sind `qwen-worker@1`, `qwen-worker@2` (bei `MAX_WORKERS=2`) und `qwen-review.timer`.
 5. **Funktion prüfen.** In `/root/worker.log` darf nach dem nächsten Takt keine Zeile mit „⚠ Stephan:“ oder
-   `error_during_execution` stehen. Das Dashboard „KI Cloud“ in Home Assistant zeigt den Slot-Status
-   wieder an.
+   `error_during_execution` stehen. Ist das Web-Dashboard eingeschaltet (`DASHBOARD=1`), zeigt der Dienst
+   `agent-dashboard` den Slot-Status wieder an (Port `DASHBOARD_PORT`, Standard 8099).
 
 Hier deployt kein Agent: Die Schritte 2 bis 4 führt nur Stephan aus (AGENTS.md, Regel 4).

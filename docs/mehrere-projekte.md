@@ -29,9 +29,12 @@ eine **Projektliste**. Das zweite Projekt ist diese Infrastruktur selbst
    "hotspot_label": "berührt-main.py", "review_skill": "skills/sc-digger-review/SKILL.md",
    "auto_merge": true, "required_checks": ["tests", "acceptance-guard", "CodeQL"]},
   {"name": "agent-sandbox-infra", "repo": "tripitest-art/agent-sandbox-infra",
-   "workdir": "/root/work/agent-sandbox-infra", "auto_merge": false,
-   "manual_paths": ["sandbox/*", ".github/*", "AGENTS.md", "tests/acceptance/*",
-                    "docs/main-schutz.ruleset.json", "skills/*"]}
+   "workdir": "/root/work/agent-sandbox-infra",
+   "hotspot": "sandbox/worker_tick.py", "hotspot_label": "berührt-worker_tick.py",
+   "review_skill": "skills/agent-sandbox-review/SKILL.md",
+   "auto_merge": true,
+   "manual_paths": ["AGENTS.md", ".github/*", "tests/acceptance/*", "skills/*",
+                    "docs/main-schutz.ruleset.json"]}
 ]}
 ```
 
