@@ -36,6 +36,7 @@ try:                        # POSIX-Nutzerdatenbank für den Rechte-Drop des Age
 except ImportError:         # Windows kennt kein pwd; dort läuft der Takt nicht
     pwd = None  # type: ignore[assignment]
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -2708,12 +2709,14 @@ def pre_push_hook(test_cmd: str) -> str:
     hinterlässt einen Fremdcommit im gepushten Branch (#212). Das `unset` gilt nur im Hook-Prozess;
     der laufende `git push` behält seine Umgebung.
     """
+    cmd = shlex.quote(test_cmd)
     return (
         "#!/bin/sh\n"
         "# Erzeugt von worker_tick.ensure_pre_push_hook(): kein Push mit roten Tests (#68).\n"
         "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY"
         " GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_QUARANTINE_PATH\n"
-        f"{test_cmd}\n"
+        'env -i PATH="$PATH" HOME="$HOME" AGENT_PROJECTS=/nonexistent/agent-projects.json '
+        f'AGENT_SETTINGS=/nonexistent/agent-settings.json sh -c {cmd}\n'
         "if [ $? -ne 0 ]; then\n"
         "    echo \"pre-push: Tests fehlgeschlagen, Push abgelehnt."
         " Fehler beheben, nicht umgehen.\" >&2\n"
