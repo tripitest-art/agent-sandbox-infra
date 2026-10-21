@@ -559,7 +559,7 @@ def gh(*args: str, repo: str | None = None):
     Projektvorsätze im Zustand (`<projekt>/prN@…`) brauchen die ausdrückliche Angabe, weil sie
     nicht zum gerade aktiven Projekt gehören müssen."""
     try:
-        repo_args = ["--repo", repo or REPO]
+        repo_args = [] if args and args[0] == "api" else ["--repo", repo or REPO]
         out = subprocess.run(["gh", *args, *repo_args], capture_output=True, text=True, check=True, env=ENV)
     except subprocess.CalledProcessError as exc:
         if exc.returncode == 4 and "GH_TOKEN" in (getattr(exc, "stderr", None) or ""):
@@ -2118,6 +2118,7 @@ def prune_parked(state: dict, still_open: Callable[[str], bool]) -> list[str]:
             continue
         state.pop(key, None)
         state.pop(skey, None)
+        state.pop(f"_versuch:{skey}", None)
         entfernt.append(skey)
     return entfernt
 
@@ -2186,6 +2187,79 @@ def idle_message(parked: str | None, skipped: list[str]) -> str:
     if parked:
         text = f"{text} | {parked}: wartet auf Stephan" if text else f"{parked}: wartet auf Stephan"
     return text or "Warte auf nächsten Takt"
+
+
+def versuch_zaehlen(state: dict, skey: str, now: float | None = None) -> int:
+    """Zählt einen Versuch: state[skey] += 1 und state[f"_versuch:{skey}"] = now (Standard jetzt_s()).
+    Gibt den neuen Zählerstand zurück. main() ersetzt damit `state[skey] = state.get(skey, 0) + 1`."""
+    aktuell = jetzt_s() if now is None else now
+    neuer_stand = state.get(skey, 0) + 1
+    state[skey] = neuer_stand
+    state[f"_versuch:{skey}"] = aktuell
+    return neuer_stand
+
+
+def label_bereit_seit(skey: str) -> float | None:
+    """Epoche-Sekunden des jüngsten Ereignisses „labeled“ mit dem Label `bereit` am Issue von `skey`.
+
+    Nur Issue-Aufträge (`issue<N>`, mit oder ohne Projektvorsatz `<projekt>/`); sonst und bei unbekanntem
+    Projektvorsatz None, ohne gh-Aufruf. Quelle: gh("api", f"repos/{repo}/issues/{n}/events?per_page=100", repo=repo)
+    mit repo = _job_repo(skey). Kein passendes Ereignis: None. Ein gh-Fehler wird nicht gefangen."""
+    repo = _job_repo(skey)
+    if repo is None:
+        return None
+    key = skey.split("/", 1)[1] if "/" in skey else skey
+    m = _ISSUE_JOB_KEY_RE.match(key)
+    if not m:
+        return None
+    nummer = m.group(1)
+    ereignisse = gh("api", f"repos/{repo}/issues/{nummer}/events?per_page=100", repo=repo)
+    if not isinstance(ereignisse, list):
+        return None
+    juengst: float | None = None
+    for e in ereignisse:
+        if not isinstance(e, dict):
+            continue
+        if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == "bereit":
+            ts_str = e.get("created_at")
+            if ts_str:
+                dt = _zeitpunkt(ts_str)
+                if dt:
+                    ts = dt.timestamp()
+                    if juengst is None or ts > juengst:
+                        juengst = ts
+    return juengst
+
+
+def entparken(state: dict, bereit_seit: Callable[[str], float | None]) -> list[str]:
+    """Entfernt für jeden Issue-Auftrag mit Marke `_park:<skey>` die Marke, den Zähler `state[skey]` und
+    `_versuch:<skey>`, wenn bereit_seit(skey) einen Zeitpunkt liefert, der NACH `state["_versuch:<skey>"]`
+    liegt. Fehlt `_versuch:<skey>` (Zustand aus der Zeit vor dieser Änderung), bleibt die Marke
+    (im Zweifel geparkt). Wirft bereit_seit, bleibt die Marke. Pro entfernter Marke eine Logzeile
+    „<skey>: wieder auf bereit gesetzt, Parkmarke entfernt.“. Gibt die entfernten skey zurück.
+    Speichert nicht (main speichert danach)."""
+    entfernt: list[str] = []
+    for key in list(state):
+        if not key.startswith("_park:"):
+            continue
+        skey = key[len("_park:"):]
+        raw_key = skey.split("/", 1)[1] if "/" in skey else skey
+        if not _ISSUE_JOB_KEY_RE.match(raw_key):
+            continue
+        versuch_ts = state.get(f"_versuch:{skey}")
+        if versuch_ts is None:
+            continue
+        try:
+            b_ts = bereit_seit(skey)
+        except Exception:
+            continue
+        if b_ts is not None and b_ts > versuch_ts:
+            state.pop(key, None)
+            state.pop(skey, None)
+            state.pop(f"_versuch:{skey}", None)
+            log(f"{skey}: wieder auf bereit gesetzt, Parkmarke entfernt.")
+            entfernt.append(skey)
+    return entfernt
 
 
 def _claim_name(skey: str) -> str:
@@ -2754,6 +2828,9 @@ def main() -> int:
             save_state(state)
             for erledigt in entfernt:
                 log(f"{erledigt}: erledigt, Parkmarke entfernt.")
+        entparkt = entparken(state, label_bereit_seit)
+        if entparkt:
+            save_state(state)
         job = pick_job(state)
         if not job:
             # #178: Ohne Auftrag rechnet der Takt den offenen Lauf ab — /key/info liefert dabei
@@ -2826,7 +2903,7 @@ def main() -> int:
                 slot_status("idle", project=PROJECT)
                 return 0
 
-        state[skey] = state.get(skey, 0) + 1
+        versuch_zaehlen(state, skey)
         save_state(state)
         # Jeder Lauf startet auf sauberem main; Reste eines abgebrochenen Laufs stören sonst.
         prepare_workdir()
