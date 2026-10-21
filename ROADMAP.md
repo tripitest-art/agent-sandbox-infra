@@ -13,16 +13,15 @@ flowchart LR
     C --> D["4. CI & Checks<br>(acceptance-guard)"]
     D --> E["5. Review-Takt<br>(GLM via LiteLLM)"]
     E --> F["6. Auto-Merge & Unblock<br>(GitHub main)"]
-    F --> G["7. Server-Deploy<br>(./update.sh)"]
+    F --> G["7. Server-Deploy<br>(autodeploy.py, Timer)"]
 
     style C fill:#d4edda,stroke:#28a745
     style E fill:#d4edda,stroke:#28a745
     style F fill:#d4edda,stroke:#28a745
-    style G fill:#f8d7da,stroke:#dc3545
+    style G fill:#d4edda,stroke:#28a745
 ```
 
 * **Grün:** Bereits vollständig autonom implementiert und im Live-Einsatz.
-* **Rot:** Aktuell noch manueller Zwischenschritt (Deployment auf dem Produktiv-Server).
 
 ---
 
@@ -88,15 +87,21 @@ Ziel war es, für die parallelen Worker-Slots strukturierte Telemetrie, ein auta
 
 ### ✅ Stufe 3: Continuous Deployment (Abgeschlossen)
 
-Nach dem Merge in `main` muss derzeit auf dem Musik-Server manuell `/root/sc-digger && ./update.sh` ausgeführt werden. Ziel ist die vollständige Schließung der Bereitstellungskette.
+Umgesetzt in [#15](https://github.com/tripitest-art/agent-sandbox-infra/issues/15): Ein Pull-Timer auf CT 112
+schließt die Bereitstellungskette nach dem Merge in `main` ohne manuellen Zwischenschritt.
 
 #### Kernpunkte:
 1. **Automatischer Deploy-Mechanismus:**
-   - **Option A (Pull/Timer):** Ein leichtgewichtiger systemd-Timer auf dem Musik-Server prüft alle 15–30 Minuten `origin/main` auf neue Commits und führt bei Differenz `./update.sh` aus.
-   - **Option B (Event/Webhook):** GitHub Actions oder ntfy triggern nach erfolgreichem Auto-Merge per Webhook das Update-Skript.
+   - Alle 15 Minuten startet `agent-sandbox-deploy.timer` das Skript `sandbox/autodeploy.py` und
+     vergleicht `origin/main` mit dem zuletzt ausgerollten Stand.
+   - Ein neuer Stand wird vorab getestet (Pre-Flight in einer systemd-Sandbox), dann per
+     `bash sandbox/install.sh` ausgerollt; solange Worker oder Review laufen, wartet der Lauf.
 2. **Sicherheits-Leitplanken:**
-   - Deploy erfolgt ausschließlich nach grünem CI und Squash-Merge auf `main`.
-   - Bei Fehlschlag des Builds oder Neustarts erfolgt eine Benachrichtigung via Telegram (`health.py`).
+   - Deploy erfolgt ausschließlich nach grünem CI und Squash-Merge auf `main`; der Deploy-Key hat kein
+     Schreibrecht.
+   - Bei roten Tests oder einem Fehler in `install.sh` wird auf den letzten laufenden Stand
+     zurückgerollt und eine „⚠ Stephan:“-Zeile ins Log geschrieben. Der Timer ist aus, bis
+     `AUTODEPLOY=1 bash sandbox/install.sh` läuft; Ablauf und Betrieb: [`docs/autodeploy.md`](docs/autodeploy.md).
 
 ---
 
