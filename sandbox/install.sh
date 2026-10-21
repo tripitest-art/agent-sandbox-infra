@@ -138,6 +138,61 @@ done
 /root/venv/bin/pip install -q pytest
 grep -q 'source /root/venv/bin/activate' /root/.bashrc || echo 'source /root/venv/bin/activate' >> /root/.bashrc
 
+echo "== Agenten-Nutzer (Rechte-Drop)"
+# #217: Der Agentenprozess läuft nicht als root, sondern als eigener unprivilegierter Nutzer
+# (worker_tick.AGENT_USER). Shell-Aufrufe des Modells kommen damit nicht mehr an /etc/*.env
+# (600 root), /root/.config/gh oder die Worktrees der anderen Slots; das ist die Absicherung
+# auf Betriebssystemebene unterhalb von agent_env().
+AGENT_USER=${AGENT_USER:-worker}
+if id -u "$AGENT_USER" &>/dev/null; then
+  echo "Nutzer $AGENT_USER: vorhanden"
+else
+  useradd -m -s /bin/bash "$AGENT_USER"
+  echo "Nutzer $AGENT_USER: angelegt"
+fi
+agent_home=$(getent passwd "$AGENT_USER" | cut -d: -f6)
+# HOME des Agenten ist agent_home (worker_tick.py). Ohne die Kopien fände qwen seine Modelle
+# (settings.json samt envKey) und gh seine Anmeldung nicht mehr; die Originale unter /root
+# bleiben root und für den Agenten unlesbar. 600, weil hosts.yml den GitHub-Token enthält.
+install -d -m 700 -o "$AGENT_USER" -g "$AGENT_USER" "$agent_home/.qwen" \
+  "$agent_home/.config" "$agent_home/.config/gh"
+if [ -f /root/.qwen/settings.json ]; then
+  install -m 600 -o "$AGENT_USER" -g "$AGENT_USER" \
+    /root/.qwen/settings.json "$agent_home/.qwen/settings.json"
+fi
+for datei in /root/.config/gh/*; do
+  [ -f "$datei" ] || continue
+  install -m 600 -o "$AGENT_USER" -g "$AGENT_USER" "$datei" "$agent_home/.config/gh/"
+done
+if [ "$AGENT" = opencode ]; then
+  install -d -m 700 -o "$AGENT_USER" -g "$AGENT_USER" "$agent_home/.config/opencode"
+  install -m 600 -o "$AGENT_USER" -g "$AGENT_USER" \
+    /root/.config/opencode/opencode.json "$agent_home/.config/opencode/opencode.json"
+fi
+# git prüft den Eigentümer des Arbeitsordners. Die Worktrees gehören dem Agenten, der Takt
+# läuft als root; systemweit, weil der Agent in fremden Klonen arbeitet.
+git config --system --get-all safe.directory 2>/dev/null | grep -qxF '*' \
+  || git config --system --add safe.directory '*'
+# Committen und Pushen tut der Agent, nicht der Takt: Seine Identität muss systemweit gelten,
+# die globale Konfiguration in /root/.gitconfig erreicht ihn über HOME nicht mehr.
+git config --system user.name "Stephan (Sandbox-Agent)"
+git config --system user.email "tripitest@gmail.com"
+# Arbeitsordner des Agenten: die Slot-Worktrees und das gemeinsame .git des Klons (Index und
+# Objekte liegen dort). Ohne Schreibrecht scheitert schon `git add`; der Takt bleibt root und
+# darf weiterhin alles. Neue Slots legt der Takt an, install.sh fasst sie beim nächsten Lauf mit.
+for dir in $(project_workdirs); do
+  for ziel in "$dir/.git" "${dir%/}-worktrees"; do
+    if [ -e "$ziel" ]; then chown -R "$AGENT_USER" "$ziel"; fi
+  done
+done
+# /root ist 700: ohne Durchqueren käme der Agent nicht einmal in seinen Worktree. Die Gruppe
+# darf nur durch (/root bleibt unlesbar); /etc/*.env und gh-hosts.yml bleiben 600 root.
+chgrp "$AGENT_USER" /root
+chmod g+x /root
+# Geheimnisdateien unlesbar für andere Nutzer halten (Regel 5). Fehlen sie, ist das kein Fehler:
+# qwen-reviewer.env gibt es nur mit Review-Key, agent-dashboard.env nur mit DASHBOARD=1.
+chmod 600 /etc/qwen-reviewer.env /etc/agent-dashboard.env 2>/dev/null || true
+
 echo "== Geheimnisse (nur lokal, nie im Repo)"
 # ask_secret DATEI VARIABLE TEXT: fehlt VARIABLE in DATEI, verdeckt abfragen (nur im Terminal).
 ask_secret() {
