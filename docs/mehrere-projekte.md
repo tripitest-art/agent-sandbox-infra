@@ -59,9 +59,12 @@ Fehlermeldung ab, damit kein Projekt still wegfällt; `install.sh` bricht ebenso
 
 ## Wie die Takte mehrere Projekte behandeln
 
-- **Gemeinsamer Pool, feste Priorität.** Jeder Worker-Slot nimmt die erste Arbeit der Liste. Das
-  erste Projekt hat Vorrang; ein Projekt weiter hinten kommt dran, wenn vorn nichts bereitliegt.
-  Eine Rotation gibt es nicht.
+- **Gemeinsamer Pool, Fair-Share (Least-Recently-Served).** Jeder Worker-Slot nimmt die erste
+  Arbeit, beginnend beim Projekt *nach* dem zuletzt bedienten (`_last_project` im Slot-Zustand).
+  `ordered_projects()` rotiert die Liste dafür deterministisch; hat das bevorzugte Projekt keine
+  fällige Arbeit, folgen die übrigen in derselben Rotation — es gibt also keinen Leerlauf. So
+  hungert ein dauerhaft volles erstes Projekt die weiteren nicht mehr aus (#226). Mit nur einem
+  Projekt bleibt die Reihenfolge unverändert.
 - **Ein Projekt, ein Zustand.** Beim ersten Projekt bleiben alle Pfade und Schlüssel wie vor der
   Projektliste. Ab dem zweiten tragen sie den Namen: Worker-Zustand `infra/pr5@…`,
   Review-Zustand `review-state-<name>.json`, Entwürfe `reviews-<name>/`. PR-Nummern kollidieren so nie.
@@ -134,7 +137,8 @@ Die Skripte steuern die Agenten, die sie ändern. Deshalb gilt (siehe `AGENTS.md
 
 ## Bekannte Grenzen und Entscheidungen
 
-- Feste Priorität statt Rotation: ein dauerhaft volles erstes Projekt hungert die weiteren aus.
+- Fair-Share gilt nur zwischen Projekten; die Reihenfolge der Issues *innerhalb* eines Projekts
+  ändert das nicht (eigenes Issue).
 - Der Review-Takt meldet rote Checks nur für die `required_checks` des Projekts (Vorgabe `tests` und
   `acceptance-guard`, in sc-digger zusätzlich `CodeQL`); er wartet, bis alle vorhandenen Checks fertig
   sind, und verlangt mindestens einen. Ein Projekt ohne `CodeQL` stört nicht.

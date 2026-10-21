@@ -2786,21 +2786,52 @@ def find_job(state: dict):
     return job
 
 
-def pick_job(state: dict):
-    """Erste Arbeit im ersten Projekt, das welche hat (Reihenfolge der Projektliste); None, wenn nirgends.
+def ordered_projects(
+    projects_list: list["projects.Project"],
+    last_name: str | None,
+) -> list["projects.Project"]:
+    """Gibt die Projektliste zyklisch rotiert zurück, sodass das Projekt unmittelbar nach
+    `last_name` an erster Stelle steht.
 
-    Mit nur einem Projekt unverändert find_job(). Ein Projekt, dessen Klon fehlt, wird einmal gemeldet
-    und übersprungen. Nach einem Treffer bleibt dieses Projekt aktiv, die Globalen gehören ihm."""
+    Ist `last_name` None, leer oder nicht in `projects_list` vorhanden, oder besteht die
+    Liste aus weniger als 2 Einträgen, wird eine unveränderte Kopie der Liste zurückgegeben.
+    Reine Hilfsfunktion ohne I/O.
+
+    Warum (#226): Mit fester Reihenfolge bekam immer `PROJECTS[0]` den Takt; ein dauerhaft
+    volles erstes Projekt hungerte alle weiteren aus."""
+    if not last_name or len(projects_list) < 2:
+        return list(projects_list)
+    namen = [p.name for p in projects_list]
+    if last_name not in namen:
+        return list(projects_list)
+    i = namen.index(last_name)
+    return list(projects_list[i + 1:]) + list(projects_list[:i + 1])
+
+
+def pick_job(state: dict):
+    """Erste Arbeit der Projekte in Fair-Share-Reihenfolge; None, wenn nirgends Arbeit liegt.
+
+    Fair-Share (#226): `state["_last_project"]` merkt das Projekt, für das zuletzt ein Auftrag
+    angenommen wurde. `ordered_projects()` stellt das Projekt danach an den Anfang, damit ein
+    dauerhaft volles erstes Projekt die übrigen nicht mehr aushungert. Hat das bevorzugte
+    Projekt keine fällige Arbeit, folgen die übrigen in rotierter Reihenfolge (kein Leerlauf).
+    Mit nur einem Projekt unverändert find_job(). Ein Projekt, dessen Klon fehlt, wird einmal
+    gemeldet und übersprungen. Nach einem Treffer bleibt dieses Projekt aktiv (Globalen), und
+    `_last_project` wird zusammen mit dem Zustand gesichert."""
     if len(PROJECTS) == 1:
         return find_job(state)
-    for i, p in enumerate(PROJECTS):
+    for p in ordered_projects(PROJECTS, state.get("_last_project")):
         if not os.path.isdir(p.workdir):
             log_on_change(state, f"_fehlt:{p.name}", "fehlt",
                           f"Projekt {p.name}: Klon {p.workdir} fehlt, übersprungen (install.sh ausführen).")
             continue
-        use_project(p, first=(i == 0))
+        # PREFIX gehört zum ersten Projekt der Liste (alte Zustandsschlüssel), nicht zur
+        # Position in der rotierten Reihenfolge.
+        use_project(p, first=(p == PROJECTS[0]))
         job = find_job(state)
         if job:
+            state["_last_project"] = p.name
+            save_state(state)
             return job
     return None
 
