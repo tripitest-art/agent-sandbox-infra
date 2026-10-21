@@ -1,4 +1,4 @@
-"""Akzeptanztest: Ein geparktes Issue, das wieder auf `bereit` gesetzt wird, verliert Parkmarke und Z??hler."""
+"""Akzeptanztest: Ein geparktes Issue, das wieder auf `bereit` gesetzt wird, verliert Parkmarke und Zähler."""
 import importlib.util
 import sys
 from datetime import datetime, timezone
