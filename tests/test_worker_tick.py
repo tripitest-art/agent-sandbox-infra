@@ -3220,3 +3220,90 @@ def test_issue_job_behaelt_bei_gleichem_score_die_stabile_reihenfolge(monkeypatc
     monkeypatch.setattr(w, "gh", _fake_gh_issue_job([erst, dann]))
     key, _, _, _ = w.issue_job(now=1700000000.0)
     assert key == "issue30"
+
+
+# ---- #226: Fair-Share über Projekte (Least-Recently-Served) ----
+
+def _zwei_projekte(monkeypatch, tmp_path, namen=("proj1", "proj2")):
+    """Projekte mit vorhandenen Arbeitsordnern; save_state schreibt nirgends hin."""
+    projs = []
+    for name in namen:
+        pfad = tmp_path / name
+        pfad.mkdir()
+        projs.append(w.projects.Project(name=name, repo=f"tripitest-art/{name}", workdir=str(pfad)))
+    monkeypatch.setattr(w, "PROJECTS", projs)
+    monkeypatch.setattr(w, "save_state", lambda s: None)
+    return projs
+
+
+def test_ordered_projects_rotation_und_fehlerfaelle(monkeypatch, tmp_path):
+    """#226: Rotation ab dem Projekt nach `last_name`; None, Unbekanntes und kurze Listen bleiben."""
+    projs = _zwei_projekte(monkeypatch, tmp_path, ("a", "b", "c"))
+    unveraendert = [p.name for p in projs]
+
+    assert [p.name for p in w.ordered_projects(projs, "c")] == unveraendert
+    assert [p.name for p in w.ordered_projects(projs, "b")] == ["c", "a", "b"]
+    assert [p.name for p in projs] == unveraendert      # reine Funktion, sortiert die Eingabe nicht um
+    for last in (None, "", "gibt-es-nicht"):
+        kopie = w.ordered_projects(projs, last)
+        assert [p.name for p in kopie] == unveraendert
+        assert kopie is not projs                       # Kopie, nicht dieselbe Liste
+    assert [p.name for p in w.ordered_projects(projs[:1], "a")] == ["a"]
+    assert w.ordered_projects([], "a") == []
+
+
+def test_pick_job_rotiert_und_sichert_projekt_im_zustand(monkeypatch, tmp_path):
+    """#226: Nach einem Treffer steht `_last_project` im gespeicherten Zustand, der nächste Takt rotiert."""
+    _zwei_projekte(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "find_job", lambda state: (f"issue-{w.PROJECT}", "t", None, None))
+    gespeichert = []
+    monkeypatch.setattr(w, "save_state", lambda s: gespeichert.append(dict(s)))
+    state = {}
+
+    assert w.pick_job(state)[0] == "issue-proj1"
+    assert state["_last_project"] == "proj1"
+    assert gespeichert[-1]["_last_project"] == "proj1"
+
+    assert w.pick_job(state)[0] == "issue-proj2"
+    assert state["_last_project"] == "proj2"
+    assert gespeichert[-1]["_last_project"] == "proj2"   # Zustand liegt auf der Platte, nicht nur im Speicher
+
+    assert w.pick_job(state)[0] == "issue-proj1"         # die Rotation schließt den Kreis
+
+
+def test_pick_job_ohne_arbeit_laesst_last_project_unberuehrt(monkeypatch, tmp_path):
+    """#226: Findet kein Projekt Arbeit, bleibt `_last_project` stehen (keine Scheinrotation)."""
+    _zwei_projekte(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "find_job", lambda state: None)
+    state = {"_last_project": "proj2"}
+
+    assert w.pick_job(state) is None
+    assert state["_last_project"] == "proj2"
+
+
+def test_pick_job_meldet_fehlenden_klon_einmal_und_prueft_weiter(monkeypatch, tmp_path, capsys):
+    """#226: Ein fehlender Klon (`_fehlt:`) wird einmal gemeldet, die übrigen Projekte laufen weiter."""
+    proj1 = _zwei_projekte(monkeypatch, tmp_path, ("proj1",))[0]
+    fehlt = tmp_path / "gibt-es-nicht"
+    proj2 = w.projects.Project(name="proj2", repo="tripitest-art/proj2", workdir=str(fehlt))
+    monkeypatch.setattr(w, "PROJECTS", [proj1, proj2])
+    monkeypatch.setattr(w, "find_job", lambda state: None)
+    state = {"_last_project": "proj1"}
+
+    assert w.pick_job(state) is None
+    assert state["_fehlt:proj2"] == "fehlt"
+    assert w.pick_job(state) is None
+    assert capsys.readouterr().out.count("Projekt proj2: Klon") == 1   # nicht alle 5 Minuten erneut
+
+
+def test_pick_job_nutzt_das_naechste_projekt_ohne_leerlauf(monkeypatch, tmp_path):
+    """#226: Hat das bevorzugte Projekt nichts, kommt das folgende dran; PREFIX bleibt am Listenkopf."""
+    projs = _zwei_projekte(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "find_job",
+                        lambda state: ("nur-proj2", "t", None, None) if w.PROJECT == "proj2" else None)
+    state = {"_last_project": "proj1"}
+
+    assert w.pick_job(state)[0] == "nur-proj2"
+    assert state["_last_project"] == "proj2"
+    # PREFIX gehört zum ersten Projekt der Liste, auch wenn proj1 nicht zuerst geprüft wurde.
+    assert (w.PROJECT, w.PREFIX, w.BASE_WORKDIR) == ("proj2", "proj2/", projs[1].workdir)
