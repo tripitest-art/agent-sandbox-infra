@@ -73,7 +73,7 @@ BACKEND = os.environ.get("BACKEND", "ollama")   # oder "litellm"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 LITELLM_MODEL = agent_settings.value("LITELLM_MODEL", os.environ.get("LITELLM_MODEL", "coder"))
 # Ausweichmodelle (Aliase im LiteLLM-Proxy, der Key »worker« muss sie dürfen), durch Komma getrennt.
-LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "coder-or,coder-free").split(",") if m.strip()]
+LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "coder-go,coder-or,coder-free").split(",") if m.strip()]
 PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT", "45"))   # Sekunden je Probe
 # #180: Erst nach 20 Minuten ist ein LiteLLM-Ausfall eine Meldung wert; ein Proxy-Neustart
 # oder ein kurzer Netzaussetzer bleibt still. Die Schlüssel liegen im Slot-Zustand, deshalb
@@ -83,6 +83,7 @@ LITELLM_AB, LITELLM_ALARM = "_litellm_ab", "_litellm_alarm"     # Schlüssel im 
 # Steht als „Worker: …“ im PR; die Review-Regel (andere Modellfamilie) hängt daran.
 WORKER_NAMES = {
     "coder": "DeepSeek (LiteLLM coder)",
+    "coder-go": "DeepSeek (LiteLLM coder-go, OpenCode Go)",
     "coder-pro": "DeepSeek V4 Pro (LiteLLM coder-pro)",
     "coder-fast": "DeepSeek (LiteLLM coder-fast, ohne Thinking)",
     "coder-or": "DeepSeek (LiteLLM coder-or, OpenRouter)",

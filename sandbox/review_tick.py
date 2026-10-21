@@ -123,7 +123,7 @@ MISSING_CHECK_GRACE_S = agent_settings.value("MISSING_CHECK_GRACE_S", 600)
 # independence_problem()/reviewer_config_problem() den Review, statt die Regel still zu überspringen.
 FAMILIES = (("glm", r"glm|zhipu|z\.ai"), ("mistral", r"mistral|codestral|coder-free"),
             ("qwen", r"qwen|coder-nvidia|nvidia"), ("gemini", r"gemini|gemma|longctx"), ("claude", r"claude|anthropic|opus|sonnet"),
-            ("deepseek", r"deepseek|\bcoder(?:-fast|-pro|-or)?\b"))
+            ("deepseek", r"deepseek|\bcoder(?:-fast|-pro|-or|-go)?\b"))
 
 VERDICTS = ("**Freigegeben**", "**Änderungen nötig**")
 ENV = dict(os.environ, PATH=f"/root/venv/bin:/root/.opencode/bin:{os.environ.get('PATH', '/usr/bin:/bin')}")
