@@ -86,6 +86,36 @@ model_list:
     model_info:
       input_cost_per_token: 0
       output_cost_per_token: 0
+
+  # coder-nemotron-free – Kostenloses Modell (NVIDIA Nemotron 3.5 Lightning, 0$/M)
+  - model_name: coder-nemotron-free
+    litellm_params:
+      model: openai/nemotron-3.5-lightning-free
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_GO_KEY
+      extra_headers:
+        x-opencode-session: "sandbox-session"
+        User-Agent: "opencode/1.0.0 (Linux; x86_64)"
+      timeout: 600
+      stream_timeout: 90
+    model_info:
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+
+  # coder-minimax-free – Kostenloses Modell (MiniMax M3.1 Flash, 0$/M)
+  - model_name: coder-minimax-free
+    litellm_params:
+      model: openai/minimax-m3.1-flash-free
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_GO_KEY
+      extra_headers:
+        x-opencode-session: "sandbox-session"
+        User-Agent: "opencode/1.0.0 (Linux; x86_64)"
+      timeout: 600
+      stream_timeout: 90
+    model_info:
+      input_cost_per_token: 0
+      output_cost_per_token: 0
 ```
 
 ### Router & Fallback-Kaskade
@@ -93,8 +123,9 @@ model_list:
 ```yaml
 router_settings:
   fallbacks:
-    - coder-go: ["coder", "coder-or", "coder-free"]   # Go-Limit (429) → Direkt → OpenRouter → Codestral
-    - coder: ["coder-go", "coder-or", "coder-free"]   # DeepSeek Direkt gestört → Go → OpenRouter → Codestral
+    - coder-free: ["coder-nemotron-free", "coder-minimax-free", "coder"]  # Kostenlos zuerst
+    - coder-go: ["coder-nemotron-free", "coder", "coder-or", "coder-free"]   # Go-Limit (429) → Nemotron Free → Direkt → OpenRouter → Codestral
+    - coder: ["coder-nemotron-free", "coder-go", "coder-or", "coder-free"]   # DeepSeek Direkt gestört → Nemotron Free → Go → OpenRouter → Codestral
     - planner-go: ["planner-pro"]
 
   model_group_retry_policy:

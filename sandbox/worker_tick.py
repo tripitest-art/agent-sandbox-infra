@@ -97,6 +97,9 @@ WORKER_NAMES = {
     "coder-glm": "GLM 5.3 Flash (LiteLLM coder-glm)",
     "coder-qwen": "Qwen 2.5 Coder (LiteLLM coder-qwen)",
     "coder-nvidia": "Qwen 2.5 Coder (LiteLLM coder-nvidia, NVIDIA NIM)",
+    "coder-nemotron-free": "Nemotron 3.5 Lightning (LiteLLM, OpenCode Free)",
+    "coder-minimax-free": "MiniMax M3.1 Flash (LiteLLM, OpenCode Free)",
+    "coder-beam-free": "Beam (LiteLLM, OpenCode Free)",
 }
 
 
