@@ -136,6 +136,12 @@ def test_worker_family_and_same_family():
     assert r.model_family("coder-fast (LiteLLM)") == "deepseek"   # so steht es bei unbekannten Aliasen im PR
     assert r.model_family("Codestral (LiteLLM coder-free)") == "mistral"
     assert r.model_family("coder-nvidia") == "qwen"
+    assert r.model_family("Nemotron 3.5 Lightning (LiteLLM, OpenCode Free)") == "nemotron"
+    assert r.model_family("coder-nemotron-free") == "nemotron"
+    assert r.model_family("MiniMax M3.1 Flash (LiteLLM, OpenCode Free)") == "minimax"
+    assert r.model_family("coder-minimax-free") == "minimax"
+    assert r.model_family("Beam (LiteLLM, OpenCode Free)") == "beam"
+    assert r.model_family("coder-beam-free") == "beam"
     assert r.model_family("coder-qwen") == "qwen"
     assert r.model_family("longctx") == "gemini"
     assert r.model_family("longctx-lite") == "gemini"
@@ -149,6 +155,9 @@ def test_worker_family_resolves_the_names_from_the_worker_table():
     assert r.worker_family("DeepSeek (LiteLLM coder-go, OpenCode Go)") == "deepseek"
     assert r.worker_family("Codestral (LiteLLM coder-free)") == "mistral"
     assert r.worker_family("Qwen 2.5 Coder (LiteLLM coder-nvidia, NVIDIA NIM)") == "qwen"
+    assert r.worker_family("Nemotron 3.5 Lightning (LiteLLM, OpenCode Free)") == "nemotron"
+    assert r.worker_family("MiniMax M3.1 Flash (LiteLLM, OpenCode Free)") == "minimax"
+    assert r.worker_family("Beam (LiteLLM, OpenCode Free)") == "beam"
     assert r.worker_family("Qwen 2.5 Coder (LiteLLM coder-qwen)") == "qwen"
     assert r.worker_family("Qwen3-Coder 30B") == "qwen"   # nicht in der Tabelle (BACKEND=ollama)
     assert r.worker_family("Rätselmodell 7") is None
