@@ -124,6 +124,21 @@ TOOL_OUTPUT_LINES = 15      # so viele Zeilen je Werkzeugausgabe ins Log
 # vorzeitig verbraucht.
 PR_LIST_LIMIT = 10          # GraphQL-Kontingent schonen: max. 10 offene PRs abfragen
 ISSUE_LIST_LIMIT = 20       # max. 20 offene Issues je Abfrage
+# Dynamisches Prioritäts-Scoring der Issue-Kandidaten (#240). Die Werte sind Punktzahlen, keine
+# Sekunden: Ein Label `prio:kritisch` soll jede Alters- und Unblock-Punktzahl überwiegen, damit
+# ein eiliger Bugfix nicht hinter alten Aufgaben verhungert.
+PRIO_WEIGHTS: dict[str, float] = {
+    "prio:kritisch": 1000.0,
+    "prio:hoch": 300.0,
+    "prio:normal": 100.0,
+    "prio:niedrig": 0.0,
+}
+DEFAULT_PRIO_SCORE: float = 100.0
+# Je blockierter Folgeaufgabe, die auf dieses Issue wartet: kräftiger Hebel für den Durchsatz.
+UNBLOCK_WEIGHT: float = 150.0
+# Anti-Starvation: linearer Bonus je Tag seit Erstellung, damit auch `prio:niedrig` irgendwann dran ist.
+AGING_WEIGHT_PER_DAY: float = 5.0
+BLOCKED_ISSUES_LIMIT: int = 30   # max. 30 offene `blockiert`-Issues für den Unblock-Hebel abfragen
 # Sekunden, die der Takt aufs Wecken wartet; länger als WAKE_TIMEOUT des Proxys (180 s),
 # damit der Proxy aufgibt und nicht der Takt.
 WAKE_WAIT = int(os.environ.get("WAKE_WAIT", "240"))
@@ -1523,6 +1538,101 @@ def open_pr(n: int) -> bool:
     return True
 
 
+_DEP_LINE_RE = re.compile(r"^\s*Wartet\s+auf\s*:\s*(.+)$", re.IGNORECASE)
+_DEP_ISSUE_RE = re.compile(r"#(\d+)")
+_CODE_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def parse_dependencies(body: str | None) -> list[int]:
+    """Issue-Nummern aus Zeilen der Form „Wartet auf: #X, #Y“; einmal je Nummer, in Textreihenfolge.
+
+    Zeilen innerhalb von Code-Blöcken (``` oder ~~~) sind Beispieltext und zählen nicht: Der
+    Akzeptanztest eines Issues kann selbst „Wartet auf:“ enthalten, ohne eine Abhängigkeit zu sein.
+    """
+    if not body:
+        return []
+    numbers: list[int] = []
+    in_fence = False
+    for line in body.splitlines():
+        if _CODE_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        m = _DEP_LINE_RE.match(line)
+        if not m:
+            continue
+        for num in _DEP_ISSUE_RE.findall(m.group(1)):
+            n = int(num)
+            if n not in numbers:
+                numbers.append(n)
+    return numbers
+
+
+def count_unblock_dependencies(blocked_issues: Iterable[dict]) -> dict[int, int]:
+    """Zählt je Ziel-Issue, wie viele blockierte Issues darauf warten (`Wartet auf: #N`)."""
+    counts: dict[int, int] = {}
+    for issue in blocked_issues or []:
+        for target in parse_dependencies(issue.get("body")):
+            counts[target] = counts.get(target, 0) + 1
+    return counts
+
+
+def blocked_dependency_counts() -> dict[int, int]:
+    """Unblock-Hebel: Ziel-Issue -> Anzahl der offenen `blockiert`-Issues, die darauf warten.
+
+    Fragt höchstens `BLOCKED_ISSUES_LIMIT` Issues ab. Wirft nie: Scheitert `gh` oder kommt keine
+    Liste zurück, ist der Hebel unbekannt und es gilt 0 für jedes Issue — die Auswahl läuft mit
+    den übrigen Kriterien weiter, statt den Takt anzuhalten (#240).
+    """
+    try:
+        blocked = gh("issue", "list", "--state", "open", "--label", "blockiert",
+                     "--limit", str(BLOCKED_ISSUES_LIMIT), "--json", "number,body")
+    except Exception as e:  # noqa: BLE001 — gh-Fehler dürfen die Auswahl nicht anhalten
+        log(f"Warnung: blockierte Issues nicht abfragbar, Unblock-Hebel entfällt "
+            f"({type(e).__name__}).")
+        return {}
+    if not isinstance(blocked, list):
+        return {}
+    return count_unblock_dependencies(blocked)
+
+
+def _issue_prio_score(issue: dict) -> float:
+    """Höchstes Gewicht der Prioritäts-Labels; ohne passendes Label `DEFAULT_PRIO_SCORE`."""
+    best: float | None = None
+    for label in issue.get("labels") or []:
+        name = label.get("name", "") if isinstance(label, dict) else str(label)
+        weight = PRIO_WEIGHTS.get(name)
+        if weight is not None and (best is None or weight > best):
+            best = weight
+    return DEFAULT_PRIO_SCORE if best is None else best
+
+
+def calculate_issue_score(
+    issue: dict,
+    dependency_counts: Mapping[int, int] | None = None,
+    now: float | None = None,
+) -> float:
+    """Gesamtscore eines Issue-Kandidaten: Priorität + Unblock-Hebel + Anti-Starvation.
+
+    `createdAt` ist UTC-ISO-8601 aus `gh issue list`. Fehlt es oder ist es unlesbar, bleibt der
+    Altersbonus 0,0 statt zu scheitern; ein Zeitpunkt in der Zukunft zählt ebenfalls als 0,0.
+    """
+    if now is None:
+        now = jetzt_s()
+    score = _issue_prio_score(issue)
+    score += (dependency_counts or {}).get(issue.get("number"), 0) * UNBLOCK_WEIGHT
+    created_raw = issue.get("createdAt")
+    if isinstance(created_raw, str) and created_raw:
+        try:
+            created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            age_days = (now - created.timestamp()) / 86400.0
+        except (ValueError, TypeError, OverflowError):
+            age_days = 0.0
+        score += max(0.0, age_days) * AGING_WEIGHT_PER_DAY
+    return float(score)
+
+
 def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = None,
               state: dict | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
@@ -1556,6 +1666,11 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
                 "--json", "number,title,body,author,labels")
     # Wie bei Reviews: Nur Issues von Stephans Konto werden zum Auftrag mit Schreibrecht.
     issues = [i for i in issues or [] if (i.get("author") or {}).get("login") == OWNER]
+
+    # #240: Prioritäts-Labels, Unblock-Hebel und Alter vor der Regel-8-Prüfung verrechnen. `sort`
+    # ist stabil, damit gleiche Scores die bisherige Reihenfolge (created-asc) behalten.
+    dep_counts = blocked_dependency_counts()
+    issues.sort(key=lambda cand: calculate_issue_score(cand, dep_counts, now=now), reverse=True)
 
     # Konfliktprüfung mit aktiven Aufträgen (Regel 8: main.py und dieselben Dateien).
     # Unbekannt heißt blockieren: Ohne belegte Lage baut der Takt keinen Auftrag (#32).

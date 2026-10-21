@@ -3102,3 +3102,121 @@ def test_main_nennt_uebersprungene_kandidaten_in_der_slot_telemetrie(monkeypatch
     assert data["message"] == (
         "Übersprungen (1): #329: Datei-Kollision mit aktivem Auftrag auf sandbox/worker_tick.py")
 
+
+
+# --- Dynamisches Prioritäts-Scoring (#240) -------------------------------------------------
+
+def _fake_gh_issue_job(candidates, blocked=(), active=()):
+    """gh-Fake mit getrennten Antworten für aktive, blockierte und bereite Issues (#240)."""
+    def fake_gh(*args):
+        if args[:2] == ("issue", "list"):
+            if "in-arbeit" in args:
+                return list(active)
+            if "blockiert" in args:
+                return list(blocked)
+            return list(candidates)
+        raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
+
+    return fake_gh
+
+
+def test_parse_dependencies_mehrere_zeilen_und_codebloecke():
+    body = (
+        "Wartet auf: #12, #15\n"
+        "Wartet auf: #15\n"
+        "```python\n"
+        "Wartet auf: #99\n"
+        "```\n"
+        "~~~\n"
+        "Wartet auf: #98\n"
+        "~~~\n"
+        "Kein Wartet auf: #97\n"
+    )
+    assert w.parse_dependencies(body) == [12, 15]
+    assert w.parse_dependencies("") == []
+    assert w.parse_dependencies(None) == []
+
+
+def test_count_unblock_dependencies_leere_liste():
+    assert w.count_unblock_dependencies([]) == {}
+    assert w.count_unblock_dependencies([{"number": 1, "body": None}]) == {}
+
+
+def test_blocked_dependency_counts_fragt_limit_ab_und_zaehlt(monkeypatch):
+    calls = []
+
+    def fake_gh(*args):
+        calls.append(args)
+        return [
+            {"number": 101, "body": "Wartet auf: #42, #43"},
+            {"number": 102, "body": "Wartet auf: #42"},
+        ]
+
+    monkeypatch.setattr(w, "gh", fake_gh)
+    assert w.blocked_dependency_counts() == {42: 2, 43: 1}
+    assert calls[0][:4] == ("issue", "list", "--state", "open")
+    assert "blockiert" in calls[0] and str(w.BLOCKED_ISSUES_LIMIT) in calls[0]
+
+
+@pytest.mark.parametrize("antwort", [None, "OPEN", 42, {"number": 1}])
+def test_blocked_dependency_counts_bei_unbrauchbarer_antwort(monkeypatch, antwort):
+    monkeypatch.setattr(w, "gh", lambda *a, **k: antwort)
+    assert w.blocked_dependency_counts() == {}
+
+
+def test_blocked_dependency_counts_wirft_bei_gh_fehler_nicht(monkeypatch, capsys):
+    def kaputt(*args, **kwargs):
+        raise RuntimeError("gh nicht erreichbar")
+
+    monkeypatch.setattr(w, "gh", kaputt)
+    assert w.blocked_dependency_counts() == {}
+    assert "Unblock-Hebel entfällt (RuntimeError)" in capsys.readouterr().out
+
+
+def test_calculate_issue_score_ohne_labels_und_mit_kaputtem_created_at(monkeypatch):
+    monkeypatch.setattr(w, "jetzt_s", lambda: 1700000000.0)
+    issue = {"number": 7, "labels": [], "createdAt": "kein datum"}
+    assert w.calculate_issue_score(issue) == w.DEFAULT_PRIO_SCORE
+    assert w.calculate_issue_score({"number": 7}) == w.DEFAULT_PRIO_SCORE
+
+
+def test_calculate_issue_score_kein_altersbonus_in_der_zukunft():
+    now = 1700000000.0
+    issue = {"number": 7, "labels": [{"name": "prio:niedrig"}],
+             "createdAt": "2023-11-20T22:13:20Z"}
+    assert w.calculate_issue_score(issue, {}, now=now) == 0.0
+
+
+def test_calculate_issue_score_nimmt_hoechstes_label():
+    issue = {"number": 7, "labels": [{"name": "prio:normal"}, {"name": "prio:kritisch"}]}
+    assert w.calculate_issue_score(issue, {}, now=0.0) == 1000.0
+
+
+def test_issue_job_sortiert_nach_score_vor_regel_8(monkeypatch):
+    """#240: Ein hohes Prioritäts-Label kommt vor dem älteren Issue ohne Label zum Zug."""
+    low = _kandidat(10, ["sandbox/a.py"])
+    low["labels"] = [{"name": "prio:niedrig"}]
+    normal = _kandidat(11, ["sandbox/b.py"])
+    monkeypatch.setattr(w, "gh", _fake_gh_issue_job([low, normal]))
+    key, task, _, _ = w.issue_job(now=1700000000.0)
+    assert key == "issue11" and "Du setzt Issue #11 um" in task
+
+
+def test_issue_job_unblock_bonus_bevorzugt_freimachendes_issue(monkeypatch):
+    """#240: Ein Issue, auf das zwei blockierte Aufgaben warten, überholt gleichwertige Arbeit."""
+    wartend = _kandidat(20, ["sandbox/a.py"])
+    freimachend = _kandidat(21, ["sandbox/b.py"])
+    blocked = [{"number": 90, "body": "Wartet auf: #21"},
+               {"number": 91, "body": "Wartet auf: #21, #20"}]
+    monkeypatch.setattr(w, "gh", _fake_gh_issue_job([wartend, freimachend], blocked=blocked))
+    key, task, _, _ = w.issue_job(now=1700000000.0)
+    assert key == "issue21"
+
+
+def test_issue_job_behaelt_bei_gleichem_score_die_stabile_reihenfolge(monkeypatch):
+    """#240: `sort` bleibt stabil — gleiche Scores behalten die bisherige created-asc-Reihenfolge."""
+    erst = _kandidat(30, ["sandbox/a.py"])
+    dann = _kandidat(31, ["sandbox/b.py"])
+    monkeypatch.setattr(w, "gh", _fake_gh_issue_job([erst, dann]))
+    key, _, _, _ = w.issue_job(now=1700000000.0)
+    assert key == "issue30"
