@@ -160,6 +160,12 @@ ORPHAN_MINUTEN = 45
 KOLLISION_MELDUNG_MINUTEN = 60
 KOLLISION = "_kollision:"  # Vorsatz im Zustand: f"_kollision:{cand_no}:{blocker_no}"
 
+# Stillstand melden (#218): Findet der Takt keine Arbeit, obwohl etwas wartet (mindestens ein
+# übersprungenes Issue oder ein geparkter Auftrag), merkt er den Beginn in `_stillstand`. Ab
+# dieser Dauer (Minuten) ununterbrochener Untätigkeit meldet der erste Slot einmal.
+STILLSTAND_MINUTEN = 60
+STILLSTAND = "_stillstand"   # Schlüssel im Zustand: {"seit": <Epoche>, "gemeldet": bool}
+
 
 def reset_kollision_merker(state: dict | None = None) -> None:
     """Setzt die Kollisionsmerker im Zustand zurück (vor allem für Tests)."""
@@ -2005,6 +2011,42 @@ def litellm_up(state: dict, now: float | None = None) -> bool:
     return True
 
 
+def stillstand_pruefen(state: dict, gruende: list[str], now: float | None = None) -> bool:
+    """Merkt und meldet einen Stillstand (#218). Speichert nicht (main speichert danach).
+
+    - Nur der erste Slot (WORKER_SLOT "", "1" oder "w1") prüft; sonst False, state unberührt.
+    - `gruende` leer: `state["_stillstand"]` entfernen, False.
+    - Kein oder unbrauchbarer Eintrag: state["_stillstand"] = {"seit": now, "gemeldet": False}, False.
+    - Dauer >= STILLSTAND_MINUTEN * 60 und noch nicht gemeldet: gemeldet = True und genau eine
+      alarm("-", "Stillstand seit <M> Minuten: <bis zu 3 Gründe, mit „; “ getrennt, ggf. „; +K weitere“>"),
+      Rückgabe True. Sonst False. `now` ist Standard jetzt_s().
+    """
+    if WORKER_SLOT not in ("", "1", "w1"):
+        return False
+    if now is None:
+        now = jetzt_s()
+    if not gruende:
+        state.pop(STILLSTAND, None)
+        return False
+    eintrag = state.get(STILLSTAND)
+    seit = eintrag.get("seit") if isinstance(eintrag, dict) else None
+    if not isinstance(seit, (int, float)) or isinstance(seit, bool):
+        state[STILLSTAND] = {"seit": now, "gemeldet": False}
+        return False
+    if eintrag.get("gemeldet"):
+        return False
+    if now - seit < STILLSTAND_MINUTEN * 60:
+        return False
+    eintrag["gemeldet"] = True
+    minuten = int((now - seit) // 60)
+    text = "; ".join(gruende[:3])
+    weitere = len(gruende) - 3
+    if weitere > 0:
+        text += f"; +{weitere} weitere"
+    alarm("-", f"Stillstand seit {minuten} Minuten: {text}")
+    return True
+
+
 def key_info() -> dict | None:
     """Verbrauch und Limit des eigenen Worker-Keys aus GET {LITELLM}/key/info.
 
@@ -2894,8 +2936,19 @@ def main() -> int:
                 settle_pending(state, key_info())
             log_on_change(state, LAST_WORK, "keine", "Keine Arbeit.")
             parked = parked_job(state)
+            # #218: Wartet etwas (übersprungen oder geparkt), ist die Untätigkeit ein Stillstand;
+            # nach einer Stunde nennt der erste Slot die Gründe genau einmal (Regel 7).
+            gruende = list(SKIPPED)
+            if parked:
+                gruende.append(f"{parked}: geparkt (wartet auf Stephan)")
+            stillstand_vorher = state.get(STILLSTAND)
+            gemeldet = stillstand_pruefen(state, gruende)
+            if gemeldet or state.get(STILLSTAND) != stillstand_vorher:
+                save_state(state)
             slot_status("idle", project=PROJECT, message=idle_message(parked, SKIPPED))
             return 0
+        if state.pop(STILLSTAND, None) is not None:
+            save_state(state)   # #218: Es läuft wieder Arbeit, der Stillstand endet
         key, task, pr_no, before = job
         skey = PREFIX + key          # im Zustand und im Log mit Projektvorsatz (beim ersten Projekt leer)
         if BACKEND != "litellm" and not ollama_free(
