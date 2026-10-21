@@ -765,6 +765,31 @@ def test_unblock_dependent_issues_dry_run_vs_post(monkeypatch, capsys):
     assert edits[0] == ["issue", "edit", "202", "--add-label", "bereit", "--remove-label", "blockiert"]
 
 
+def test_unblock_dependent_issues_ignoriert_entwurf(monkeypatch, capsys):
+    """Issues mit Label 'entwurf' werden trotz erfüllter Abhängigkeiten nicht entblockt."""
+    blocked_issues = [
+        {
+            "number": 220,
+            "title": "Entwurf 220",
+            "body": "### Kontext\nWartet auf: #219",
+            "labels": [{"name": "entwurf"}, {"name": "blockiert"}],
+        }
+    ]
+    edits = []
+    monkeypatch.setattr(r, "gh_json", lambda *a, **k: blocked_issues if a[:2] == ("issue", "list") else {"state": "MERGED"})
+    monkeypatch.setattr(r, "gh_text", lambda *a, **k: edits.append(list(a)) or "")
+    monkeypatch.setattr(r, "POST", True)
+    state = {}
+    monkeypatch.setattr(r, "load_state", lambda: state)
+    monkeypatch.setattr(r, "save_state", lambda s: None)
+
+    res = r.unblock_dependent_issues()
+    assert res == []
+    assert edits == []
+    assert "bleibt aber 'entwurf'" in capsys.readouterr().out
+    assert state.get("entblock_gemeldet") == [220]
+
+
 def test_auto_merge_when_approved_and_auto_mode(monkeypatch):
     monkeypatch.setattr(r, "POST", True)
     monkeypatch.setattr(r, "AUTO_MERGE", True)

@@ -95,6 +95,14 @@ def test_gh_token_fehler_gibt_none(monkeypatch):
     assert gh_client.gh("issue", "list") is None
 
 
+def test_gh_token_fehler_ohne_token_string_in_stderr_gibt_none(monkeypatch):
+    """Exitcode 4 bedeutet Token-/Auth-Fehler auch ohne 'GH_TOKEN' in stderr (Issue #219)."""
+    monkeypatch.setattr(
+        gh_client.subprocess, "run",
+        FakeRun(code=4, stderr="authentication failed: bad credentials"))
+    assert gh_client.gh("issue", "list") is None
+
+
 def test_gh_andere_fehler_werden_weitergereicht(monkeypatch):
     """Rate-Limit und Netzfehler dürfen nicht als „kein Ergebnis“ durchgehen."""
     monkeypatch.setattr(

@@ -898,7 +898,7 @@ def unblock_dependent_issues() -> list[int]:
     (Zustandsliste `entblock_gemeldet`) statt still übersprungen (Regel 7)."""
     try:
         blocked = gh_json("issue", "list", "--state", "open", "--label", "blockiert",
-                          "--limit", str(BLOCKED_ISSUES_LIMIT), "--json", "number,title,body")
+                          "--limit", str(BLOCKED_ISSUES_LIMIT), "--json", "number,title,body,labels")
     except Exception as exc:
         log(f"Konnte blockierte Issues nicht abfragen: {exc}")
         return []
@@ -922,6 +922,15 @@ def unblock_dependent_issues() -> list[int]:
             continue
         all_resolved = all(is_dependency_resolved(d, dep_cache) for d in deps)
         if all_resolved:
+            labels = {l.get("name") for l in issue.get("labels", []) if isinstance(l, dict)}
+            if "entwurf" in labels:
+                state = load_state()
+                seen = state.setdefault("entblock_gemeldet", [])
+                if num not in seen:
+                    log(f"Issue #{num}: Alle Abhängigkeiten {deps} erledigt, bleibt aber 'entwurf' (kein Akzeptanztest).")
+                    seen.append(num)
+                    save_state(state)
+                continue
             if not POST:
                 state = load_state()
                 seen = state.setdefault("entblock_gemeldet", [])
