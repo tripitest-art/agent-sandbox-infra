@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `sandbox/core`: GitHub-CLI (`gh`, `gh_json`) und LiteLLM-Proxy (`probe_model`, `get_key_info`) als eigenständige Module mit Unit-Tests; `install.sh` legt sie beim Deploy als `/root/core/` ab (PR folgt).
 - `review_tick`: schreibt ein eigenes Audit-Log (`AUDIT_LOG`, Vorgabe `/root/audit.jsonl`) mit JSON-Zeilen für `review_started`, `review_finished` (Urteil, antwortendes Modell, Token-Zahlen, Kosten), `pr_merged` und `to_stephan`; Review-Aktivitäten, Verbrauch und Freigabequote lassen sich damit ohne Log-Regexe auswerten, Geheimnis-Felder stehen nur als `***` drin (PR folgt).
 - `worker_tick`: Issue-Kandidaten werden vor der Regel-8-Prüfung nach einem dynamischen Score sortiert — Prioritäts-Labels (`prio:kritisch`/`hoch`/`normal`/`niedrig`), ein Unblock-Hebel je blockierter Folgeaufgabe (`Wartet auf: #N`, höchstens 30 abgefragt, `gh`-Fehler zählen als 0) und ein Altersbonus gegen Verhungern; bei Gleichstand bleibt `sort:created-asc` stabil, und ein unlesbares `createdAt` kostet keinen Bonus (PR folgt).
 - `worker_tick`: Issue-Aufträge bekommen Branch und Akzeptanztest-Commit jetzt über `prepare_issue_frame()` aus `worker_frame` (deterministisch, ohne Modell); `autofix_pr_text()` vervollständigt einen unvollständigen PR-Text direkt per `gh pr edit` und fällt bei einem `gh`-Fehler auf `warn_text()` zurück (PR folgt).
