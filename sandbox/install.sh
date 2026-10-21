@@ -182,6 +182,12 @@ git config --system user.email "tripitest@gmail.com"
 # Objekte liegen dort). Ohne Schreibrecht scheitert schon `git add`; der Takt bleibt root und
 # darf weiterhin alles. Neue Slots legt der Takt an, install.sh fasst sie beim nächsten Lauf mit.
 for dir in $(project_workdirs); do
+  # Übergeordnete Verzeichnisse unter /root (etwa /root/work) durchquerbar halten (#237)
+  p=$(dirname "$dir")
+  while [ "$p" != "/root" ] && [ "$p" != "/" ] && [ "$p" != "." ]; do
+    if [ -d "$p" ]; then chmod 755 "$p"; fi
+    p=$(dirname "$p")
+  done
   for ziel in "$dir/.git" "${dir%/}-worktrees"; do
     if [ -e "$ziel" ]; then chown -R "$AGENT_USER" "$ziel"; fi
   done
@@ -192,6 +198,7 @@ done
 # systemd legt worker.log mit 644 an, deshalb hier ausdrücklich nur für root lesbar.
 chgrp "$AGENT_USER" /root
 chmod g+x /root
+[ -d /root/work ] && chmod 755 /root/work
 chmod 600 /root/worker.log /root/audit.jsonl 2>/dev/null || true
 # Geheimnisdateien unlesbar für andere Nutzer halten (Regel 5). Fehlen sie, ist das kein Fehler:
 # qwen-reviewer.env gibt es nur mit Review-Key, agent-dashboard.env nur mit DASHBOARD=1.
