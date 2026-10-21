@@ -736,6 +736,34 @@ def pr_snapshot(pr: dict) -> tuple:
     return pr["headRefOid"], pr.get("title", ""), (pr.get("body") or "").replace("\r\n", "\n")
 
 
+def verify_rework_pr(pr_no: int, expected_head_oid: str) -> tuple[bool, str]:
+    """Prüft via gh pr view, ob der PR noch OPEN ist und HEAD unverändert ist.
+
+    Zwischen der Auswahl der Nacharbeit und dem Agentenstart liegt die Modellprobe
+    (`choose_model`, bis `PROBE_TIMEOUT`). Wird der PR in dieser Zeit gemergt oder geschlossen,
+    wäre der Lauf verbrannte Zeit; ein fremder Push macht den Stand veraltet (#215).
+    Gibt (True, "") zurück, wenn OK, sonst (False, 'Abbruchgrund').
+
+    Wie `job_still_open()` ist eine unklare Lage kein Abbruchgrund: `--json state,headRefOid`
+    liefert beides, und eine gescheiterte oder unvollständige Auskunft darf eine fällige
+    Nacharbeit nicht dauerhaft blockieren (Regel 7).
+    """
+    try:
+        view = gh("pr", "view", str(pr_no), "--json", "state,headRefOid")
+    except Exception as e:
+        log(f"Warnung: PR #{pr_no} nicht prüfbar ({type(e).__name__}), Nacharbeit läuft.")
+        return True, ""
+    if not isinstance(view, dict) or "state" not in view:
+        return True, ""
+    if view.get("state") != "OPEN":
+        return False, f"PR #{pr_no} ist nicht mehr OPEN ({view.get('state')})"
+    head = view.get("headRefOid") or ""
+    if head != expected_head_oid:
+        return False, (f"HEAD hat sich geändert ({head[:7] or 'unbekannt'} "
+                       f"statt {expected_head_oid[:7]})")
+    return True, ""
+
+
 def rework_job(done=frozenset(), skip: Callable[[str], bool] | None = None):
     """(Schlüssel, Auftrag, PR-Nummer, pr_snapshot) für die älteste fällige Nacharbeit oder None.
 
@@ -2732,6 +2760,16 @@ def main() -> int:
         n = job_issue_number(key)
         if n is not None and not claim_issue(n):
             return 0
+
+        # #215: Bis hierher lag die Modellprobe. Ist der PR inzwischen gemergt/geschlossen oder
+        # fremd gepusht, wäre die Nacharbeit überholt – vor dem Zähler prüfen, damit sie keinen
+        # Versuch verbraucht.
+        if pr_no is not None and before is not None:
+            ok, reason = verify_rework_pr(pr_no, before[0])
+            if not ok:
+                log(f"{skey}: Nacharbeit übersprungen ({reason})")
+                slot_status("idle", project=PROJECT)
+                return 0
 
         state[skey] = state.get(skey, 0) + 1
         save_state(state)
