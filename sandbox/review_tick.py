@@ -268,6 +268,16 @@ def pr_files(number: int) -> list[dict] | None:
         return None
 
 
+def pr_fresh_state(number: int) -> dict | None:
+    """Aktueller Zustand und Head-Commit eines PRs (`gh pr view <n> --json state,headRefOid`).
+    None bei Aufruffehler (Netz, Token, gh-Fehler)."""
+    try:
+        data = gh_json("pr", "view", str(number), "--json", "state,headRefOid")
+        return data if isinstance(data, dict) else None
+    except (subprocess.CalledProcessError, KeyError, TypeError):
+        return None
+
+
 def load_state() -> dict:
     try:
         with open(STATE) as fh:
@@ -1128,6 +1138,28 @@ def _run_pr_review() -> int:
           usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
                  "kosten": round(sum(kosten), 8) if kosten else (0.0 if no_model else None)})
     if POST:
+        # Frische Prüfung vor dem Posten (#254, #256): Wurde der PR während des Modellaufrufs
+        # geschlossen/gemergt oder kam ein neuer Commit hinzu? Verhindert rote 'review: FAILURE'-Checks
+        # auf bereits gemergten PRs.
+        fresh = pr_fresh_state(n)
+        if fresh and "state" in fresh:
+            st = fresh.get("state")
+            if st != "OPEN":
+                st_text = st or "geschlossen"
+                log(f"PR #{n}: während des Reviews bereits {st_text}; Posten und Status übersprungen.")
+                audit("review_dropped_closed", pr=n, sha=pr["headRefOid"], state=st_text)
+                state.setdefault("erledigt", []).append(key)
+                save_state(state)
+                if verdict == VERDICTS[1]:
+                    log(f"PR #{n}: ⚠ Stephan: wurde während des Reviews bereits {st_text}, "
+                        f"Reviewer meldete jedoch {muss} Muss-Punkte.")
+                return 0
+            fresh_sha = fresh.get("headRefOid")
+            if fresh_sha and fresh_sha != pr["headRefOid"]:
+                log(f"PR #{n}: Head-Commit hat sich während des Reviews geändert "
+                    f"({pr['headRefOid'][:7]} -> {fresh_sha[:7]}); Review verworfen.")
+                audit("review_dropped_new_head", pr=n, sha=pr["headRefOid"], new_sha=fresh_sha)
+                return 0
         post_review(n, text)
         post_review_status(pr["headRefOid"], verdict)
         # #178: Erst nach dem Posten steht fest, dass dieses Review Ausgaben verursacht hat.
