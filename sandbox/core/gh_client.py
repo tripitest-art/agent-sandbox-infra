@@ -23,7 +23,7 @@ def gh(
 
     - `repo` hängt `--repo <repo>` an, außer der Aufruf beginnt mit `api` (dort steht das
       Repository schon im Pfad, und `gh api` kennt die Option nicht).
-    - None bei leerer Ausgabe und beim Token-Fehler (Exitcode 4 mit `GH_TOKEN` in stderr):
+    - None bei leerer Ausgabe und beim Token-Fehler (Exitcode 4):
       Ohne Token ist kein GitHub-Zugriff möglich, das ist ein Zustand und kein Absturz.
     - Geparstes JSON, wenn die Ausgabe valides JSON ist; sonst der getrimmte Rohtext.
     - Jeder andere Fehler (Rate-Limit, Netz, Berechtigung) wird als
@@ -41,7 +41,7 @@ def gh(
             timeout=timeout,
         )
     except subprocess.CalledProcessError as exc:
-        if exc.returncode == 4 and "GH_TOKEN" in (getattr(exc, "stderr", None) or ""):
+        if exc.returncode == 4:
             return None
         raise
     text = out.stdout.strip()

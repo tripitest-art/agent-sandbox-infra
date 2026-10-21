@@ -1,0 +1,1 @@
+- core / review_tick: `gh_client` liefert bei jedem Exitcode 4 `None` (Behebung des Review-Einwands aus #219/#254); `review_tick.unblock_dependent_issues` überspringt Issues mit Label `entwurf`, um vorzeitigen Start unfertiger Aufgaben ohne Akzeptanztest zu verhindern.
