@@ -322,7 +322,7 @@ def _fake_github(monkeypatch, prs, llm_text=OK_REVIEW, calls=None, diff="diff --
         if args[:2] == ("issue", "view"):
             return {"number": 5, "title": "Das Issue", "body": "Betroffene Dateien: a.py"}
         if args[:2] == ("pr", "view"):
-            return {"files": [{"path": "a.py", "additions": 3, "deletions": 0}]}
+            return {"files": [{"path": "a.py", "additions": 3, "deletions": 0}], "state": "OPEN", "headRefOid": SHA}
         raise AssertionError(args)
 
     monkeypatch.setattr(r, "gh_json", gh_json)
@@ -1016,9 +1016,11 @@ def _github_mit_manual_paths(monkeypatch, manual_paths, files):
             return []
         if args[:2] == ("issue", "view") and "labels" not in args:
             return {"number": 5, "title": "T", "body": "### Merge-Modus\nautomatisch"}
-        if args[:2] == ("pr", "view"):
+        if args[:2] == ("pr", "view") and "files" in args:
             calls["dateiliste"].append(args)
             return {"files": [{"path": f, "additions": 1, "deletions": 0} for f in files]}
+        if args[:2] == ("pr", "view") and "state,headRefOid" in args:
+            return {"state": "OPEN", "headRefOid": SHA}
         return base_json(*args)
 
     def gh_text(*args, **kw):
@@ -1536,3 +1538,73 @@ def test_to_stephan_im_audit(monkeypatch, tmp_path):
     assert e["event"] == "to_stephan" and e["pr"] == 7 and e["sha"] == SHA
     assert e["reason"] == "Freigegeben, Merge-Modus manuell"
 
+
+
+
+def test_pr_fresh_state_prueft_argumente_und_loggt_nach_regel_7(monkeypatch, capsys):
+    """pr_fresh_state prüft exakte CLI-Parameter und loggt bei Fehlern oder unvollständigem Dict."""
+    aufrufe = []
+    def fake_gh_json(*args):
+        aufrufe.append(args)
+        return {"state": "OPEN", "headRefOid": "abc"}
+
+    monkeypatch.setattr(r, "gh_json", fake_gh_json)
+    res = r.pr_fresh_state(42)
+    assert res == {"state": "OPEN", "headRefOid": "abc"}
+    assert aufrufe == [("pr", "view", "42", "--json", "state,headRefOid")]
+
+    # Fehlerfall loggt nach Regel 7
+    def fail(*a):
+        raise r.subprocess.CalledProcessError(1, "gh")
+    monkeypatch.setattr(r, "gh_json", fail)
+    assert r.pr_fresh_state(42) is None
+    out = capsys.readouterr().out
+    assert "Zustand vor Posten nicht abfragbar (CalledProcessError), Guard ausgesetzt" in out
+
+    # Unvollständiges Dict (kein state) loggt ebenfalls
+    monkeypatch.setattr(r, "gh_json", lambda *a: {"headRefOid": "abc"})
+    assert r.pr_fresh_state(42) is None
+    out = capsys.readouterr().out
+    assert "Zustand vor Posten unvollständig (kein 'state' im Ergebnis), Guard ausgesetzt" in out
+
+
+def test_post_mode_skips_when_pr_closed_or_merged_during_review(monkeypatch, capsys, tmp_path):
+    """#254/#256: Wurde der PR während des Modellaufrufs geschlossen oder gemergt, unterbleibt das Posten
+    und das Setzen des Commit-Status 'review: FAILURE'."""
+    monkeypatch.setattr(r, "POST", True)
+    calls = _fake_github(monkeypatch, [_pr()], llm_text=BAD_REVIEW)
+    monkeypatch.setattr(r, "pr_fresh_state", lambda n: {"state": "MERGED", "headRefOid": SHA})
+
+    status_calls = []
+    def fake_post_status(sha, verdict):
+        status_calls.append((sha, verdict))
+        return True
+    monkeypatch.setattr(r, "post_review_status", fake_post_status)
+
+    r.run_once()
+    assert "posted" not in calls
+    assert status_calls == []
+    out = capsys.readouterr().out
+    assert "während des Reviews bereits MERGED; Posten und Status übersprungen" in out
+    assert "⚠ Stephan: wurde während des Reviews bereits MERGED" in out
+    ev = [e for e in _audit_zeilen(tmp_path / "audit.jsonl") if e["event"] == "review_dropped_closed"]
+    assert len(ev) == 1 and ev[0]["pr"] == 7 and ev[0]["state"] == "MERGED"
+
+
+def test_post_mode_discards_when_head_commit_changed_during_review(monkeypatch, capsys, tmp_path):
+    """Wurde während des Modellaufrufs ein neuer Commit gepusht, wird das Review verworfen."""
+    monkeypatch.setattr(r, "POST", True)
+    calls = _fake_github(monkeypatch, [_pr()])
+    new_sha = "b" * 40
+    monkeypatch.setattr(r, "pr_fresh_state", lambda n: {"state": "OPEN", "headRefOid": new_sha})
+
+    status_calls = []
+    monkeypatch.setattr(r, "post_review_status", lambda sha, v: status_calls.append((sha, v)) or True)
+
+    r.run_once()
+    assert "posted" not in calls
+    assert status_calls == []
+    out = capsys.readouterr().out
+    assert "Head-Commit hat sich während des Reviews geändert" in out
+    ev = [e for e in _audit_zeilen(tmp_path / "audit.jsonl") if e["event"] == "review_dropped_new_head"]
+    assert len(ev) == 1 and ev[0]["pr"] == 7 and ev[0]["new_sha"] == new_sha

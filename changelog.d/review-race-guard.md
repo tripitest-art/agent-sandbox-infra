@@ -1,0 +1,1 @@
+- review_tick: Vor dem Posten von Review und Status-Context wird der Zustand des PRs frisch geprüft (`pr_fresh_state`); bei zwischenzeitlich gemergten oder geschlossenen PRs wird kein Review/Status mehr abgesetzt (#254, #256).
