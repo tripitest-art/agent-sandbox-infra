@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `sandbox/core`: Auftrags-Belegung (`claim_job`, `release_job`, `mark_job_done`, `job_done_anywhere`, `cleanup_claims`) und Git-Operationen (`clean_worktree`, `get_current_head`, `branch_exists`) als eigenständige Module mit Unit-Tests; Belegungsverzeichnis und PID kommen als Argument herein, damit Worker und Review dieselbe Logik nutzen (PR folgt).
 - `worker_tick`: Fair-Share-Scheduling über Projekte — `pick_job()` beginnt beim Projekt nach dem zuletzt bedienten (`_last_project` im Slot-Zustand, `ordered_projects()` rotiert die Liste deterministisch) und prüft bei fehlender Arbeit die übrigen in derselben Rotation; ein dauerhaft volles erstes Projekt hungert die weiteren nicht mehr aus, fehlende Klone werden weiter einmal gemeldet und übersprungen (PR folgt).
 - `sandbox/core`: GitHub-CLI (`gh`, `gh_json`) und LiteLLM-Proxy (`probe_model`, `get_key_info`) als eigenständige Module mit Unit-Tests; `install.sh` legt sie beim Deploy als `/root/core/` ab (PR folgt).
 - `review_tick`: schreibt ein eigenes Audit-Log (`AUDIT_LOG`, Vorgabe `/root/audit.jsonl`) mit JSON-Zeilen für `review_started`, `review_finished` (Urteil, antwortendes Modell, Token-Zahlen, Kosten), `pr_merged` und `to_stephan`; Review-Aktivitäten, Verbrauch und Freigabequote lassen sich damit ohne Log-Regexe auswerten, Geheimnis-Felder stehen nur als `***` drin (PR folgt).

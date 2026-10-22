@@ -316,8 +316,9 @@ echo "== Taktgeber"
 # muss ohne weitere Änderung mitkommen – sonst stirbt der Takt beim Start mit einem Traceback.
 install -m 644 "$SCRIPT_DIR"/*.py /root/
 chmod 755 /root/worker_tick.py /root/review_tick.py /root/wake_listener.py   # werden direkt gestartet
-# Eigenständige Module unter sandbox/core/ (GitHub-CLI, LiteLLM) kommen als Paket nach /root/core/:
-# Neben den Takt-Skripten findet ein späterer `from core import gh_client` sie ohne weiteren Pfad.
+# Eigenständige Module unter sandbox/core/ (GitHub-CLI, LiteLLM, Auftrags-Belegung, Git-Operationen)
+# kommen als Paket nach /root/core/: Neben den Takt-Skripten findet ein späterer
+# `from core import gh_client` sie ohne weiteren Pfad.
 install -d -m 755 /root/core
 install -m 644 "$SCRIPT_DIR"/core/*.py /root/core/
 
