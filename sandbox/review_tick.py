@@ -270,11 +270,20 @@ def pr_files(number: int) -> list[dict] | None:
 
 def pr_fresh_state(number: int) -> dict | None:
     """Aktueller Zustand und Head-Commit eines PRs (`gh pr view <n> --json state,headRefOid`).
-    None bei Aufruffehler (Netz, Token, gh-Fehler)."""
+    None bei Aufruffehler (Netz, Token, gh-Fehler) oder unvollständiger Antwort.
+    Regel 7: Scheitert die Abfrage oder fehlt 'state', wird eine Logzeile geschrieben,
+    damit ein ausgefallener Race-Guard im Log sichtbar bleibt."""
     try:
         data = gh_json("pr", "view", str(number), "--json", "state,headRefOid")
-        return data if isinstance(data, dict) else None
-    except (subprocess.CalledProcessError, KeyError, TypeError):
+        if isinstance(data, dict):
+            if "state" not in data:
+                log(f"PR #{number}: Zustand vor Posten unvollständig (kein 'state' im Ergebnis), Guard ausgesetzt.")
+                return None
+            return data
+        log(f"PR #{number}: Zustand vor Posten ungültig ({type(data).__name__}), Guard ausgesetzt.")
+        return None
+    except Exception as exc:
+        log(f"PR #{number}: Zustand vor Posten nicht abfragbar ({type(exc).__name__}), Guard ausgesetzt.")
         return None
 
 
@@ -1142,7 +1151,7 @@ def _run_pr_review() -> int:
         # geschlossen/gemergt oder kam ein neuer Commit hinzu? Verhindert rote 'review: FAILURE'-Checks
         # auf bereits gemergten PRs.
         fresh = pr_fresh_state(n)
-        if fresh and "state" in fresh:
+        if fresh is not None:
             st = fresh.get("state")
             if st != "OPEN":
                 st_text = st or "geschlossen"

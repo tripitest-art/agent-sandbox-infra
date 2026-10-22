@@ -1541,15 +1541,31 @@ def test_to_stephan_im_audit(monkeypatch, tmp_path):
 
 
 
-def test_pr_fresh_state_returns_dict_or_none(monkeypatch):
-    """pr_fresh_state liefert das Dict bei Erfolg und None bei Exception."""
-    monkeypatch.setattr(r, "gh_json", lambda *a: {"state": "OPEN", "headRefOid": "abc"})
-    assert r.pr_fresh_state(123) == {"state": "OPEN", "headRefOid": "abc"}
+def test_pr_fresh_state_prueft_argumente_und_loggt_nach_regel_7(monkeypatch, capsys):
+    """pr_fresh_state prüft exakte CLI-Parameter und loggt bei Fehlern oder unvollständigem Dict."""
+    aufrufe = []
+    def fake_gh_json(*args):
+        aufrufe.append(args)
+        return {"state": "OPEN", "headRefOid": "abc"}
 
+    monkeypatch.setattr(r, "gh_json", fake_gh_json)
+    res = r.pr_fresh_state(42)
+    assert res == {"state": "OPEN", "headRefOid": "abc"}
+    assert aufrufe == [("pr", "view", "42", "--json", "state,headRefOid")]
+
+    # Fehlerfall loggt nach Regel 7
     def fail(*a):
         raise r.subprocess.CalledProcessError(1, "gh")
     monkeypatch.setattr(r, "gh_json", fail)
-    assert r.pr_fresh_state(123) is None
+    assert r.pr_fresh_state(42) is None
+    out = capsys.readouterr().out
+    assert "Zustand vor Posten nicht abfragbar (CalledProcessError), Guard ausgesetzt" in out
+
+    # Unvollständiges Dict (kein state) loggt ebenfalls
+    monkeypatch.setattr(r, "gh_json", lambda *a: {"headRefOid": "abc"})
+    assert r.pr_fresh_state(42) is None
+    out = capsys.readouterr().out
+    assert "Zustand vor Posten unvollständig (kein 'state' im Ergebnis), Guard ausgesetzt" in out
 
 
 def test_post_mode_skips_when_pr_closed_or_merged_during_review(monkeypatch, capsys, tmp_path):
