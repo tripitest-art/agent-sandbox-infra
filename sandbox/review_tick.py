@@ -90,6 +90,8 @@ BASE_DRAFT_DIR = os.environ.get("REVIEW_DRAFTS", "/root/reviews")
 STATE, DRAFT_DIR = BASE_STATE, BASE_DRAFT_DIR
 MAX_ROUNDS = agent_settings.value("MAX_ROUNDS", 2)   # „Änderungen nötig“ je PR, danach liegt er bei Stephan
 MERGE_RETRIES = 6          # so viele Takte lang wird ein gescheiterter Merge wiederholt
+REVIEW_OUTAGE_FAILS = 3      # aufeinanderfolgende Fehlschläge je Modellalias bis zur Meldung
+REVIEW_OUTAGE_MINUTEN = 30   # oder Minuten seit dem ersten Fehlschlag der Serie
 BIG_DIFF_CHARS = 90_000     # darüber: REVIEW_MODEL_BIG
 MAX_DIFF_CHARS = 400_000    # darüber: nicht prüfen, an Stephan melden
 PR_LIST_LIMIT = 10          # GraphQL-Kontingent schonen: max. 10 offene PRs je Takt
@@ -299,6 +301,46 @@ def load_state() -> dict:
 def save_state(state: dict) -> None:
     with open(STATE, "w") as fh:
         json.dump(state, fh, indent=1)
+
+
+def note_llm_outage(state: dict, model: str, exc: Exception, n: int, now: datetime | None = None) -> None:
+    """Zählt einen Fehlschlag von call_llm für `model` (ein URLError, OSError, ValueError oder KeyError).
+
+    `now` ist Standard _now() (zeitzonenbehaftet, UTC). Im Zustand steht je Alias unter
+    state["ausfall"][model] ein Dict {"seit": <ISO-8601 des ersten Fehlschlags>, "fehler": <Anzahl>,
+    "gemeldet": <bool>}; das erste Mal wird es mit fehler 0, gemeldet False angelegt, dann um 1 erhöht.
+    Ist gemeldet noch False und fehler >= REVIEW_OUTAGE_FAILS oder die Minuten seit "seit" >=
+    REVIEW_OUTAGE_MINUTEN: gemeldet = True und genau eine Zeile
+    log(f"⚠ Stephan: Reviewer-Modell {model} antwortet seit {M} Minuten nicht ({type(exc).__name__}), PR #{n} wartet.")
+    mit M = ganze Minuten seit "seit" (abgerundet). Nur der Klassenname, nie der Ausnahmetext (Regel 5).
+    Speichert immer mit save_state(state). Wirft nie."""
+    try:
+        jetzt = now or _now()
+        eintrag = state.setdefault("ausfall", {}).setdefault(
+            model, {"seit": jetzt.isoformat(), "fehler": 0, "gemeldet": False})
+        eintrag["fehler"] = int(eintrag.get("fehler", 0)) + 1
+        if not eintrag.get("gemeldet"):
+            seit = datetime.fromisoformat(eintrag["seit"])
+            minuten = int((jetzt - seit).total_seconds() // 60)
+            if eintrag["fehler"] >= REVIEW_OUTAGE_FAILS or minuten >= REVIEW_OUTAGE_MINUTEN:
+                eintrag["gemeldet"] = True
+                log(f"⚠ Stephan: Reviewer-Modell {model} antwortet seit {minuten} Minuten nicht "
+                    f"({type(exc).__name__}), PR #{n} wartet.")
+        save_state(state)
+    except Exception as e:
+        # Ein kaputter Zähler darf den Takt nicht anhalten; sichtbar bleibt er trotzdem (Regel 7).
+        log(f"Ausfall-Zähler nicht speicherbar ({type(e).__name__}).")
+
+
+def note_llm_ok(state: dict, model: str) -> None:
+    """Ein erfolgreicher call_llm beendet die Serie: state["ausfall"].pop(model, None); war ein Eintrag
+    da, save_state(state), sonst nichts. Ein späterer Ausfall meldet damit wieder. Wirft nie."""
+    try:
+        ausfall = state.get("ausfall")
+        if isinstance(ausfall, dict) and ausfall.pop(model, None) is not None:
+            save_state(state)
+    except Exception as e:
+        log(f"Ausfall-Zähler nicht speicherbar ({type(e).__name__}).")
 
 
 def extract_section(md: str, heading: str, until: tuple[str, ...] = ()) -> str:
@@ -1102,7 +1144,9 @@ def _run_pr_review() -> int:
                     raw, usage = call_llm(model, messages)
                 except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
                     log(f"PR #{n}: Modell {model} antwortet nicht ({type(exc).__name__}), nächster Takt.")
+                    note_llm_outage(state, model, exc, n)
                     return 0
+                note_llm_ok(state, model)
                 # #178: Jeder Aufruf zählt, auch der unbrauchbare, der das Ausweichen auslöst.
                 modelle.append(model)
                 letztes_modell = model

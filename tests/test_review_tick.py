@@ -1613,3 +1613,51 @@ def test_post_mode_discards_when_head_commit_changed_during_review(monkeypatch, 
     assert "Head-Commit hat sich während des Reviews geändert" in out
     ev = [e for e in _audit_zeilen(tmp_path / "audit.jsonl") if e["event"] == "review_dropped_new_head"]
     assert len(ev) == 1 and ev[0]["pr"] == 7 and ev[0]["new_sha"] == new_sha
+
+
+def test_llm_ausfall_wird_im_takt_gezaehlt_und_einmal_gemeldet(monkeypatch, capsys):
+    """#273: Fehlerzweig in _run_pr_review. Drei Takte ohne Antwort ergeben genau eine ⚠-Zeile;
+    der Zähler steht im Zustand und wächst weiter, ohne erneut zu melden."""
+    _fake_github(monkeypatch, [_pr()])
+
+    def ausfall(model, messages):
+        raise urllib.error.URLError("Modell weg")
+    monkeypatch.setattr(r, "call_llm", ausfall)
+
+    def meldungen():
+        return [z for z in capsys.readouterr().out.splitlines() if "⚠ Stephan: Reviewer-Modell" in z]
+
+    for _ in range(2):
+        assert r.run_once() == 0
+    assert meldungen() == []
+    assert r.load_state()["ausfall"]["coder-glm"]["fehler"] == 2
+    assert r.load_state()["ausfall"]["coder-glm"]["gemeldet"] is False
+
+    assert r.run_once() == 0
+    zeilen = meldungen()
+    assert len(zeilen) == 1 and "coder-glm" in zeilen[0] and "PR #7" in zeilen[0]
+    assert "URLError" in zeilen[0] and "Modell weg" not in zeilen[0]   # nur Klasse, nie der Text
+    assert r.load_state()["ausfall"]["coder-glm"]["fehler"] == 3
+    assert r.load_state()["ausfall"]["coder-glm"]["gemeldet"] is True
+
+    assert r.run_once() == 0
+    assert meldungen() == []
+    assert r.load_state()["ausfall"]["coder-glm"]["fehler"] == 4
+
+
+def test_erfolgreicher_aufruf_loescht_den_ausfall_zaehler(monkeypatch, tmp_path):
+    """#273: Erfolgszweig in _run_pr_review. Antwortet das Modell wieder, verschwindet der Eintrag,
+    damit ein späterer Ausfall erneut meldet."""
+    _fake_github(monkeypatch, [_pr()])
+
+    def ausfall(model, messages):
+        raise urllib.error.URLError("Modell weg")
+    monkeypatch.setattr(r, "call_llm", ausfall)
+    for _ in range(2):
+        assert r.run_once() == 0
+    assert r.load_state()["ausfall"]["coder-glm"]["fehler"] == 2
+
+    calls = _fake_github(monkeypatch, [_pr()])      # Modell antwortet wieder
+    assert r.run_once() == 0
+    assert calls["llm"] == 1
+    assert "coder-glm" not in r.load_state().get("ausfall", {})
