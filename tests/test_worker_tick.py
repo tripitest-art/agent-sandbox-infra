@@ -791,6 +791,169 @@ def test_main_anbieterfehler_zaehler_faellt_nicht_unter_null(monkeypatch, tmp_pa
     assert json.loads(state.read_text(encoding="utf-8"))["issue102"] == 0
 
 
+# --- #243: Sandbox-Check vor dem Claim, GID-Drop und Claim-Rollback bei Infrastrukturfehlern ---
+
+def _fake_pwd(uid, gid):
+    """Ersatz für das pwd-Modul: ein Nutzer mit diesen IDs, „gibtsnicht“ existiert nicht."""
+
+    class Eintrag:
+        pw_uid, pw_gid, pw_dir = uid, gid, "/home/worker"
+
+    class Pwd:
+        def getpwnam(self, user):
+            if user == "gibtsnicht":
+                raise KeyError(user)
+            return Eintrag()
+
+    return Pwd()
+
+
+def test_detect_infra_error_erkennt_muster_und_ignoriert_testfehler():
+    assert w.detect_infra_error("Error: EACCES: permission denied, lstat '/root/work'\n") == \
+        "Error: EACCES: permission denied, lstat '/root/work'"
+    assert w.detect_infra_error("  npm ERR! Cannot find module 'qwen'\n") == \
+        "npm ERR! Cannot find module 'qwen'"
+    assert w.detect_infra_error("FAILED tests/test_x.py::test_y - AssertionError: assert False") is None
+    assert w.detect_infra_error("") is None
+
+
+def test_detect_infra_error_kuerzt_die_trefferzeile_auf_120_zeichen():
+    treffer = w.detect_infra_error("x" * 300 + " ENOSPC")
+    assert treffer is not None and len(treffer) == 120
+
+
+def test_merke_agent_zeile_behaelt_den_ersten_treffer():
+    monkeypatch_first = "Error: EACCES: permission denied, lstat '/root/work'"
+    alt = w.AGENT_INFRA_FEHLER
+    try:
+        w.AGENT_INFRA_FEHLER = None
+        w.merke_agent_zeile("FAILED tests/test_x.py::test_y - AssertionError")
+        assert w.AGENT_INFRA_FEHLER is None
+        w.merke_agent_zeile(monkeypatch_first + "\n")
+        w.merke_agent_zeile("Error: ENOSPC: no space left on device\n")
+        assert w.AGENT_INFRA_FEHLER == monkeypatch_first
+    finally:
+        w.AGENT_INFRA_FEHLER = alt
+
+
+def test_sandbox_health_check_meldet_fehlenden_ordner_und_datei(tmp_path, capsys):
+    assert w.sandbox_health_check(tmp_path / "gibt-es-nicht") is False
+    datei = tmp_path / "datei"
+    datei.write_text("x", encoding="utf-8")
+    assert w.sandbox_health_check(datei) is False
+    out = capsys.readouterr().out
+    assert "Sandbox-Check: Arbeitsordner" in out and "ist kein Verzeichnis" in out
+
+
+def test_sandbox_health_check_nimmt_schreibbaren_ordner_an(tmp_path):
+    ordner = tmp_path / "ok"
+    ordner.mkdir()
+    assert w.sandbox_health_check(ordner) is True
+
+
+def test_sandbox_health_check_meldet_fehlenden_agenten_nutzer(monkeypatch, tmp_path, capsys):
+    ordner = tmp_path / "ok"
+    ordner.mkdir()
+    monkeypatch.setattr(w, "pwd", _fake_pwd(os.getuid(), os.getgid()))
+    monkeypatch.setattr(w.os, "getgrouplist", lambda user, gid: [gid])
+    assert w.sandbox_health_check(ordner, "gibtsnicht") is False
+    assert "Nutzer gibtsnicht fehlt" in capsys.readouterr().out
+
+
+def test_sandbox_health_check_urteilt_mit_den_rechten_des_zielnutzers(monkeypatch, tmp_path, capsys):
+    # Eigentümer ist der Testlauf, geprüft wird ein fremder Nutzer ohne Gruppe: 700 heißt für ihn
+    # kein Schreibrecht am Arbeitsordner – genau der Fall aus #217 (Agent darf nicht committen).
+    ordner = tmp_path / "gesperrt"
+    ordner.mkdir()
+    ordner.chmod(0o700)
+    monkeypatch.setattr(w, "pwd", _fake_pwd(os.getuid() + 1000, os.getgid() + 1000))
+    monkeypatch.setattr(w.os, "getgrouplist", lambda user, gid: [gid])
+    assert w.sandbox_health_check(ordner, "worker") is False
+    assert "nicht schreibbar" in capsys.readouterr().out
+
+
+def test_sandbox_health_check_ist_gruen_fuer_den_eigenen_nutzer(monkeypatch, tmp_path):
+    ordner = tmp_path / "ok"
+    ordner.mkdir()
+    monkeypatch.setattr(w, "pwd", _fake_pwd(os.getuid(), os.getgid()))
+    monkeypatch.setattr(w.os, "getgrouplist", lambda user, gid: [gid])
+    assert w.sandbox_health_check(ordner, "worker") is True
+
+
+def test_rechte_ok_prueft_eigentuemer_gruppe_und_sonstige(tmp_path):
+    ordner = tmp_path / "d"
+    ordner.mkdir()
+    ordner.chmod(0o750)
+    st = ordner.stat()
+    assert w._rechte_ok(ordner, st.st_uid, [], True) is True
+    assert w._rechte_ok(ordner, st.st_uid + 1, [st.st_gid], False) is True
+    assert w._rechte_ok(ordner, st.st_uid + 1, [st.st_gid], True) is False
+    assert w._rechte_ok(ordner, st.st_uid + 1, [], False) is False
+    assert w._rechte_ok(tmp_path / "fehlt", st.st_uid, [], False) is False
+    assert w._rechte_ok(ordner, 0, [], True) is True          # root umgeht die Modusbits
+
+
+def test_run_agent_gibt_auch_die_gruppe_des_agenten_nutzers_mit(monkeypatch, tmp_path):
+    """#243: `user` allein ließ die GID des Takts (auf dem Server 0) stehen."""
+    kw = {}
+
+    class Proc:
+        returncode = 0
+        stdout: list[str] = []
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(w.subprocess, "Popen", lambda cmd, **kwargs: kw.update(kwargs) or Proc())
+    monkeypatch.setattr(w, "agent_identitaet", lambda: ("worker", str(tmp_path)))
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    monkeypatch.setattr(w, "RUN_TIMEOUT", 60)
+    assert w.run_agent("prompt") == 0
+    assert kw["user"] == "worker" and kw["group"] == "worker"
+
+
+def test_release_failed_claim_setzt_das_issue_auf_bereit(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(w, "gh", lambda *a: calls.append(a))
+    assert w.release_failed_claim(42, "EACCES: permission denied") is True
+    assert ("issue", "edit", "42", "--add-label", "bereit", "--remove-label", "in-arbeit") in calls
+    assert ("issue42: Infrastrukturfehler (EACCES: permission denied), gebe Claim sofort frei "
+            "(in-arbeit -> bereit).") in capsys.readouterr().out
+
+
+def test_release_failed_claim_meldet_gh_fehler_ohne_abbruch(monkeypatch, capsys):
+    def kaputt(*a):
+        raise RuntimeError("gh nicht erreichbar")
+
+    monkeypatch.setattr(w, "gh", kaputt)
+    assert w.release_failed_claim(42, "ENOSPC") is False
+    assert "Freigabe des Claims fehlgeschlagen (RuntimeError)" in capsys.readouterr().out
+
+
+def test_main_infrastrukturfehler_nimmt_versuch_zurueck_und_gibt_claim_frei(monkeypatch, tmp_path, capsys):
+    """#243: EACCES im Lauf ist kein Auftragsfehler – Versuch zurück, Claim sofort frei."""
+    _litellm(monkeypatch, tmp_path)
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"issue102": 1}), encoding="utf-8")
+    fake = FakeGH(issues=[_issue()], prs=[])
+    monkeypatch.setattr(w, "gh", fake)
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+    monkeypatch.setattr(w, "agent_identitaet", lambda: (None, None))
+
+    def run(prompt):
+        w.log_stream_line("Error: EACCES: permission denied, lstat '/root/work'")
+        return 1
+
+    monkeypatch.setattr(w, "run_agent", run)
+    assert w.main() == 0
+    # Der Zähler stand vor dem Lauf auf 1; der Lauf zählt auf 2 hoch, die Rücknahme ergibt wieder 1.
+    assert json.loads(state.read_text(encoding="utf-8"))["issue102"] == 1
+    assert ("issue", "edit", "102", "--add-label", "bereit", "--remove-label", "in-arbeit") in fake.calls
+    assert "Infrastrukturfehler im Lauf (Error: EACCES: permission denied, lstat '/root/work'), " \
+           "Versuch zählt nicht." in capsys.readouterr().out
+
+
 # --- Regel 5: keine Geheimnisse im Agentenprozess und im Log (#35) ---
 
 GEHEIM = "sk-nur-ein-test-geheimnis"
