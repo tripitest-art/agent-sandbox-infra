@@ -40,6 +40,57 @@ conf_save() {   # conf_save KEY… → schreibt den aktuellen Wert der genannten
   chmod 600 "$CONF"
 }
 
+# --- Agent und Context-Mode ----------------------------------------------------------------------
+# AGENT und CONTEXT_MODE gehören seit #270 in die Einstellungsdatei: Ohne den Merker fiele ein
+# späterer Lauf (auch der Auto-Deploy) still auf qwen-code ohne context-mode zurück.
+agent_check() {   # prüft AGENT (qwen-code|opencode) und CONTEXT_MODE (leer|0|1); 1 bei Unsinn
+  local ok=0
+  case ${AGENT:-qwen-code} in
+    qwen-code|opencode) ;;
+    *) echo "AGENT=${AGENT-} ist ungültig (erlaubt: qwen-code oder opencode)." >&2; ok=1 ;;
+  esac
+  [[ ${CONTEXT_MODE-} =~ ^(0|1)?$ ]] \
+    || { echo "CONTEXT_MODE=${CONTEXT_MODE-} ist ungültig (erlaubt: 0, 1 oder leer)." >&2; ok=1; }
+  return $ok
+}
+
+# Gibt /root/.config/opencode/opencode.json auf stdout aus. Rückfrage-Werkzeuge sind gesperrt,
+# weil der Takt ohne Terminal läuft; external_directory hält den Agenten im Worktree. Die
+# Sampling-Werte folgen der Model-Card von Qwen3-Coder (temperature 0.7, top_p 0.8).
+opencode_config_json() {
+  local model plugin_line=""
+  if [ "$BACKEND" = litellm ]; then
+    model="litellm/$LITELLM_MODEL"
+  else
+    model="ollama/$MODEL"
+  fi
+  if [ "${CONTEXT_MODE:-0}" = 1 ]; then
+    plugin_line='
+  "plugin": ["context-mode"],'
+  fi
+  cat <<JSON
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (Gaming-PC)",
+      "options": { "baseURL": "$OLLAMA/v1" },
+      "models": { "$MODEL": { "name": "$MODEL", "options": { "temperature": 0.7, "topP": 0.8 } } }
+    },
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LiteLLM (LXC 113)",
+      "options": { "baseURL": "$LITELLM/v1", "apiKey": "{env:LITELLM_API_KEY}" },
+      "models": { $(for m in $LITELLM_ALL; do printf '"%s": { "name": "%s" }, ' "$m" "$m"; done | sed 's/, $//') }
+    }
+  },
+  "model": "$model",$plugin_line
+  "permission": { "edit": "allow", "bash": "allow", "webfetch": "deny", "question": "deny", "plan_enter": "deny", "plan_exit": "deny", "external_directory": "deny" }
+}
+JSON
+}
+
 # --- Projekte -------------------------------------------------------------------------------------
 project_lines() {   # Name, Repo, Klon je Projekt (Tab); bricht bei kaputter Projektliste ab
   python3 -c '

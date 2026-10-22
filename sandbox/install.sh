@@ -29,7 +29,11 @@ LITELLM_MODEL=${LITELLM_MODEL:-coder}           # Alias im LiteLLM-Proxy
 LITELLM_FALLBACKS=${LITELLM_FALLBACKS:-coder-go,coder-or,coder-free}
 OLLAMA=${OLLAMA:-http://192.168.0.210:11434}
 MODEL=${MODEL:-qwen3-coder-64k}
-AGENT=${AGENT:-qwen-code}                       # oder opencode
+AGENT=${AGENT:-$(conf_get AGENT)}
+AGENT=${AGENT:-qwen-code}                       # opencode als Ausweichweg; wird gemerkt
+CONTEXT_MODE=${CONTEXT_MODE:-$(conf_get CONTEXT_MODE)}
+CONTEXT_MODE=${CONTEXT_MODE:-0}                 # 1: Plugin context-mode für OpenCode; wird gemerkt
+agent_check || { echo "Nichts gemerkt; AGENT/CONTEXT_MODE korrigieren oder die Zeile aus $CONF entfernen." >&2; exit 1; }
 TAKT=${TAKT:-$(conf_get TAKT)}
 TAKT=${TAKT:-2min}                              # so oft sucht der Worker Arbeit (ohne Arbeit kostet ein Takt nur GitHub-Abfragen, kein Modell)
 # Wo die Unit-Dateien und die aktivierten Timer liegen. Nur für Tests überschreibbar (dort zeigen
@@ -93,8 +97,8 @@ SLOT_CPU_PERCENT=${SLOT_CPU_PERCENT:-$(conf_get SLOT_CPU_PERCENT)}
 slot_limits_check || { echo "Nichts gemerkt; Einstellung korrigieren oder die Zeile aus $CONF entfernen." >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 # Gleich merken, nicht erst am Ende: Bricht ein späterer Schritt ab, gilt der Wunsch beim nächsten Lauf trotzdem.
-( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS REVIEW_POST REVIEW_AUTO_MERGE SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT DASHBOARD DASHBOARD_PORT AUTODEPLOY TAKT REVIEW_TAKT ) \
-  && echo "Einstellungen gemerkt ($CONF): MAX_WORKERS=$WORKERS_WANTED REVIEW_POST=$REVIEW_POST REVIEW_AUTO_MERGE=$REVIEW_AUTO_MERGE TAKT=$TAKT REVIEW_TAKT=$REVIEW_TAKT" \
+( MAX_WORKERS=$WORKERS_WANTED; conf_save MAX_WORKERS AGENT CONTEXT_MODE REVIEW_POST REVIEW_AUTO_MERGE SLOT_MEMORY_MAX SLOT_TASKS_MAX SLOT_CPU_PERCENT DASHBOARD DASHBOARD_PORT AUTODEPLOY TAKT REVIEW_TAKT ) \
+  && echo "Einstellungen gemerkt ($CONF): MAX_WORKERS=$WORKERS_WANTED REVIEW_POST=$REVIEW_POST REVIEW_AUTO_MERGE=$REVIEW_AUTO_MERGE TAKT=$TAKT REVIEW_TAKT=$REVIEW_TAKT AGENT=$AGENT CONTEXT_MODE=$CONTEXT_MODE" \
   || echo "Warnung: Einstellungen konnten nicht gemerkt werden ($CONF)"
 # Alle LiteLLM-Aliase, die der Worker nutzen kann (Hauptmodell zuerst, ohne Doppelte)
 LITELLM_ALL=$(printf '%s\n' "$LITELLM_MODEL" ${LITELLM_FALLBACKS//,/ } | awk 'NF && !seen[$0]++')
@@ -232,27 +236,7 @@ echo "== OpenCode"
 mkdir -p /root/.config/opencode
 # Nur im Projektordner schreiben (Standard von OpenCode), kein Web; Befehle ohne Rückfrage,
 # weil der Timer ohne Terminal läuft und Rückfragen dort automatisch abgelehnt werden.
-cat > /root/.config/opencode/opencode.json <<JSON
-{
-  "\$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "ollama": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Ollama (Gaming-PC)",
-      "options": { "baseURL": "$OLLAMA/v1" },
-      "models": { "$MODEL": { "name": "$MODEL" } }
-    },
-    "litellm": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "LiteLLM (LXC 113)",
-      "options": { "baseURL": "$LITELLM/v1", "apiKey": "{env:LITELLM_API_KEY}" },
-      "models": { $(for m in $LITELLM_ALL; do printf '"%s": { "name": "%s" }, ' "$m" "$m"; done | sed 's/, $//') }
-    }
-  },
-  "model": "$([ "$BACKEND" = litellm ] && echo "litellm/$LITELLM_MODEL" || echo "ollama/$MODEL")",
-  "permission": { "edit": "allow", "bash": "allow", "webfetch": "deny" }
-}
-JSON
+opencode_config_json > /root/.config/opencode/opencode.json
 
 echo "== Qwen Code"
 # Braucht Node 22; Debian 12 hat nur 18. Qwen3-Coder ist auf das Werkzeug-Format von Qwen Code
@@ -263,6 +247,10 @@ if ! node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
 fi
 [ "$(qwen --version 2>/dev/null)" = "$QWEN_CODE_VERSION" ] || \
   npm install -g -s "@qwen-code/qwen-code@$QWEN_CODE_VERSION"
+if [ "$CONTEXT_MODE" = 1 ]; then
+  npm install -g -s context-mode
+  echo "context-mode: global installiert, als Plugin in opencode.json eingetragen"
+fi
 mkdir -p /root/.qwen
 # Ollama als OpenAI-kompatibler Anbieter. Lange Timeouts: das Modell teilt sich den Gaming-PC.
 # Sampling ausdrücklich nach der Model-Card von Qwen3-Coder-30B-A3B-Instruct, damit Qwen Code
