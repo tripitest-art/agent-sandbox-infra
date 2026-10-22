@@ -1070,6 +1070,36 @@ def test_choose_model_primary_ok_asks_only_once(monkeypatch):
     assert asked == ["coder"]
 
 
+def test_model_for_attempt():
+    assert w.model_for_attempt(0, "coder-go") == "coder-go"
+    assert w.model_for_attempt(1, "coder-go") == "coder-pro-go"
+    assert w.model_for_attempt(2, "coder-go") == "coder-kimi-go"
+    assert w.model_for_attempt(5, "coder-go") == "coder-kimi-go"
+    assert w.model_for_attempt(1, "coder") == "coder"
+    assert w.model_for_attempt(1, "coder-qwen-go") == "coder-qwen-go"
+
+
+def test_choose_model_with_primary(monkeypatch):
+    asked = []
+    monkeypatch.setattr(w, "probe_model", lambda m: asked.append(m) or None)
+    assert w.choose_model("coder-pro-go") == ("coder-pro-go", [])
+    assert asked == ["coder-pro-go"]
+
+
+def test_main_litellm_escalates_on_second_attempt(monkeypatch, tmp_path, capsys):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "LITELLM_MODEL", "coder-go")
+    (tmp_path / "state.json").write_text(json.dumps({"issue102": 1}))
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+    runs = []
+    monkeypatch.setattr(w, "run_agent", lambda prompt: runs.append((prompt, w.agent_cmd(prompt))) or 0)
+    assert w.main() == 0
+    prompt, cmd = runs[0]
+    assert "Worker: DeepSeek V4 Pro (LiteLLM coder-pro-go, OpenCode Go)" in prompt
+    assert cmd[cmd.index("-m") + 1] in ("coder-pro-go", "litellm/coder-pro-go")
+
+
 def test_main_litellm_falls_back_and_names_model(monkeypatch, tmp_path, capsys):
     _litellm(monkeypatch, tmp_path)
     monkeypatch.setattr(w, "LITELLM_FALLBACKS", ["coder-free"])
