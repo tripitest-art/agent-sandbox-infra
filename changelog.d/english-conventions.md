@@ -1,0 +1,1 @@
+- Doku / AGENTS.md: Erlaubt und empfiehlt Englisch für Code, Docstrings, Typ-Hinweise und Prompts zur Verbesserung der Token-Effizienz und Befehlsbefolgung von Coding-LLMs; Stephan-Alarme („⚠ Stephan:“) bleiben deutsch.

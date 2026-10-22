@@ -184,6 +184,8 @@ python -m pytest -q          # alle Tests, wenige Sekunden, ohne Netzwerk
 bash -n sandbox/install.sh   # Syntaxprüfung der Shell-Skripte
 ```
 
-Konventionen: Python 3.12, Typ-Hinweise, Kommentare und Log-Meldungen auf Deutsch, Kommentare
-erklären das *Warum*. Netzwerk, `gh` und Uhr in Tests immer durch Fakes ersetzen (Beispiele:
-`tests/test_worker_tick.py`, `tests/test_review_tick.py`).
+Konventionen: Python 3.12, Typ-Hinweise. Code, Docstrings, interne Kommentare und Prompts dürfen
+und sollen bevorzugt auf Englisch verfasst werden (bessere Token-Effizienz und Instruction Following
+für Coding-LLMs). Alarme und Notfallmeldungen („⚠ Stephan:“ / Home-Assistant-Pushes) bleiben zwingend
+auf Deutsch. Kommentare erklären das *Warum*. Netzwerk, `gh` und Uhr in Tests immer durch Fakes
+ersetzen (Beispiele: `tests/test_worker_tick.py`, `tests/test_review_tick.py`).
