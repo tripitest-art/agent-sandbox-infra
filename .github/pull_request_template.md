@@ -2,8 +2,9 @@
 
 Closes #
 
-<!-- Pflicht bei Worker-Aufgaben: "Closes #<Issue>". Nur dann gleicht acceptance-guard
-     tests/acceptance/test_issue_<N>.py mit dem Issue ab. -->
+<!-- Mandatory for worker tasks: "Closes #<Issue>". Only then does acceptance-guard
+     compare tests/acceptance/test_issue_<N>.py against the issue.
+     Follow with a concise summary explaining what changed and why. -->
 
 ## Wie getestet
 
@@ -21,8 +22,8 @@ Closes #
 
 ## Offene Punkte / Abweichungen vom Issue
 
-<!-- Was nicht umgesetzt wurde oder anders als beschrieben, und warum. "keine" ist eine Antwort. -->
+<!-- What was not implemented or differs from the issue description, and why. "keine" is a valid answer. -->
 
 ## Umgesetzt von / Review durch
 
-<!-- z. B. "Gemini Flash (Worker) / Review: Claude Opus" – Review nie vom selben Agenten -->
+<!-- e.g. "Worker: Gemini Flash / Review: Claude Opus" – Reviewer must never belong to the same model family -->
