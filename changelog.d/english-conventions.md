@@ -1,0 +1,1 @@
+- Doku / AGENTS.md: Vollständige Übersetzung von AGENTS.md auf Englisch für bessere Token-Effizienz (~1.500 Tokens Ersparnis je Lauf) und präziseres Instruction Following; Stephan-Alarme („⚠ Stephan:“) bleiben deutsch.
