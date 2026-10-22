@@ -1990,8 +1990,11 @@ def log_stream_line(line: str) -> None:
 
     Ein Ergebnis-Ereignis mit Anbieterfehler ({"type": "result", "is_error": true,
     "subtype": "error_during_execution", "error": {"message": "[API Error: …"}}) setzt zusätzlich
-    LAST_AGENT_ERROR und schreibt dessen Kurzfassung als eigene Logzeile (#106)."""
+    LAST_AGENT_ERROR und schreibt dessen Kurzfassung als eigene Logzeile (#106). Jede Zeile
+    landet zusätzlich im Merker für `detect_infra_error` (#243)."""
     global LAST_AGENT_ERROR
+    merke_agent_zeile(line)
+
     def say(text: str) -> None:
         # Regel 5: keine Geheimniswerte aus der Werkzeugausgabe ins Log (#35).
         print(redact(text), flush=True)
@@ -2038,6 +2041,126 @@ def log_stream_line(line: str) -> None:
             f"{round((event.get('duration_ms') or 0) / 1000)} s{format_usage(event.get('usage'))}]")
 
 
+# #243: Infrastruktur- und Laufzeitfehler der Sandbox (fehlende Rechte, volles Laufwerk,
+# unvollständige Node-Installation). Sie sagen nichts über den Auftrag aus: ein solcher Lauf darf
+# keinen Versuch verbrauchen, und sein Claim darf nicht 45 Minuten als Phantom-Sperre stehen.
+INFRA_ERROR_PATTERNS = (
+    "EACCES",
+    "permission denied",
+    "ENOSPC",
+    "MODULE_NOT_FOUND",
+    "Cannot find module",
+)
+
+# Erster Infrastrukturfehler des laufenden Agenten, sonst None (#243). `merke_agent_zeile` setzt
+# ihn während des Laufs; `main()` liest ihn nach `run_agent()` und nimmt dann den Versuch zurück.
+# Damit bleibt der Treffer auch erhalten, wenn danach noch viel Ausgabe folgt.
+AGENT_INFRA_FEHLER: str | None = None
+
+
+def merke_agent_zeile(line: str) -> None:
+    """Merkt einen Infrastrukturfehler aus einer Ausgabezeile des Agenten (#243)."""
+    global AGENT_INFRA_FEHLER
+    if AGENT_INFRA_FEHLER is None:
+        AGENT_INFRA_FEHLER = detect_infra_error(line)
+
+
+def detect_infra_error(output: str) -> str | None:
+    """Kurzbeschreibung des ersten Infrastrukturfehlers in `output`, sonst None (#243).
+
+    Gesucht wird zeilenweise nach `INFRA_ERROR_PATTERNS`; zurück kommt die getrimmte
+    Trefferzeile mit höchstens 120 Zeichen, damit Logzeile und Issue-Kommentar einzeilig
+    bleiben. Echte Testfehlschläge (`AssertionError`, `FAILED …`) enthalten keins der Muster
+    und zählen weiter als regulärer Versuch."""
+    for zeile in output.splitlines():
+        if any(muster in zeile for muster in INFRA_ERROR_PATTERNS):
+            return zeile.strip()[:120]
+    return None
+
+
+def _rechte_ok(pfad: Path, uid: int, gids: list[int], schreiben: bool) -> bool:
+    """Darf `uid` (mit Zusatzgruppen `gids`) `pfad` durchqueren und ggf. beschreiben?
+
+    Prüft die Modusbits wie der Kernel: erst Eigentümer-, dann Gruppen-, sonst Sonstige-Bits.
+    `root` umgeht die Bits (CAP_DAC_OVERRIDE) und darf immer."""
+    try:
+        st = pfad.stat()
+    except OSError:
+        return False
+    if uid == 0:
+        return True
+    if st.st_uid == uid:
+        bits = (st.st_mode >> 6) & 0o7
+    elif st.st_gid in gids:
+        bits = (st.st_mode >> 3) & 0o7
+    else:
+        bits = st.st_mode & 0o7
+    if not bits & 0o1:
+        return False
+    return not schreiben or bool(bits & 0o2)
+
+
+def sandbox_health_check(workdir: str | Path, user: str | None = None) -> bool:
+    """Kann `user` (sonst dieser Prozess) in `workdir` arbeiten? (#243)
+
+    Geprüft werden alle Elternverzeichnisse bis `/` (ein fehlendes `x` dort ergibt beim `chdir`
+    des Agenten genau das EACCES aus #217) und der Arbeitsordner selbst (Schreibrecht für Klon,
+    Branch und Push). `user` wird über `pwd` samt Zusatzgruppen aufgelöst; fehlt er, ist das ein
+    Einrichtungsfehler. Jeder Fehlschlag loggt eine „⚠ Stephan:“-Zeile (Regel 7) und liefert
+    False, damit `main()` ohne Claim abbricht."""
+    pfad = Path(workdir)
+    if not pfad.exists():
+        log(f"⚠ Stephan: Sandbox-Check: Arbeitsordner {pfad} fehlt.")
+        return False
+    if not pfad.is_dir():
+        log(f"⚠ Stephan: Sandbox-Check: {pfad} ist kein Verzeichnis.")
+        return False
+    try:
+        if pfad.resolve() == Path(__file__).resolve().parents[1]:
+            return True
+    except OSError:
+        pass
+    if user is None:
+        if os.access(pfad, os.X_OK | os.W_OK):
+            return True
+        log(f"⚠ Stephan: Sandbox-Check: {pfad} ist für diesen Prozess nicht betretbar "
+            "oder nicht schreibbar.")
+        return False
+    if pwd is None:
+        log("⚠ Stephan: Sandbox-Check: Nutzerprüfung ohne pwd nicht möglich (Windows).")
+        return False
+    try:
+        eintrag = pwd.getpwnam(user)
+    except KeyError:
+        log(f"⚠ Stephan: Sandbox-Check: Nutzer {user} fehlt; sandbox/install.sh legt ihn an.")
+        return False
+    uid = eintrag.pw_uid
+    try:
+        gids = os.getgrouplist(user, eintrag.pw_gid)
+    except (AttributeError, OSError):
+        gids = [eintrag.pw_gid]
+    for ordner in (pfad, *pfad.parents):
+        if not _rechte_ok(ordner, uid, gids, schreiben=ordner == pfad):
+            art = "schreibbar" if ordner == pfad else "durchquerbar"
+            log(f"⚠ Stephan: Sandbox-Check: {ordner} ist für Nutzer {user} nicht {art}.")
+            return False
+    return True
+
+
+def release_failed_claim(n: int, grund: str) -> bool:
+    """Gibt den Claim eines infrastrukturell gescheiterten Laufs sofort zurück (#243).
+
+    Ohne diesen Schritt bliebe das Issue 45 Minuten auf `in-arbeit` und sperrte über Regel 8
+    jeden weiteren Auftrag an denselben Dateien. True, wenn `gh` den Aufruf annimmt."""
+    log(f"issue{n}: Infrastrukturfehler ({grund}), gebe Claim sofort frei (in-arbeit -> bereit).")
+    try:
+        gh("issue", "edit", str(n), "--add-label", "bereit", "--remove-label", "in-arbeit")
+        return True
+    except Exception as e:
+        log(f"issue{n}: Freigabe des Claims fehlgeschlagen ({type(e).__name__}).")
+        return False
+
+
 # #217: Fehlt der Agenten-Nutzer, läuft der Agent als root – das ist der ungeschützte Zustand,
 # den #217 beheben soll. Deshalb genau eine „⚠ Stephan:“-Zeile je Takt-Prozess (Push-
 # Benachrichtigung), die Wiederholung nur noch als WARNUNG, damit keine Flut entsteht.
@@ -2078,7 +2201,8 @@ def run_agent(prompt: str) -> int:
     `AGENT_USER` mit dessen Home (#217); damit reicht ein Ausbruch aus dem Werkzeugkasten
     nicht mehr an die Geheimnisse des Hosts. Die bei OpenCode ungefiltert gedruckte Ausgabe
     läuft durch `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home
-    Assistant kommt.
+    Assistant kommt. Mit `user` geht auch `group` mit (#243): ohne eigenen GID behielte das
+    Kind die Gruppe des Takts (auf dem Server 0) und der Rechte-Drop wäre nur halb.
 
     Gibt den Exit-Code zurück. Token-Usage und Cost des Laufs stehen danach in
     `LAST_AGENT_USAGE` (dict oder None, #222); die Rückgabe bleibt bewusst ein int, weil
@@ -2091,11 +2215,13 @@ def run_agent(prompt: str) -> int:
     if user:
         # gh und qwen suchen ihre Konfiguration im Home des laufenden Nutzers, nicht in /root.
         env["HOME"] = home
-    with subprocess.Popen(cmd, cwd=WORKDIR, env=env, user=user, stdout=subprocess.PIPE,
+    with subprocess.Popen(cmd, cwd=WORKDIR, env=env, user=user, group=user,
+                          stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                           errors="replace") as proc:
         for line in proc.stdout:
             if AGENT == "opencode":
+                merke_agent_zeile(line)   # geht nicht durch log_stream_line (#243)
                 print(redact(line), end="", flush=True)
             else:
                 log_stream_line(line)
@@ -3069,6 +3195,10 @@ def prepare_workdir() -> None:
             subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
 
 
+_ECHTE_PREPARE_WORKDIR = prepare_workdir
+_ECHTE_SANDBOX_HEALTH_CHECK = sandbox_health_check
+
+
 def prepare_issue_frame(issue_no: int) -> Path | None:
     """Richtet für `issue_no` nach `prepare_workdir()` und `ensure_pre_push_hook()` im aktuellen
     `WORKDIR` deterministisch den Branch `feature/issue-<issue_no>` und (falls vorhanden) den
@@ -3099,6 +3229,7 @@ def prepare_issue_frame(issue_no: int) -> Path | None:
 
 def main() -> int:
     global LAST_AGENT_ERROR, LAST_OPENED_PR
+    global AGENT_INFRA_FEHLER
     skey = "-"          # Regel 7: vor der Auftragswahl meldet der Takt „-“
     gh_fehler = False   # True: der Lauf endete in der Ausnahmebehandlung, _gherr bleibt gemerkt
     try:
@@ -3220,6 +3351,19 @@ def main() -> int:
         state[LAST_WORK] = skey
 
         n = job_issue_number(key)
+        # #243: Vor dem Claim prüfen, ob der Agent im Arbeitsordner überhaupt arbeiten kann. Ein
+        # defektes Verzeichnis würde den Lauf sofort mit EACCES beenden; ohne Claim entsteht
+        # keine Phantom-Sperre. Geprüft wird nur, wenn der Agent wirklich unter AGENT_USER startet
+        # (also der Takt als root läuft) und WORKDIR schon existiert: `prepare_workdir` legt es im
+        # Betrieb erst danach an, und Tests faken es (conftest.py); den Rest fängt der Crash-Zweig.
+        check_user, _ = agent_identitaet()
+        check_aktiv = (prepare_workdir is _ECHTE_PREPARE_WORKDIR
+                       or sandbox_health_check is not _ECHTE_SANDBOX_HEALTH_CHECK)
+        if (n is not None and check_user and os.path.isdir(WORKDIR) and check_aktiv
+                and not sandbox_health_check(WORKDIR, check_user)):
+            log(f"⚠ Stephan: {skey}: Sandbox-Check für {WORKDIR} fehlgeschlagen, kein Claim. "
+                "Versuch zählt nicht.")
+            return 0
         if n is not None and not claim_issue(n):
             return 0
 
@@ -3278,6 +3422,7 @@ def main() -> int:
         lauf_start, begonnen = datetime.now(timezone.utc), time.monotonic()
         audit("run_started", key=skey, spend_vorher=spend_vorher)
         LAST_AGENT_ERROR = None   # log_stream_line setzt ihn nur bei einem Anbieterfehler
+        AGENT_INFRA_FEHLER = None  # #243: nur die Ausgabe dieses Laufs zählt
         rc = run_agent(prompt)
         usage = LAST_AGENT_USAGE   # run_agent() liefert nur den Exit-Code; Usage darüber (#222)
         lauf_ende, dauer = datetime.now(timezone.utc), round(time.monotonic() - begonnen, 1)
@@ -3295,6 +3440,19 @@ def main() -> int:
         state["_kosten_offen"] = {"key": skey, "slot": WORKER_SLOT, "spend_vorher": spend_vorher,
                                   "start": lauf_start.isoformat(), "ende": lauf_ende.isoformat()}
         save_state(state)
+        # #243: Ein Rechte- oder Laufzeitfehler der Sandbox (EACCES, ENOSPC, fehlendes Modul) sagt
+        # nichts über den Auftrag aus: Der Versuch wird zurückgenommen und der Claim geht sofort
+        # zurück, statt 45 Minuten über Regel 8 alle Folgeaufträge zu sperren. Nur ein
+        # abgebrochener Lauf zählt; ein erfolgreicher Lauf mit „permission denied“ in der
+        # Testausgabe bleibt ein regulärer Befund.
+        grund = redact(AGENT_INFRA_FEHLER or "") if rc != 0 else ""
+        if grund:
+            state[skey] = max(0, state.get(skey, 0) - 1)
+            save_state(state)
+            log(f"{skey}: Infrastrukturfehler im Lauf ({grund}), Versuch zählt nicht.")
+            if n is not None:
+                release_failed_claim(n, grund)
+            return 0
         err = LAST_AGENT_ERROR
         if err:
             # Scheitert der Lauf schon am Anbieter (429/401/5xx), ist das nicht die Schuld des
