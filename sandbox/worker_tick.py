@@ -91,6 +91,10 @@ WORKER_NAMES = {
     "coder": "DeepSeek (LiteLLM coder)",
     "coder-go": "DeepSeek (LiteLLM coder-go, OpenCode Go)",
     "coder-pro": "DeepSeek V4 Pro (LiteLLM coder-pro)",
+    "coder-pro-go": "DeepSeek V4 Pro (LiteLLM coder-pro-go, OpenCode Go)",
+    "coder-kimi-go": "Kimi K2.7 Code (LiteLLM coder-kimi-go, OpenCode Go)",
+    "coder-qwen-go": "Qwen 3.8 Max (LiteLLM coder-qwen-go, OpenCode Go)",
+    "reviewer-go": "GLM 5.3 Flash (LiteLLM reviewer-go, OpenCode Go)",
     "coder-fast": "DeepSeek (LiteLLM coder-fast, ohne Thinking)",
     "coder-or": "DeepSeek (LiteLLM coder-or, OpenRouter)",
     "coder-free": "Codestral (LiteLLM coder-free)",
@@ -101,6 +105,26 @@ WORKER_NAMES = {
     "coder-minimax-free": "MiniMax M3.1 Flash (LiteLLM, OpenCode Free)",
     "coder-beam-free": "Beam (LiteLLM, OpenCode Free)",
 }
+
+# Mehrstufige Modell-Eskalation über OpenCode Go:
+# Stufe 1 (Versuch 1): DeepSeek V4.1 Flash (schnell, 0 € Token-Kosten)
+# Stufe 2 (Versuch 2): DeepSeek V4 Pro (Reasoning / Denkmodell, 0 € Token-Kosten)
+# Stufe 3 (Versuch 3+): Kimi K2.7 Code (Modellwechsel bei hartnäckigen Aufgaben, 0 € Token-Kosten)
+ESCALATION_TIERS = {
+    1: "coder-go",
+    2: "coder-pro-go",
+    3: "coder-kimi-go",
+}
+
+
+def model_for_attempt(attempt: int, base_model: str | None = None) -> str:
+    """Wählt das Modell passend zur Eskalationsstufe über OpenCode Go (Versuch 1 -> Stufe 1, 2 -> Stufe 2, 3+ -> Stufe 3).
+    Ist LITELLM_MODEL nicht coder-go, bleibt das eingestellte Basismodell fest."""
+    base = LITELLM_MODEL if base_model is None else base_model
+    if base != "coder-go":
+        return base
+    tier = min(max(1, attempt + 1), max(ESCALATION_TIERS.keys()))
+    return ESCALATION_TIERS.get(tier, "coder-go")
 
 
 def worker_name(model: str) -> str:
@@ -2227,10 +2251,11 @@ def probe_model(model: str) -> str | None:
     return None if isinstance(data, dict) and data.get("choices") else "leere Antwort"
 
 
-def choose_model() -> tuple[str | None, list[str]]:
-    """Erstes Modell aus LITELLM_MODEL + LITELLM_FALLBACKS, das antwortet, und die Fehlschläge davor."""
+def choose_model(primary: str | None = None) -> tuple[str | None, list[str]]:
+    """Erstes Modell aus primary (oder LITELLM_MODEL) + LITELLM_FALLBACKS, das antwortet, und die Fehlschläge davor."""
     failed = []
-    for model in dict.fromkeys([LITELLM_MODEL, *LITELLM_FALLBACKS]):
+    first = primary or LITELLM_MODEL
+    for model in dict.fromkeys([first, *LITELLM_FALLBACKS]):
         reason = probe_model(model)
         if reason is None:
             return model, failed
@@ -3124,7 +3149,11 @@ def main() -> int:
                 save_state(state)   # Budget wieder frei: die nächste Knappheit wird erneut gemeldet
             # Erst hier prüfen: ohne Arbeit kostet der Takt keine Anfrage. Vor dem Zähler, damit ein
             # gestörter Anbieter keine Versuche verbraucht.
-            model, failed = choose_model()
+            primary = model_for_attempt(state.get(skey, 0))
+            try:
+                model, failed = choose_model(primary)
+            except TypeError:
+                model, failed = choose_model()
             if model is None:
                 log_on_change(state, LAST_WORK, f"{skey} kein Modell",
                               f"{skey}: kein Modell antwortet ({'; '.join(failed)}), warte. Versuch zählt nicht.")

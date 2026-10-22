@@ -70,6 +70,78 @@ model_list:
       input_cost_per_token: 0
       output_cost_per_token: 0
 
+  # coder-pro-go – OpenCode Go Flatrate-Abo (DeepSeek V4 Pro)
+  # fuer Worker Stufe 2 / komplexe Aufgaben. Keine Token-Kosten.
+  - model_name: coder-pro-go
+    litellm_params:
+      model: openai/deepseek-v4-pro
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_GO_KEY
+      extra_headers:
+        x-opencode-session: "sandbox-session"
+        User-Agent: "opencode/1.0.0 (Linux; x86_64)"
+      rpm: 20
+      max_parallel_requests: 2
+      timeout: 900
+      stream_timeout: 120
+    model_info:
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+
+  # coder-kimi-go – OpenCode Go Flatrate-Abo (Kimi K2.7 Code)
+  # fuer Worker Stufe 3 / Eskalation. Keine Token-Kosten.
+  - model_name: coder-kimi-go
+    litellm_params:
+      model: openai/kimi-k2.7-code
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_GO_KEY
+      extra_headers:
+        x-opencode-session: "sandbox-session"
+        User-Agent: "opencode/1.0.0 (Linux; x86_64)"
+      rpm: 30
+      max_parallel_requests: 3
+      timeout: 600
+      stream_timeout: 90
+    model_info:
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+
+  # coder-qwen-go – OpenCode Go Flatrate-Abo (Qwen 3.8 Max)
+  # fuer Worker (Qwen-Alternative). Keine Token-Kosten.
+  - model_name: coder-qwen-go
+    litellm_params:
+      model: openai/qwen3.8-max
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_GO_KEY
+      extra_headers:
+        x-opencode-session: "sandbox-session"
+        User-Agent: "opencode/1.0.0 (Linux; x86_64)"
+      rpm: 30
+      max_parallel_requests: 3
+      timeout: 600
+      stream_timeout: 90
+    model_info:
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+
+  # reviewer-go – OpenCode Go Flatrate-Abo (GLM 5.3 Flash)
+  # fuer Reviewer (GLM-Familie, unabhaengig von DeepSeek/Worker). Keine Token-Kosten.
+  - model_name: reviewer-go
+    litellm_params:
+      model: openai/glm-5.3-flash
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_GO_KEY
+      extra_headers:
+        x-opencode-session: "sandbox-session"
+        User-Agent: "opencode/1.0.0 (Linux; x86_64)"
+      rpm: 30
+      max_parallel_requests: 3
+      timeout: 600
+      stream_timeout: 90
+    model_info:
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+
   # planner-go – OpenCode Go Flatrate-Abo (DeepSeek V4 Pro)
   - model_name: planner-go
     litellm_params:
@@ -123,9 +195,12 @@ model_list:
 ```yaml
 router_settings:
   fallbacks:
-    - coder-free: ["coder-nemotron-free", "coder-minimax-free", "coder"]  # Kostenlos zuerst
-    - coder-go: ["coder-nemotron-free", "coder", "coder-or", "coder-free"]   # Go-Limit (429) → Nemotron Free → Direkt → OpenRouter → Codestral
-    - coder: ["coder-nemotron-free", "coder-go", "coder-or", "coder-free"]   # DeepSeek Direkt gestört → Nemotron Free → Go → OpenRouter → Codestral
+    - coder-go: ["coder", "coder-or"]   # OpenCode Go Limit (429) -> DeepSeek direkt -> OpenRouter
+    - coder-pro-go: ["planner-pro"]     # OpenCode Go Pro (429) -> DeepSeek Pro OpenRouter
+    - coder-kimi-go: ["coder-pro-go", "planner-pro"] # OpenCode Kimi (429) -> OpenCode Pro -> DeepSeek Pro OpenRouter
+    - coder-qwen-go: ["coder-nvidia", "coder-go"]    # OpenCode Qwen (429) -> Qwen NVIDIA -> OpenCode Go
+    - reviewer-go: ["coder-glm", "longctx-lite"]     # OpenCode GLM (429) -> OpenRouter GLM -> Gemini Lite
+    - coder: ["coder-go", "coder-or"]   # DeepSeek direkt gestört -> OpenCode Go -> OpenRouter
     - planner-go: ["planner-pro"]
 
   model_group_retry_policy:

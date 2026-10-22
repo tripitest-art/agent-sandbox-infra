@@ -75,7 +75,7 @@ STEPHAN_LABEL = "braucht-stephan"   # PR braucht eine Entscheidung von Stephan
 REVIEW_REQUEST_LABEL = "review-anfordern"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 REVIEW_KEY = os.environ.get("LITELLM_REVIEW_KEY", "")
-REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "coder-glm")
+REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "reviewer-go")
 # Ohne eigene Angabe dasselbe Modell wie für kleine Diffs. Eine Vorgabe, deren Familie nicht belegt
 # ist (früher „longctx-lite“), macht die Reviewer-Konfiguration für sich allein schon unbrauchbar:
 # reviewer_config_problem() würde in jeder Umgebung ohne REVIEW_MODEL_BIG jeden Review sperren.
@@ -121,10 +121,11 @@ MISSING_CHECK_GRACE_S = agent_settings.value("MISSING_CHECK_GRACE_S", 600)
 # Worker-Zeile nennt bei unbekannten Aliasen nur „coder-fast (LiteLLM)“; coder, coder-fast, coder-pro
 # und coder-or sind die DeepSeek-Aliase in LiteLLM. Lässt sich eine Familie nicht bestimmen, blockieren
 # independence_problem()/reviewer_config_problem() den Review, statt die Regel still zu überspringen.
-FAMILIES = (("glm", r"glm|zhipu|z\.ai"), ("mistral", r"mistral|codestral|coder-free"),
+FAMILIES = (("glm", r"glm|zhipu|z\.ai|reviewer-go"), ("mistral", r"mistral|codestral|coder-free"),
             ("nemotron", r"nemotron"), ("minimax", r"minimax"), ("beam", r"beam"),
+            ("kimi", r"kimi|moonshot"),
             ("qwen", r"qwen|coder-nvidia|nvidia"), ("gemini", r"gemini|gemma|longctx"), ("claude", r"claude|anthropic|opus|sonnet"),
-            ("deepseek", r"deepseek|\bcoder(?:-fast|-pro|-or|-go)?\b"))
+            ("deepseek", r"deepseek|\bcoder(?:-fast|-pro|-or|-go|-pro-go)?\b"))
 
 VERDICTS = ("**Freigegeben**", "**Änderungen nötig**")
 ENV = dict(os.environ, PATH=f"/root/venv/bin:/root/.opencode/bin:{os.environ.get('PATH', '/usr/bin:/bin')}")
