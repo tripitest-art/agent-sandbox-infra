@@ -37,8 +37,10 @@ except ImportError:         # Windows kennt kein pwd; dort läuft der Takt nicht
     pwd = None  # type: ignore[assignment]
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -2951,6 +2953,123 @@ def main_is_red(state: dict) -> bool:
     return True
 
 
+MAIN_HEALTH_TIMEOUT = int(os.environ.get("MAIN_HEALTH_TIMEOUT", "600"))
+# Sekunden für den lokalen Testlauf; danach gilt der Zustand als „unbekannt“.
+
+
+def main_sha(repo_dir: str) -> str | None:
+    """Voller SHA von origin/main im Klon `repo_dir`; None, wenn er nicht ermittelbar ist.
+
+    Wirft nie: Jeder Fehler wird gefangen und als Warnzeile geloggt — nur der Klassenname,
+    nie der Ausnahmetext (Regel 5). Der SHA dient dem Cache und der Meldung je Commit.
+    """
+    try:
+        res = subprocess.run(["git", "-C", repo_dir, "rev-parse", "origin/main"],
+                             capture_output=True, text=True, check=True, env=ENV)
+    except Exception as e:
+        log(f"Warnung: Lokaler Gesundheitscheck: origin/main nicht ermittelbar ({type(e).__name__}).")
+        return None
+    sha = (res.stdout or "").strip()
+    return sha or None
+
+
+def check_main_health(repo_dir: str) -> bool:
+    """Lokaler Pre-Flight-Check: True = origin/main besteht die lokalen Tests oder der Zustand
+    ist unbekannt; False = erwiesenermaßen rot. Wirft nie.
+
+    Warum (#221): Ein CI-grünes `main` kann auf dem Server lokal rot sein (Umgebungsproblem).
+    Dann scheitert später der Pre-Push-Hook (#68) und MAX_TRIES verbrennt, ohne dass der Worker
+    etwas falsch gemacht hat. Deshalb laufen TEST_CMD vor der Auftragsannahme in einem
+    temporären Worktree von origin/main; eine Cache-Marke je SHA erspart den zweiten Lauf.
+
+    Unbekannt blockiert nicht — wie main_red_sha() (#173): Ein kaputtes git, ein Timeout oder
+    ein nicht schreibbarer Cache darf die Pipeline nicht stilllegen. CLAIM_DIR und TEST_CMD
+    werden beim Aufruf aus den Modulglobalen gelesen, damit Tests sie ersetzen können.
+    """
+    try:
+        fetch = subprocess.run(["git", "-C", repo_dir, "fetch", "-q", "origin"],
+                               capture_output=True, text=True, check=False, env=ENV,
+                               timeout=MAIN_HEALTH_TIMEOUT)
+    except Exception as e:
+        log(f"Warnung: Lokaler Gesundheitscheck: fetch fehlgeschlagen ({type(e).__name__}).")
+        return True
+    if fetch.returncode != 0:
+        log(f"Warnung: Lokaler Gesundheitscheck: fetch fehlgeschlagen (Exit {fetch.returncode}).")
+        return True
+    sha = main_sha(repo_dir)
+    if sha is None:
+        return True
+    cache = os.path.join(CLAIM_DIR, f"main_health_{sha}.ok")
+    if os.path.exists(cache):
+        return True
+    tmp = tempfile.mkdtemp(prefix="main-health-")
+    try:
+        try:
+            add = subprocess.run(["git", "-C", repo_dir, "worktree", "add", "--detach",
+                                  tmp, "origin/main"],
+                                 capture_output=True, text=True, check=False, env=ENV,
+                                 timeout=MAIN_HEALTH_TIMEOUT)
+        except Exception as e:
+            log(f"Warnung: Lokaler Gesundheitscheck: worktree add fehlgeschlagen ({type(e).__name__}).")
+            return True
+        if add.returncode != 0:
+            log(f"Warnung: Lokaler Gesundheitscheck: worktree add fehlgeschlagen (Exit {add.returncode}).")
+            return True
+        try:
+            res = subprocess.run(TEST_CMD.split(), cwd=tmp, capture_output=True, text=True,
+                                 check=False, env=ENV, timeout=MAIN_HEALTH_TIMEOUT)
+        except Exception as e:
+            log(f"Warnung: Lokaler Gesundheitscheck: Testlauf fehlgeschlagen ({type(e).__name__}).")
+            return True
+        if res.returncode != 0:
+            log(f"Warnung: Lokale Tests auf origin/main ({sha[:7]}) rot (Exit {res.returncode}).")
+            return False
+        try:
+            os.makedirs(CLAIM_DIR, exist_ok=True)
+            with open(cache, "w", encoding="utf-8") as f:
+                f.write(sha + "\n")
+        except OSError as e:
+            # Der Lauf war grün; ein nicht schreibbarer Cache darf das Ergebnis nicht kippen.
+            log(f"Warnung: Lokaler Gesundheitscheck: Cache nicht schreibbar ({type(e).__name__}).")
+        return True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            subprocess.run(["git", "-C", repo_dir, "worktree", "prune"],
+                           capture_output=True, text=True, check=False, env=ENV)
+        except Exception:
+            pass
+
+
+def main_is_red_local(state: dict) -> bool:
+    """True, wenn origin/main den lokalen Testlauf nicht besteht; sonst False.
+
+    Schutzklausel (erste Anweisung): Während eines pytest-Laufs (PYTEST_CURRENT_TEST gesetzt)
+    sofort False, ohne subprocess-Aufruf. Eingefrorene Akzeptanztests und bestehende Unit-Tests
+    rufen find_job()/main() ohne gefaktes subprocess.run auf; auf dem Server existiert
+    BASE_WORKDIR, der lokale Testlauf würde also echt starten (Netz, pytest in pytest). Der
+    Takt läuft produktiv nie unter pytest. Eigene Tests heben die Klausel per
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False) auf.
+
+    Sonst: check_main_health(BASE_WORKDIR) — der Klon des aktiven Projekts, dessen Existenz
+    pick_job() bereits geprüft hat. Bei Rot erscheint eine ⚠ Stephan:-Zeile einmal je SHA
+    (log_on_change, Regel 7); wird main wieder grün, fällt der Zustandsschlüssel weg, damit
+    späteres Rot erneut meldet.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    key = f"_mainrotlokal:{REPO}"
+    if not check_main_health(BASE_WORKDIR):
+        sha = main_sha(BASE_WORKDIR)
+        kurz = sha[:7] if sha else "unbekannt"
+        log_on_change(state, key, sha or "rot",
+                      f"⚠ Stephan: Lokale Tests auf origin/main ({kurz}) rot; keine neuen Issue-Aufträge.")
+        return True
+    if state.pop(key, None) is not None:
+        save_state(state)
+    return False
+
+
 def find_job(state: dict):
     """Erster Auftrag, dessen Schlüssel weder geparkt noch von einem anderen Slot belegt oder
     erledigt ist, oder None.
@@ -2976,7 +3095,7 @@ def find_job(state: dict):
     except (ValueError, TypeError):
         takes_state = True
     job = issue_job(skip, state=state) if takes_state else issue_job(skip)
-    if job and main_is_red(state):
+    if job and (main_is_red(state) or main_is_red_local(state)):
         return None
     return job
 
