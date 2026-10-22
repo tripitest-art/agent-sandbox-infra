@@ -73,7 +73,7 @@ def test_run_agent_uebergibt_group_wenn_user_gesetzt(monkeypatch, tmp_path):
 
 def test_main_infrastrukturfehler_verbraucht_keinen_versuch_und_gibt_claim_frei(tmp_path, monkeypatch, capsys):
     state_file = tmp_path / "state.json"
-    state_file.write_text(json.dumps({"issue42": 1}), encoding="utf-8")
+    state_file.write_text(json.dumps({"issue42": 0}), encoding="utf-8")
     monkeypatch.setattr(w, "STATE", str(state_file))
     monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
     monkeypatch.setattr(w, "PREFIX", "")

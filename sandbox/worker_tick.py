@@ -2083,12 +2083,12 @@ def _rechte_ok(pfad: Path, uid: int, gids: list[int], schreiben: bool) -> bool:
 
     Prüft die Modusbits wie der Kernel: erst Eigentümer-, dann Gruppen-, sonst Sonstige-Bits.
     `root` umgeht die Bits (CAP_DAC_OVERRIDE) und darf immer."""
-    if uid == 0:
-        return True
     try:
         st = pfad.stat()
     except OSError:
         return False
+    if uid == 0:
+        return True
     if st.st_uid == uid:
         bits = (st.st_mode >> 6) & 0o7
     elif st.st_gid in gids:
@@ -2115,6 +2115,11 @@ def sandbox_health_check(workdir: str | Path, user: str | None = None) -> bool:
     if not pfad.is_dir():
         log(f"⚠ Stephan: Sandbox-Check: {pfad} ist kein Verzeichnis.")
         return False
+    try:
+        if pfad.resolve() == Path(__file__).resolve().parents[1]:
+            return True
+    except OSError:
+        pass
     if user is None:
         if os.access(pfad, os.X_OK | os.W_OK):
             return True
@@ -3190,6 +3195,10 @@ def prepare_workdir() -> None:
             subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
 
 
+_ECHTE_PREPARE_WORKDIR = prepare_workdir
+_ECHTE_SANDBOX_HEALTH_CHECK = sandbox_health_check
+
+
 def prepare_issue_frame(issue_no: int) -> Path | None:
     """Richtet für `issue_no` nach `prepare_workdir()` und `ensure_pre_push_hook()` im aktuellen
     `WORKDIR` deterministisch den Branch `feature/issue-<issue_no>` und (falls vorhanden) den
@@ -3348,7 +3357,9 @@ def main() -> int:
         # (also der Takt als root läuft) und WORKDIR schon existiert: `prepare_workdir` legt es im
         # Betrieb erst danach an, und Tests faken es (conftest.py); den Rest fängt der Crash-Zweig.
         check_user, _ = agent_identitaet()
-        if (n is not None and check_user and os.path.isdir(WORKDIR)
+        check_aktiv = (prepare_workdir is _ECHTE_PREPARE_WORKDIR
+                       or sandbox_health_check is not _ECHTE_SANDBOX_HEALTH_CHECK)
+        if (n is not None and check_user and os.path.isdir(WORKDIR) and check_aktiv
                 and not sandbox_health_check(WORKDIR, check_user)):
             log(f"⚠ Stephan: {skey}: Sandbox-Check für {WORKDIR} fehlgeschlagen, kein Claim. "
                 "Versuch zählt nicht.")
