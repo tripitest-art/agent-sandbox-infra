@@ -8,6 +8,7 @@ unter „Unreleased“ und kommt aus dem PR-Titel (Regeln: `AGENTS.md`, Abschnit
 ## Unreleased
 
 ### Geändert
+- `sandbox/gc.py`: Neuer Housekeeping-Takt `agent-gc.timer` (alle 6 Stunden) räumt verwaiste Git-Worktrees (`git worktree prune`), in `main` eingegangene lokale Branches (nur `git branch -d`, nie `-D`) und Belegungsdateien in `/var/lib/worker-claims` auf, die älter als 7 Tage sind; fehlende Klone und Git-Fehler brechen den Lauf nicht ab (PR folgt).
 - `sandbox/core`: Auftrags-Belegung (`claim_job`, `release_job`, `mark_job_done`, `job_done_anywhere`, `cleanup_claims`) und Git-Operationen (`clean_worktree`, `get_current_head`, `branch_exists`) als eigenständige Module mit Unit-Tests; Belegungsverzeichnis und PID kommen als Argument herein, damit Worker und Review dieselbe Logik nutzen (PR folgt).
 - `worker_tick`: Fair-Share-Scheduling über Projekte — `pick_job()` beginnt beim Projekt nach dem zuletzt bedienten (`_last_project` im Slot-Zustand, `ordered_projects()` rotiert die Liste deterministisch) und prüft bei fehlender Arbeit die übrigen in derselben Rotation; ein dauerhaft volles erstes Projekt hungert die weiteren nicht mehr aus, fehlende Klone werden weiter einmal gemeldet und übersprungen (PR folgt).
 - `sandbox/core`: GitHub-CLI (`gh`, `gh_json`) und LiteLLM-Proxy (`probe_model`, `get_key_info`) als eigenständige Module mit Unit-Tests; `install.sh` legt sie beim Deploy als `/root/core/` ab (PR folgt).

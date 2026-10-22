@@ -556,6 +556,38 @@ else
   echo "agent-sandbox-deploy: aus (mit AUTODEPLOY=1 einschalten)"
 fi
 
+echo "== Garbage Collection"
+# gc.py kam schon im Abschnitt Taktgeber mit (alle sandbox/*.py). Der Timer räumt alle 6 Stunden
+# verwaiste Worktrees, in main eingegangene lokale Branches und alte Belegungen auf; er läuft als
+# root, weil die Worktrees des Agenten-Nutzers und /var/lib/worker-claims sonst nicht erreichbar sind.
+install -m 644 "$SCRIPT_DIR/gc.py" /root/gc.py
+cat > "$UNIT_DIR/agent-gc.service" <<UNIT
+[Unit]
+Description=Housekeeping der Agenten-Sandbox (sandbox/gc.py)
+[Service]
+Type=oneshot
+Environment=HOME=/root
+Environment=LANG=C.UTF-8
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /root/gc.py
+StandardOutput=append:/root/worker.log
+StandardError=append:/root/worker.log
+UNIT
+
+cat > "$UNIT_DIR/agent-gc.timer" <<UNIT
+[Unit]
+Description=Housekeeping alle 6 Stunden (sandbox/gc.py)
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable agent-gc.timer >/dev/null; systemctl restart agent-gc.timer
+echo "agent-gc: $(systemctl is-active agent-gc.timer) (alle 6 Stunden)"
+
 echo "== Infra-Repo: Deploy-Key (nur lesen)"
 # Das Repo ist privat. git pull läuft über einen eigenen SSH-Schlüssel, der nur dieses Repo
 # lesen darf (GitHub → Settings → Deploy keys, ohne Schreibrecht). Bewusst nicht über den
