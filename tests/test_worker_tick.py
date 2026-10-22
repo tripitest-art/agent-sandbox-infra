@@ -74,7 +74,7 @@ def _repo_workdir(monkeypatch, tmp_path):
     # Nie echter git-Verkehr aus einem Test heraus.
     monkeypatch.setattr(w, "sync_issue_branch_with_main", lambda n: True)
     # #172: open_pr legt den PR nach dem Agentenlauf an. Nie im Test ins echte GitHub.
-    monkeypatch.setattr(w, "open_pr", lambda n: (True, False, 1))
+    monkeypatch.setattr(w, "open_pr", lambda n: True)
     # #183: verwaiste_melden fragt GitHub (issue list, pr list). Im Test nie ins echte GitHub;
     # Tests, die den Aufruf in main prüfen, setzen `_ECHTE_VERWAISTE_MELDEN` bzw. einen Recorder.
     monkeypatch.setattr(w, "verwaiste_melden", lambda state, now=None: [])
@@ -478,7 +478,7 @@ def _run_rework(monkeypatch, tmp_path, after: dict) -> list:
     monkeypatch.setattr(w, "ollama_free", lambda *a, **k: True)
     monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)  # git-Vorbereitung
     prompts = []
-    monkeypatch.setattr(w, "run_agent", lambda prompt: (prompts.append(prompt) or 0, None))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: (prompts.append(prompt) or 0))
     assert w.main() == 0
     return prompts
 
@@ -768,7 +768,7 @@ def test_main_apierr_eintrag_verschwindet_nach_gewoehnlichem_lauf(monkeypatch, t
     state.write_text(json.dumps({"issue102": 0, "_apierr:issue102": "API 429: alt"}), encoding="utf-8")
     monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
     monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
-    monkeypatch.setattr(w, "run_agent", lambda prompt: (1, None))   # Fehlschlag ohne Anbieterfehler
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 1)   # Fehlschlag ohne Anbieterfehler
     assert w.main() == 0
     assert "_apierr:issue102" not in json.loads(state.read_text(encoding="utf-8"))
 
@@ -784,7 +784,7 @@ def test_main_anbieterfehler_zaehler_faellt_nicht_unter_null(monkeypatch, tmp_pa
         w.log_stream_line(json.dumps({
             "type": "result", "subtype": "error_during_execution", "is_error": True,
             "error": {"message": "[API Error: 429 Budget has been exceeded! Key=worker (sk-...x)]"}}))
-        return (1, None)
+        return 1
 
     monkeypatch.setattr(w, "run_agent", run)
     assert w.main() == 0
@@ -1907,9 +1907,9 @@ def test_main_ruft_open_pr_nach_agent_und_vor_check_issue_result(monkeypatch, tm
     monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: None)
     monkeypatch.setattr(w, "prepare_issue_frame", lambda n: True)
-    monkeypatch.setattr(w, "run_agent", lambda prompt: (schritte.append("agent") or 0, None))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: (schritte.append("agent") or 0))
     aufrufe = []
-    monkeypatch.setattr(w, "open_pr", lambda n: (aufrufe.append(n) or schritte.append("open_pr") or True, True, 7))
+    monkeypatch.setattr(w, "open_pr", lambda n: (aufrufe.append(n) or schritte.append("open_pr") or True))
     monkeypatch.setattr(w, "check_issue_result", lambda k: schritte.append("check_issue_result"))
 
     assert w.main() == 0
@@ -1936,10 +1936,10 @@ def test_main_ruft_open_pr_nie_fuer_nacharbeit_oder_text(monkeypatch, tmp_path):
         monkeypatch.setattr(w, "gh", FakeGH(prs=[_pr()]))
         monkeypatch.setattr(w, "pr_snapshot", lambda view: ("3373e35", "commit"))
         monkeypatch.setattr(w, "warn_text", lambda *a: None)
-        monkeypatch.setattr(w, "run_agent", lambda prompt: (0, None))
+        monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
 
         aufgerufen = []
-        monkeypatch.setattr(w, "open_pr", lambda n: (aufgerufen.append(n) or True, True, 7))
+        monkeypatch.setattr(w, "open_pr", lambda n: (aufgerufen.append(n) or True))
 
         assert w.main() == 0
         assert aufgerufen == []
@@ -1962,11 +1962,11 @@ def test_main_ruft_open_pr_nicht_nach_anbieterfehler(monkeypatch, tmp_path):
 
     def run_with_apierr(prompt):
         w.LAST_AGENT_ERROR = "API 429: Budget exceeded"
-        return (1, None)
+        return 1
 
     monkeypatch.setattr(w, "run_agent", run_with_apierr)
     aufgerufen = []
-    monkeypatch.setattr(w, "open_pr", lambda n: (aufgerufen.append(n) or True, True, 7))
+    monkeypatch.setattr(w, "open_pr", lambda n: (aufgerufen.append(n) or True))
 
     assert w.main() == 0
     assert aufgerufen == []
@@ -1987,7 +1987,7 @@ def test_main_behandelt_ausnahme_aus_open_pr(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: None)
     monkeypatch.setattr(w, "prepare_issue_frame", lambda n: True)
-    monkeypatch.setattr(w, "run_agent", lambda prompt: (0, None))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
 
     class FailingGH:
         def __call__(self, *args):
@@ -2039,7 +2039,7 @@ def test_open_pr_verwendet_capture_output_und_text(monkeypatch, tmp_path):
 
     monkeypatch.setattr(w.subprocess, "run", fake_run)
     result = w.open_pr(7)
-    assert result[0] is True
+    assert result is True
 
     assert len(calls) == 3
     for cmd, kw in calls:
@@ -2065,7 +2065,7 @@ def test_main_meldet_fehlendes_workdir_in_open_pr_und_prueft_ergebnis(monkeypatc
     monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: None)
     monkeypatch.setattr(w, "prepare_issue_frame", lambda n: True)
-    monkeypatch.setattr(w, "run_agent", lambda prompt: (0, None))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
     monkeypatch.setattr(w, "gh", lambda *args: [] if args[:2] == ("pr", "list") else {})
 
     assert w.main() == 0
@@ -2152,7 +2152,7 @@ def test_main_writes_slot_status_lifecycle(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
     monkeypatch.setattr(w.urllib.request, "urlopen", _fake_urlopen([], PC_CHAT))
     monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
-    monkeypatch.setattr(w, "run_agent", lambda prompt: (0, None))
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
     slots_dir = str(tmp_path / "slots")
     monkeypatch.setattr(w, "SLOT_DIR", slots_dir)
     seen = []
@@ -2341,6 +2341,17 @@ def test_audit_meldet_schreibfehler_ohne_zeileninhalt(tmp_path, monkeypatch, cap
     assert "GEHEIM" not in out and '"event"' not in out   # kein Rest der Zeile
 
 
+def test_audit_schreibfehler_aus_alarm_geht_nach_stderr(tmp_path, monkeypatch, capsys):
+    """#34: In alarm() bleibt stdout die eine „⚠ Stephan:“-Zeile; der Audit-Fehler läuft über
+    stderr (systemd schreibt ihn ebenfalls nach /root/worker.log) und bleibt so sichtbar."""
+    monkeypatch.setattr(w, "AUDIT_LOG", str(tmp_path / "gibt" / "es" / "nicht" / "a.jsonl"))
+    w.alarm("issue7", ValueError("kaputt"))
+    aus = capsys.readouterr()
+    assert aus.out.strip().splitlines()[-1].endswith("⚠ Stephan: issue7: ValueError: kaputt")
+    assert "Audit-Log nicht schreibbar: FileNotFoundError" in aus.err
+    assert "Audit-Log nicht schreibbar" not in aus.out
+
+
 def test_audit_faengt_auch_serialisierungsfehler(tmp_path, monkeypatch, capsys):
     """Auch ein Fehler beim Serialisieren (Nicht-String-Schlüssel) verlässt audit() nicht;
     die Datei bleibt leer statt halb geschrieben."""
@@ -2450,14 +2461,9 @@ def test_alarm_kuerzt_lange_mehrzeilige_meldung(capsys):
     assert line.endswith("…")
 
 
-import os
-import pytest
-
 def test_agent_identitaet_meldet_fehlenden_nutzer_einmal_kritisch(monkeypatch, capsys):
     """#217/Regel 7: Fehlt der Agenten-Nutzer, läuft der Agent als root – das ist einmal eine
     „⚠ Stephan:“-Zeile, danach nur noch eine WARNUNG (keine Benachrichtigungs-Flut)."""
-    if os.name == "nt":
-        pytest.skip("geteuid nicht unter Windows verfügbar")
     def fehlt(name):
         raise KeyError(name)
 
@@ -2479,8 +2485,6 @@ def test_agent_identitaet_meldet_fehlenden_nutzer_einmal_kritisch(monkeypatch, c
 
 def test_agent_identitaet_ohne_root_bleibt_beim_takt(monkeypatch):
     """Ohne root-Rechte gibt es keinen Rechte-Drop: Nutzer und Home erbt der Agent wie bisher."""
-    if os.name == "nt":
-        pytest.skip("geteuid nicht unter Windows verfügbar")
     monkeypatch.setattr(w.os, "name", "posix")
     monkeypatch.setattr(w.os, "geteuid", lambda: 1000)
     assert w.agent_identitaet() == (None, None)

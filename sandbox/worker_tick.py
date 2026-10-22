@@ -287,7 +287,7 @@ def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}{prefix} {msg}", flush=True)
 
 
-def audit(event: str, **fields) -> None:
+def audit(event: str, *, stderr_bei_fehler: bool = False, **fields) -> None:
     """Hängt eine JSON-Zeile an AUDIT_LOG: ts (UTC, ISO 8601), event, slot (WORKER_SLOT),
     model (MODEL), active_model und fields.
 
@@ -299,8 +299,13 @@ def audit(event: str, **fields) -> None:
     Nicht serialisierbare Werte gehen per `str()` hinein. Felder namens password, secret,
     api_key, authorization oder token erscheinen als „***“ (Regel 5), alle anderen unverändert.
     Der Pfad wird bei jedem Aufruf aus dem Modulglobal gelesen (#85). Wirft nie: scheitert das
-    Schreiben, kommt eine log()-Zeile „Audit-Log nicht schreibbar: <Fehlerklasse>“ — ohne den
-    Inhalt der Zeile, damit kein Geheimnis über die Fehlermeldung entweicht."""
+    Schreiben, kommt eine Zeile „Audit-Log nicht schreibbar: <Fehlerklasse>“ auf stdout — ohne
+    den Inhalt der Zeile, damit kein Geheimnis über die Fehlermeldung entweicht (#85).
+
+    Mit `stderr_bei_fehler=True` geht diese Zeile nach stderr. alarm() nutzt das: stdout trägt
+    dort die strikt einzeilige „⚠ Stephan:“-Meldung (#34), ein Schreibfehler darf sie nicht zu
+    einer zweiten Zeile machen. systemd schreibt StandardError ebenfalls nach /root/worker.log,
+    der Fehler bleibt also sichtbar."""
     try:
         zeile: dict[str, object] = {"ts": datetime.now(timezone.utc).isoformat(),
                                     "event": event, "slot": WORKER_SLOT, "model": MODEL,
@@ -311,7 +316,13 @@ def audit(event: str, **fields) -> None:
         with open(AUDIT_LOG, "a", encoding="utf-8") as fh:
             fh.write(text + "\n")
     except Exception as e:
-        log(f"Audit-Log nicht schreibbar: {type(e).__name__}")
+        meldung = f"Audit-Log nicht schreibbar: {type(e).__name__}"
+        if not stderr_bei_fehler:
+            log(meldung)
+        else:
+            prefix = f" [{SLOT_TAG}]" if SLOT_TAG else ""
+            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}{prefix} {meldung}",
+                  file=sys.stderr, flush=True)
 
 
 def spend_of(info) -> float | None:
@@ -460,8 +471,9 @@ def alarm(skey: str, error: BaseException | str) -> None:
     if len(msg) > limit:
         msg = msg[:limit - 1] + "…"
     log(msg)
-    # Audit-Log: strukturiertes stephan_alarm-Event (#222)
-    audit("stephan_alarm", skey=skey, error_class=klass, detail=detail)
+    # Audit-Log: strukturiertes stephan_alarm-Event (#222). Ein Schreibfehler geht nach stderr,
+    # damit die einzeilige Meldung oben allein auf stdout bleibt (#34).
+    audit("stephan_alarm", stderr_bei_fehler=True, skey=skey, error_class=klass, detail=detail)
 
 
 def first_line(error: BaseException | str) -> str:
@@ -1469,20 +1481,19 @@ def sync_issue_branch_with_main(n: int) -> bool:
     return False
 
 
-def open_pr(n: int) -> tuple[bool, bool, int | None]:
-    """Legt nach dem Agentenlauf den PR zu Issue n an.
+def open_pr(n: int) -> bool:
+    """Legt nach dem Agentenlauf den PR zu Issue n an. True, wenn es danach einen offenen PR von
+    issue_branch(n) gibt, sonst False.
 
-    Gibt (success, pr_created, pr_number) zurück:
-    - success: True, wenn am Ende ein offener PR vom Branch existiert
-    - pr_created: True, wenn der PR in diesem Lauf neu erstellt wurde (nicht schon bestand)
-    - pr_number: Die PR-Nummer, wenn success=True, sonst None
+    Wurde der PR in diesem Lauf neu angelegt, steht seine Nummer in `LAST_OPENED_PR` (für das
+    `pr_opened`-Ereignis in main()); sonst ist das Modulglobal None.
 
-    1. gh("pr", "list", "--state", "open", "--head", branch, "--json", "number"): nicht leer ->
-       (True, False, pr_number) — PR bestand schon.
+    1. gh("pr", "list", "--state", "open", "--head", branch, "--json", "number"): nicht leer -> True,
+       sonst nichts weiter (kein Push, kein Anlegen); LAST_OPENED_PR bleibt None.
     2. ["git", "rev-list", "--count", "origin/main..HEAD"] (cwd=WORKDIR, env=ENV, check=True): Zahl <= 1
-       (nur der Akzeptanztest-Commit oder weniger) -> (False, False, None), nichts weiter; Logzeile
+       (nur der Akzeptanztest-Commit oder weniger) -> False, nichts weiter; Logzeile
        f"issue{n}: keine Änderungen über den Akzeptanztest hinaus, kein PR."
-    3. ["git", "push", "-u", "origin", branch] (cwd=WORKDIR, env=ENV, check=False): Exit != 0 -> (False, False, None),
+    3. ["git", "push", "-u", "origin", branch] (cwd=WORKDIR, env=ENV, check=False): Exit != 0 -> False,
        keine weitere Aktion, Zeile alarm(f"issue{n}", "Push abgelehnt (Tests rot oder GitHub-Fehler)").
        Der Ausgabetext des Befehls kommt nie ins Log (Regel 5).
     4. ["git", "log", "--reverse", "--format=%B%x00", "origin/main..HEAD"] (cwd=WORKDIR, env=ENV,
@@ -1490,17 +1501,20 @@ def open_pr(n: int) -> tuple[bool, bool, int | None]:
        verwerfen, die übrigen getrimmt mit je einer Leerzeile dazwischen zu `summary` verbinden.
     5. title = gh("issue", "view", str(n), "--json", "title")["title"];
        body = build_pr_body(pr_template(), n, WORKER, summary);
-       gh("pr", "create", "--title", title, "--body", body, "--head", branch). Rückgabe (True, True, pr_number)."""
+       gh("pr", "create", "--title", title, "--body", body, "--head", branch). gh gibt die PR-URL
+       aus; daraus merkt sich LAST_OPENED_PR die Nummer. Rückgabe True."""
+    global LAST_OPENED_PR
+    LAST_OPENED_PR = None
     branch = issue_branch(n)
     # Bewusst ohne --limit: tests/acceptance/test_issue_172.py prüft diesen gh-Aufruf zeichengenau
     # (gemergt, unveränderlich). Einmal je fertigem Issue ist die Abfrage auch kein Kontingentfresser.
     offen = gh("pr", "list", "--state", "open", "--head", branch, "--json", "number")
     if offen:
-        return True, False, offen[0]["number"]
+        return True
 
     if not os.path.isdir(WORKDIR):
         log(f"issue{n}: Arbeitsverzeichnis fehlt, kein PR.")
-        return False, False, None
+        return False
 
     res_count = subprocess.run(
         ["git", "rev-list", "--count", "origin/main..HEAD"],
@@ -1517,7 +1531,7 @@ def open_pr(n: int) -> tuple[bool, bool, int | None]:
         count = 0
     if count <= 1:
         log(f"issue{n}: keine Änderungen über den Akzeptanztest hinaus, kein PR.")
-        return False, False, None
+        return False
 
     res_push = subprocess.run(
         ["git", "push", "-u", "origin", branch],
@@ -1529,7 +1543,7 @@ def open_pr(n: int) -> tuple[bool, bool, int | None]:
     )
     if res_push.returncode != 0:
         alarm(f"issue{n}", "Push abgelehnt (Tests rot oder GitHub-Fehler)")
-        return False, False, None
+        return False
 
     res_log = subprocess.run(
         ["git", "log", "--reverse", "--format=%B%x00", "origin/main..HEAD"],
@@ -1545,12 +1559,13 @@ def open_pr(n: int) -> tuple[bool, bool, int | None]:
 
     title = gh("issue", "view", str(n), "--json", "title")["title"]
     body = build_pr_body(pr_template(), n, WORKER, summary)
-    # gh pr create gibt die PR-URL aus, wir holen die Nummer via gh pr list
-    gh("pr", "create", "--title", title, "--body", body, "--head", branch)
-    # Neue PR-Nummer ermitteln
-    neu = gh("pr", "list", "--state", "open", "--head", branch, "--json", "number")
-    pr_num = neu[0]["number"] if neu else None
-    return True, True, pr_num
+    # gh pr create gibt die URL des neuen PRs aus (…/pull/<nummer>); daraus die Nummer für
+    # das pr_opened-Ereignis. Ein zusätzliches `gh pr list` würde den zeichengenauen Aufruf
+    # in tests/acceptance/test_issue_172.py verletzen.
+    antwort = gh("pr", "create", "--title", title, "--body", body, "--head", branch)
+    treffer = re.search(r"/pull/(\d+)", str(antwort or ""))
+    LAST_OPENED_PR = int(treffer.group(1)) if treffer else None
+    return True
 
 
 _DEP_LINE_RE = re.compile(r"^\s*Wartet\s+auf\s*:\s*(.+)$", re.IGNORECASE)
@@ -1907,6 +1922,8 @@ LAST_AGENT_ERROR: str | None = None
 # Token-Usage und Cost des letzten Agentenlaufs für audit("agent_run_finished", ...) (#222).
 # Wird von log_stream_line() (Qwen) befüllt; für OpenCode bleibt None.
 LAST_AGENT_USAGE: dict | None = None
+# Nummer des PRs, den open_pr() in diesem Lauf neu angelegt hat, sonst None (#222).
+LAST_OPENED_PR: int | None = None
 
 _API_ERROR_PREFIX = "[API Error:"
 # Bei LiteLLM folgt auf ein Leerzeichen „Key“ (bzw. „Received“) der Schlüsselteil samt Key-Hash;
@@ -2026,7 +2043,7 @@ def agent_identitaet() -> tuple[str | None, str | None]:
     return AGENT_USER, eintrag.pw_dir
 
 
-def run_agent(prompt: str) -> tuple[int, dict | None]:
+def run_agent(prompt: str) -> int:
     """Startet den Agenten; `timeout` beendet ihn hart, falls er selbst nicht aufhört.
 
     Der Agentenprozess bekommt `agent_env(ENV)` statt `ENV`: nur die Allowlist und der
@@ -2038,8 +2055,9 @@ def run_agent(prompt: str) -> tuple[int, dict | None]:
     läuft durch `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home
     Assistant kommt.
 
-    Gibt (exit_code, usage) zurück. `usage` ist ein dict mit Token-Infos (input_tokens,
-    output_tokens, cache_read_input_tokens, cost) oder None, wenn nicht verfügbar (#222)."""
+    Gibt den Exit-Code zurück. Token-Usage und Cost des Laufs stehen danach in
+    `LAST_AGENT_USAGE` (dict oder None, #222); die Rückgabe bleibt bewusst ein int, weil
+    tests/acceptance/test_issue_106.py und -178.py sie zeichengenau prüfen."""
     global LAST_AGENT_USAGE
     LAST_AGENT_USAGE = None
     cmd = ["timeout", "-k", "30", str(RUN_TIMEOUT + 60), *agent_cmd(prompt)]
@@ -2056,7 +2074,7 @@ def run_agent(prompt: str) -> tuple[int, dict | None]:
                 print(redact(line), end="", flush=True)
             else:
                 log_stream_line(line)
-    return proc.returncode, LAST_AGENT_USAGE
+    return proc.returncode
 
 
 def _get_json(url: str, timeout: float):
@@ -3054,7 +3072,7 @@ def prepare_issue_frame(issue_no: int) -> Path | None:
 
 
 def main() -> int:
-    global LAST_AGENT_ERROR
+    global LAST_AGENT_ERROR, LAST_OPENED_PR
     skey = "-"          # Regel 7: vor der Auftragswahl meldet der Takt „-“
     gh_fehler = False   # True: der Lauf endete in der Ausnahmebehandlung, _gherr bleibt gemerkt
     try:
@@ -3230,7 +3248,8 @@ def main() -> int:
         lauf_start, begonnen = datetime.now(timezone.utc), time.monotonic()
         audit("run_started", key=skey, spend_vorher=spend_vorher)
         LAST_AGENT_ERROR = None   # log_stream_line setzt ihn nur bei einem Anbieterfehler
-        rc, usage = run_agent(prompt)
+        rc = run_agent(prompt)
+        usage = LAST_AGENT_USAGE   # run_agent() liefert nur den Exit-Code; Usage darüber (#222)
         lauf_ende, dauer = datetime.now(timezone.utc), round(time.monotonic() - begonnen, 1)
         if rc == 124:
             log(f"{skey}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
@@ -3263,10 +3282,11 @@ def main() -> int:
         if state.pop(f"_apierr:{skey}", None) is not None:
             save_state(state)   # ein früherer Anbieterfehler ist vorbei
         if n is not None:
-            success, pr_created, pr_num = open_pr(n)
+            LAST_OPENED_PR = None   # setzt erst ein tatsächlich neu angelegter PR (#222)
+            opened = open_pr(n)
             # pr_opened Event nur bei neu erstelltem PR (#222)
-            if success and pr_created and pr_num is not None:
-                audit("pr_opened", issue=n, pr=pr_num, branch=issue_branch(n))
+            if opened and LAST_OPENED_PR is not None:
+                audit("pr_opened", issue=n, pr=LAST_OPENED_PR, branch=issue_branch(n))
         # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
         if key.startswith("issue"):
             check_issue_result(key)
