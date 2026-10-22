@@ -1,52 +1,38 @@
-# Arbeiten über MCP (ohne Shell)
+# Working via MCP (Without Shell Access)
 
-Für Agenten, die keinen Shell-Zugang haben: dieselben Regeln wie in [`AGENTS.md`](../AGENTS.md),
-aber mit den GitHub-Werkzeugen des Agenten statt mit `gh`. Diese Datei ist aus `MCP.md` in
-`tripitest-art/sc-digger` übernommen und auf dieses Repository angepasst.
+For agents operating without shell access: follow identical rules to [`AGENTS.md`](../AGENTS.md),
+using GitHub MCP tools instead of the `gh` CLI.
 
-## Befehle → MCP-Werkzeuge
+## Befehle → MCP-Werkzeuge (Commands → MCP Tools)
 
-Repo immer `owner: tripitest-art`; `repo` ist das Projekt, an dem du arbeitest — für dieses
-Repository `agent-sandbox-infra`.
+Always set `owner: tripitest-art`; `repo` is the project under development—for this repository: `agent-sandbox-infra`.
 
-| In `AGENTS.md` | MCP-Werkzeug |
+| In `AGENTS.md` | MCP Tool |
 |---|---|
-| Datei lesen | `get_file_contents` (`ref`: `main` oder dein Branch) |
-| `gh issue view <N>` | `issue_read` (`method: get`, für Kommentare `get_comments`) |
-| `gh issue list …` | `search_issues`, z. B. `repo:tripitest-art/agent-sandbox-infra is:issue is:open label:worker-task label:bereit -label:blockiert`, sortiert nach `created` aufsteigend |
-| `gh issue edit --add-label/--remove-label` | `issue_write` (`method: update`, `labels`: **vollständige** Liste) |
+| Read file | `get_file_contents` (`ref`: `main` or feature branch) |
+| `gh issue view <N>` | `issue_read` (`method: get`, for comments `get_comments`) |
+| `gh issue list …` | `search_issues`, e.g. `repo:tripitest-art/agent-sandbox-infra is:issue is:open label:worker-task label:bereit -label:blockiert`, sorted by `created` ascending |
+| `gh issue edit --add-label/--remove-label` | `issue_write` (`method: update`, `labels`: **complete** updated list) |
 | `gh issue comment` | `add_issue_comment` |
 | `git checkout -b <branch>` | `create_branch` (`from_branch: main`) |
-| `git commit` + `git push` | `push_files` (mehrere Dateien, ein Commit) |
-| `gh pr create` | `create_pull_request` (`base: main`, Body nach `.github/pull_request_template.md`, mit `Closes #<N>`) |
-| `gh pr edit` (PR-Text, Titel) | `update_pull_request` |
+| `git commit` + `git push` | `push_files` (multiple files, single atomic commit) |
+| `gh pr create` | `create_pull_request` (`base: main`, body per `.github/pull_request_template.md`, with `Closes #<N>`) |
+| `gh pr edit` (body, title) | `update_pull_request` |
 | `gh pr view --comments` | `pull_request_read` (`get`, `get_comments`, `get_review_comments`) |
-| `gh pr diff` | `pull_request_read` (`get_diff`, bei großen PRs `get_files`) |
+| `gh pr diff` | `pull_request_read` (`get_diff`, for large PRs `get_files`) |
 | `gh pr checks` | `pull_request_read` (`get_check_runs`) |
 | `gh pr view --json reviews,commits` | `pull_request_read` (`get_reviews`, `get_commits`) |
 | `gh pr review --comment` | `pull_request_review_write` (`method: create`, `event: COMMENT`, `body`) |
-| `gh pr merge --squash` | `merge_pull_request` (`merge_method: squash`) — in diesem Repository **nie**: hier mergt Stephan (Regel 4) |
+| `gh pr merge --squash` | `merge_pull_request` (`merge_method: squash`) — in this repo **never**: Stephan merges exclusively (Rule 4) |
 | `gh pr list …` | `list_pull_requests` / `search_pull_requests` |
-| CI-Log bei rotem Check | `get_job_logs` |
+| CI log on red check | `get_job_logs` |
 
-## Regeln, die nur über MCP gelten
+## Regeln, die nur über MCP gelten (Rules Specific to MCP)
 
-- **`push_files` schreibt ganze Dateien.** Immer den vollständigen Inhalt schicken, vorher mit
-  `get_file_contents` vom eigenen Branch lesen. Nie „…" oder „Rest unverändert": Was fehlt, ist
-  danach gelöscht.
-- **Akzeptanztest zeichengenau:** Den Block aus dem Issue-Text kopieren, nicht neu tippen oder
-  umformatieren. Der erste Commit auf dem Branch enthält nur `tests/acceptance/test_issue_<N>.py`.
-- **Labels:** `issue_write` ersetzt die ganze Label-Liste. Erst mit `issue_read` alle Labels
-  lesen, nur `bereit` durch `in-arbeit` ersetzen, die vollständige Liste zurückschreiben. Titel
-  und Text nie mitschicken. `freigabe-geschützt` setzt nur Stephan.
-- **Nur ein Agent je Engpassdatei** (Regel 8): `sandbox/worker_tick.py`, `sandbox/review_tick.py`
-  und `sandbox/install.sh`. Vor der Übernahme prüfen, ob ein offenes Issue mit `in-arbeit` dieselbe
-  Datei nennt — hier gibt es keinen Hotspot-Schlüssel in der Projektliste, die Prüfung läuft über
-  die Dateiliste im Issue.
-- **Nach jedem `push_files` prüfen:** `pull_request_read` (`get_files`) zeigt, ob in einer Datei
-  mehr gelöscht als geändert wurde. Dann ist sie abgeschnitten: sofort mit dem vollständigen
-  Inhalt neu schreiben.
-- **Tests:** Ohne Shell zählt der CI-Check `tests`. Fertig erst, wenn `tests` und
-  `acceptance-guard` grün sind. Änderungen an `.github/`, `conftest.py` oder der
-  pytest-Konfiguration brauchen `freigabe-geschützt` (Stephan) — sie gehören in ein eigenes Issue.
-- **Kontext knapp?** Lieber aufhören und im Issue kommentieren als raten (Worker, Schritt 6).
+- **`push_files` writes entire files:** Always send full file contents, retrieved beforehand via `get_file_contents` from the branch. Never use "…" or placeholder truncations: whatever is missing is deleted.
+- **Verbatim acceptance tests:** Copy the pytest block from the issue without alterations. The first commit on the branch must contain strictly `tests/acceptance/test_issue_<N>.py`.
+- **Labels:** `issue_write` overwrites the entire label set. Read all labels first with `issue_read`, swap only `bereit` for `in-arbeit`, and write back the full list. Never pass title or body unless explicitly editing them. Only Stephan may apply `freigabe-geschützt`.
+- **Bottlenecks (Rule 8):** `sandbox/worker_tick.py`, `sandbox/review_tick.py`, and `sandbox/install.sh`. Check whether an open issue labeled `in-arbeit` already claims the same file before claiming.
+- **Verify after every `push_files`:** Use `pull_request_read` (`get_files`) to verify diff stats. If a file shows more deletions than additions, it was likely truncated: restore the full content immediately.
+- **Tests:** Without shell access, rely on CI check `tests`. A task is done only when `tests` and `acceptance-guard` are green. Any changes to `.github/`, `conftest.py`, or pytest configuration require `freigabe-geschützt` (Stephan).
+- **Context window exhausted?** Stop and explain status via issue comment rather than guessing (Worker, Step 6).

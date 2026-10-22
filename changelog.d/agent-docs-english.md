@@ -1,0 +1,1 @@
+- Doku / Docs & Issue-Template: `docs/planer-ablauf.md` und `docs/mcp.md` auf Englisch übersetzt (Signal-Header für Tests gewahrt); Issue-Template `.github/ISSUE_TEMPLATE/worker-task.yml` auf englische Anweisungen umgestellt (Feld-Labels für Automation unverändert).
