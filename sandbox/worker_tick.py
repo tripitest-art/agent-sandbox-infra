@@ -312,7 +312,7 @@ def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}{prefix} {msg}", flush=True)
 
 
-def audit(event: str, **fields) -> None:
+def audit(event: str, *, stderr_bei_fehler: bool = False, **fields) -> None:
     """Hängt eine JSON-Zeile an AUDIT_LOG: ts (UTC, ISO 8601), event, slot (WORKER_SLOT),
     model (MODEL), active_model und fields.
 
@@ -324,8 +324,13 @@ def audit(event: str, **fields) -> None:
     Nicht serialisierbare Werte gehen per `str()` hinein. Felder namens password, secret,
     api_key, authorization oder token erscheinen als „***“ (Regel 5), alle anderen unverändert.
     Der Pfad wird bei jedem Aufruf aus dem Modulglobal gelesen (#85). Wirft nie: scheitert das
-    Schreiben, kommt eine log()-Zeile „Audit-Log nicht schreibbar: <Fehlerklasse>“ — ohne den
-    Inhalt der Zeile, damit kein Geheimnis über die Fehlermeldung entweicht."""
+    Schreiben, kommt eine Zeile „Audit-Log nicht schreibbar: <Fehlerklasse>“ auf stdout — ohne
+    den Inhalt der Zeile, damit kein Geheimnis über die Fehlermeldung entweicht (#85).
+
+    Mit `stderr_bei_fehler=True` geht diese Zeile nach stderr. alarm() nutzt das: stdout trägt
+    dort die strikt einzeilige „⚠ Stephan:“-Meldung (#34), ein Schreibfehler darf sie nicht zu
+    einer zweiten Zeile machen. systemd schreibt StandardError ebenfalls nach /root/worker.log,
+    der Fehler bleibt also sichtbar."""
     try:
         zeile: dict[str, object] = {"ts": datetime.now(timezone.utc).isoformat(),
                                     "event": event, "slot": WORKER_SLOT, "model": MODEL,
@@ -336,7 +341,13 @@ def audit(event: str, **fields) -> None:
         with open(AUDIT_LOG, "a", encoding="utf-8") as fh:
             fh.write(text + "\n")
     except Exception as e:
-        log(f"Audit-Log nicht schreibbar: {type(e).__name__}")
+        meldung = f"Audit-Log nicht schreibbar: {type(e).__name__}"
+        if not stderr_bei_fehler:
+            log(meldung)
+        else:
+            prefix = f" [{SLOT_TAG}]" if SLOT_TAG else ""
+            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}{prefix} {meldung}",
+                  file=sys.stderr, flush=True)
 
 
 def spend_of(info) -> float | None:
@@ -471,7 +482,9 @@ def alarm(skey: str, error: BaseException | str) -> None:
       "pr103@<sha>", "text7@<sha>") oder "-", wenn der Fehler vor der Auftragswahl auftritt.
     - Übergeben wird nie eine rohe stderr-/Kommandoausgabe und nie ein Umgebungswert;
       die Kurzbeschreibung ist ein fester Text oder höchstens die erste Zeile der
-      Exception-Meldung (Regel 5)."""
+      Exception-Meldung (Regel 5).
+
+    Zusätzlich wird ein `stephan_alarm`-Event ins Audit-Log geschrieben (#222)."""
     if isinstance(error, BaseException):
         klass, detail = type(error).__name__, str(error)
     else:
@@ -483,6 +496,9 @@ def alarm(skey: str, error: BaseException | str) -> None:
     if len(msg) > limit:
         msg = msg[:limit - 1] + "…"
     log(msg)
+    # Audit-Log: strukturiertes stephan_alarm-Event (#222). Ein Schreibfehler geht nach stderr,
+    # damit die einzeilige Meldung oben allein auf stdout bleibt (#34).
+    audit("stephan_alarm", stderr_bei_fehler=True, skey=skey, error_class=klass, detail=detail)
 
 
 def first_line(error: BaseException | str) -> str:
@@ -1494,8 +1510,11 @@ def open_pr(n: int) -> bool:
     """Legt nach dem Agentenlauf den PR zu Issue n an. True, wenn es danach einen offenen PR von
     issue_branch(n) gibt, sonst False.
 
+    Wurde der PR in diesem Lauf neu angelegt, steht seine Nummer in `LAST_OPENED_PR` (für das
+    `pr_opened`-Ereignis in main()); sonst ist das Modulglobal None.
+
     1. gh("pr", "list", "--state", "open", "--head", branch, "--json", "number"): nicht leer -> True,
-       sonst nichts weiter (kein Push, kein Anlegen).
+       sonst nichts weiter (kein Push, kein Anlegen); LAST_OPENED_PR bleibt None.
     2. ["git", "rev-list", "--count", "origin/main..HEAD"] (cwd=WORKDIR, env=ENV, check=True): Zahl <= 1
        (nur der Akzeptanztest-Commit oder weniger) -> False, nichts weiter; Logzeile
        f"issue{n}: keine Änderungen über den Akzeptanztest hinaus, kein PR."
@@ -1507,7 +1526,10 @@ def open_pr(n: int) -> bool:
        verwerfen, die übrigen getrimmt mit je einer Leerzeile dazwischen zu `summary` verbinden.
     5. title = gh("issue", "view", str(n), "--json", "title")["title"];
        body = build_pr_body(pr_template(), n, WORKER, summary);
-       gh("pr", "create", "--title", title, "--body", body, "--head", branch). Rückgabe True."""
+       gh("pr", "create", "--title", title, "--body", body, "--head", branch). gh gibt die PR-URL
+       aus; daraus merkt sich LAST_OPENED_PR die Nummer. Rückgabe True."""
+    global LAST_OPENED_PR
+    LAST_OPENED_PR = None
     branch = issue_branch(n)
     # Bewusst ohne --limit: tests/acceptance/test_issue_172.py prüft diesen gh-Aufruf zeichengenau
     # (gemergt, unveränderlich). Einmal je fertigem Issue ist die Abfrage auch kein Kontingentfresser.
@@ -1562,7 +1584,12 @@ def open_pr(n: int) -> bool:
 
     title = gh("issue", "view", str(n), "--json", "title")["title"]
     body = build_pr_body(pr_template(), n, WORKER, summary)
-    gh("pr", "create", "--title", title, "--body", body, "--head", branch)
+    # gh pr create gibt die URL des neuen PRs aus (…/pull/<nummer>); daraus die Nummer für
+    # das pr_opened-Ereignis. Ein zusätzliches `gh pr list` würde den zeichengenauen Aufruf
+    # in tests/acceptance/test_issue_172.py verletzen.
+    antwort = gh("pr", "create", "--title", title, "--body", body, "--head", branch)
+    treffer = re.search(r"/pull/(\d+)", str(antwort or ""))
+    LAST_OPENED_PR = int(treffer.group(1)) if treffer else None
     return True
 
 
@@ -1917,6 +1944,11 @@ def format_usage(usage: object) -> str:
 # Kurztext des Anbieterfehlers im letzten Agentenlauf, sonst None. Nur log_stream_line setzt ihn;
 # main() liest ihn nach run_agent() und nimmt dann den Versuch zurück (#106).
 LAST_AGENT_ERROR: str | None = None
+# Token-Usage und Cost des letzten Agentenlaufs für audit("agent_run_finished", ...) (#222).
+# Wird von log_stream_line() (Qwen) befüllt; für OpenCode bleibt None.
+LAST_AGENT_USAGE: dict | None = None
+# Nummer des PRs, den open_pr() in diesem Lauf neu angelegt hat, sonst None (#222).
+LAST_OPENED_PR: int | None = None
 
 _API_ERROR_PREFIX = "[API Error:"
 # Bei LiteLLM folgt auf ein Leerzeichen „Key“ (bzw. „Received“) der Schlüsselteil samt Key-Hash;
@@ -1997,6 +2029,11 @@ def log_stream_line(line: str) -> None:
                 and isinstance(message, str) and message.startswith(_API_ERROR_PREFIX)):
             LAST_AGENT_ERROR = short_api_error(message)
             say(f"[Anbieterfehler] {LAST_AGENT_ERROR}")
+        # Usage für agent_run_finished Audit-Event speichern (#222)
+        usage = event.get("usage")
+        if isinstance(usage, dict):
+            global LAST_AGENT_USAGE
+            LAST_AGENT_USAGE = usage
         say(f"[Qwen Code: {event.get('subtype')}, {event.get('num_turns')} Züge, "
             f"{round((event.get('duration_ms') or 0) / 1000)} s{format_usage(event.get('usage'))}]")
 
@@ -2041,7 +2078,13 @@ def run_agent(prompt: str) -> int:
     `AGENT_USER` mit dessen Home (#217); damit reicht ein Ausbruch aus dem Werkzeugkasten
     nicht mehr an die Geheimnisse des Hosts. Die bei OpenCode ungefiltert gedruckte Ausgabe
     läuft durch `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home
-    Assistant kommt."""
+    Assistant kommt.
+
+    Gibt den Exit-Code zurück. Token-Usage und Cost des Laufs stehen danach in
+    `LAST_AGENT_USAGE` (dict oder None, #222); die Rückgabe bleibt bewusst ein int, weil
+    tests/acceptance/test_issue_106.py und -178.py sie zeichengenau prüfen."""
+    global LAST_AGENT_USAGE
+    LAST_AGENT_USAGE = None
     cmd = ["timeout", "-k", "30", str(RUN_TIMEOUT + 60), *agent_cmd(prompt)]
     env = agent_env(ENV)
     user, home = agent_identitaet()
@@ -3055,7 +3098,7 @@ def prepare_issue_frame(issue_no: int) -> Path | None:
 
 
 def main() -> int:
-    global LAST_AGENT_ERROR
+    global LAST_AGENT_ERROR, LAST_OPENED_PR
     skey = "-"          # Regel 7: vor der Auftragswahl meldet der Takt „-“
     gh_fehler = False   # True: der Lauf endete in der Ausnahmebehandlung, _gherr bleibt gemerkt
     try:
@@ -3236,6 +3279,7 @@ def main() -> int:
         audit("run_started", key=skey, spend_vorher=spend_vorher)
         LAST_AGENT_ERROR = None   # log_stream_line setzt ihn nur bei einem Anbieterfehler
         rc = run_agent(prompt)
+        usage = LAST_AGENT_USAGE   # run_agent() liefert nur den Exit-Code; Usage darüber (#222)
         lauf_ende, dauer = datetime.now(timezone.utc), round(time.monotonic() - begonnen, 1)
         if rc == 124:
             log(f"{skey}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
@@ -3244,6 +3288,10 @@ def main() -> int:
         slot_status("idle", message="Takt beendet", project=PROJECT)
         audit("run_finished", key=skey, exit_code=rc, dauer_s=dauer,
               anbieterfehler=bool(LAST_AGENT_ERROR))
+        # agent_run_finished für Dashboard (#222): Issue, Modell, Tokens, Cost, Exit-Code
+        issue_no = job_issue_number(key)
+        audit("agent_run_finished", issue=issue_no, model=ACTIVE_MODEL, exit_code=rc,
+              tokens=usage, cost=usage.get("cost") if isinstance(usage, dict) else None)
         state["_kosten_offen"] = {"key": skey, "slot": WORKER_SLOT, "spend_vorher": spend_vorher,
                                   "start": lauf_start.isoformat(), "ende": lauf_ende.isoformat()}
         save_state(state)
@@ -3264,7 +3312,11 @@ def main() -> int:
         if state.pop(f"_apierr:{skey}", None) is not None:
             save_state(state)   # ein früherer Anbieterfehler ist vorbei
         if n is not None:
-            open_pr(n)
+            LAST_OPENED_PR = None   # setzt erst ein tatsächlich neu angelegter PR (#222)
+            opened = open_pr(n)
+            # pr_opened Event nur bei neu erstelltem PR (#222)
+            if opened and LAST_OPENED_PR is not None:
+                audit("pr_opened", issue=n, pr=LAST_OPENED_PR, branch=issue_branch(n))
         # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
         if key.startswith("issue"):
             check_issue_result(key)

@@ -478,7 +478,7 @@ def _run_rework(monkeypatch, tmp_path, after: dict) -> list:
     monkeypatch.setattr(w, "ollama_free", lambda *a, **k: True)
     monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)  # git-Vorbereitung
     prompts = []
-    monkeypatch.setattr(w, "run_agent", lambda prompt: prompts.append(prompt) or 0)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: (prompts.append(prompt) or 0))
     assert w.main() == 0
     return prompts
 
@@ -1937,9 +1937,9 @@ def test_main_ruft_open_pr_nach_agent_und_vor_check_issue_result(monkeypatch, tm
     monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
     monkeypatch.setattr(w, "prepare_workdir", lambda: None)
     monkeypatch.setattr(w, "prepare_issue_frame", lambda n: True)
-    monkeypatch.setattr(w, "run_agent", lambda prompt: schritte.append("agent") or 0)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: (schritte.append("agent") or 0))
     aufrufe = []
-    monkeypatch.setattr(w, "open_pr", lambda n: aufrufe.append(n) or schritte.append("open_pr") or True)
+    monkeypatch.setattr(w, "open_pr", lambda n: (aufrufe.append(n) or schritte.append("open_pr") or True))
     monkeypatch.setattr(w, "check_issue_result", lambda k: schritte.append("check_issue_result"))
 
     assert w.main() == 0
@@ -1969,7 +1969,7 @@ def test_main_ruft_open_pr_nie_fuer_nacharbeit_oder_text(monkeypatch, tmp_path):
         monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
 
         aufgerufen = []
-        monkeypatch.setattr(w, "open_pr", lambda n: aufgerufen.append(n) or True)
+        monkeypatch.setattr(w, "open_pr", lambda n: (aufgerufen.append(n) or True))
 
         assert w.main() == 0
         assert aufgerufen == []
@@ -1996,7 +1996,7 @@ def test_main_ruft_open_pr_nicht_nach_anbieterfehler(monkeypatch, tmp_path):
 
     monkeypatch.setattr(w, "run_agent", run_with_apierr)
     aufgerufen = []
-    monkeypatch.setattr(w, "open_pr", lambda n: aufgerufen.append(n) or True)
+    monkeypatch.setattr(w, "open_pr", lambda n: (aufgerufen.append(n) or True))
 
     assert w.main() == 0
     assert aufgerufen == []
@@ -2068,7 +2068,8 @@ def test_open_pr_verwendet_capture_output_und_text(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(w.subprocess, "run", fake_run)
-    assert w.open_pr(7) is True
+    result = w.open_pr(7)
+    assert result is True
 
     assert len(calls) == 3
     for cmd, kw in calls:
@@ -2368,6 +2369,17 @@ def test_audit_meldet_schreibfehler_ohne_zeileninhalt(tmp_path, monkeypatch, cap
     out = capsys.readouterr().out
     assert "Audit-Log nicht schreibbar: FileNotFoundError" in out
     assert "GEHEIM" not in out and '"event"' not in out   # kein Rest der Zeile
+
+
+def test_audit_schreibfehler_aus_alarm_geht_nach_stderr(tmp_path, monkeypatch, capsys):
+    """#34: In alarm() bleibt stdout die eine „⚠ Stephan:“-Zeile; der Audit-Fehler läuft über
+    stderr (systemd schreibt ihn ebenfalls nach /root/worker.log) und bleibt so sichtbar."""
+    monkeypatch.setattr(w, "AUDIT_LOG", str(tmp_path / "gibt" / "es" / "nicht" / "a.jsonl"))
+    w.alarm("issue7", ValueError("kaputt"))
+    aus = capsys.readouterr()
+    assert aus.out.strip().splitlines()[-1].endswith("⚠ Stephan: issue7: ValueError: kaputt")
+    assert "Audit-Log nicht schreibbar: FileNotFoundError" in aus.err
+    assert "Audit-Log nicht schreibbar" not in aus.out
 
 
 def test_audit_faengt_auch_serialisierungsfehler(tmp_path, monkeypatch, capsys):
