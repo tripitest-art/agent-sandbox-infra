@@ -1,0 +1,1 @@
+- Doku / Skills: `skills/agent-sandbox-planner/SKILL.md` und `skills/agent-sandbox-review/SKILL.md` auf Englisch übersetzt für präziseres Modell-Following; PR-Vorlage (`.github/pull_request_template.md`) hybridisiert (Code-Kopplung gewahrt, Erklärungen auf Englisch).
