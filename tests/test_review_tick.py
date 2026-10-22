@@ -1522,7 +1522,9 @@ def test_to_stephan_im_audit(monkeypatch, tmp_path):
     Zustandsschlüssel „pr<N>@<sha>“."""
     monkeypatch.setattr(r, "gh_text", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)))
     r.to_stephan(7, f"pr7@{SHA}", "Freigegeben, Merge-Modus manuell", {})
-    e = _audit_zeilen(tmp_path / "audit.jsonl")[-1]
+    zeilen = _audit_zeilen(tmp_path / "audit.jsonl")
+    # to_stephan schreibt jetzt auch stephan_alarm; wir suchen das to_stephan-Event
+    e = next(e for e in reversed(zeilen) if e["event"] == "to_stephan")
     assert e["event"] == "to_stephan" and e["pr"] == 7 and e["sha"] == SHA
     assert e["reason"] == "Freigegeben, Merge-Modus manuell"
 

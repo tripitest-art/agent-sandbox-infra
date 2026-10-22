@@ -446,7 +446,9 @@ def alarm(skey: str, error: BaseException | str) -> None:
       "pr103@<sha>", "text7@<sha>") oder "-", wenn der Fehler vor der Auftragswahl auftritt.
     - Übergeben wird nie eine rohe stderr-/Kommandoausgabe und nie ein Umgebungswert;
       die Kurzbeschreibung ist ein fester Text oder höchstens die erste Zeile der
-      Exception-Meldung (Regel 5)."""
+      Exception-Meldung (Regel 5).
+
+    Zusätzlich wird ein `stephan_alarm`-Event ins Audit-Log geschrieben (#222)."""
     if isinstance(error, BaseException):
         klass, detail = type(error).__name__, str(error)
     else:
@@ -458,6 +460,8 @@ def alarm(skey: str, error: BaseException | str) -> None:
     if len(msg) > limit:
         msg = msg[:limit - 1] + "…"
     log(msg)
+    # Audit-Log: strukturiertes stephan_alarm-Event (#222)
+    audit("stephan_alarm", skey=skey, error_class=klass, detail=detail)
 
 
 def first_line(error: BaseException | str) -> str:
@@ -1465,16 +1469,20 @@ def sync_issue_branch_with_main(n: int) -> bool:
     return False
 
 
-def open_pr(n: int) -> bool:
-    """Legt nach dem Agentenlauf den PR zu Issue n an. True, wenn es danach einen offenen PR von
-    issue_branch(n) gibt, sonst False.
+def open_pr(n: int) -> tuple[bool, bool, int | None]:
+    """Legt nach dem Agentenlauf den PR zu Issue n an.
 
-    1. gh("pr", "list", "--state", "open", "--head", branch, "--json", "number"): nicht leer -> True,
-       sonst nichts weiter (kein Push, kein Anlegen).
+    Gibt (success, pr_created, pr_number) zurück:
+    - success: True, wenn am Ende ein offener PR vom Branch existiert
+    - pr_created: True, wenn der PR in diesem Lauf neu erstellt wurde (nicht schon bestand)
+    - pr_number: Die PR-Nummer, wenn success=True, sonst None
+
+    1. gh("pr", "list", "--state", "open", "--head", branch, "--json", "number"): nicht leer ->
+       (True, False, pr_number) — PR bestand schon.
     2. ["git", "rev-list", "--count", "origin/main..HEAD"] (cwd=WORKDIR, env=ENV, check=True): Zahl <= 1
-       (nur der Akzeptanztest-Commit oder weniger) -> False, nichts weiter; Logzeile
+       (nur der Akzeptanztest-Commit oder weniger) -> (False, False, None), nichts weiter; Logzeile
        f"issue{n}: keine Änderungen über den Akzeptanztest hinaus, kein PR."
-    3. ["git", "push", "-u", "origin", branch] (cwd=WORKDIR, env=ENV, check=False): Exit != 0 -> False,
+    3. ["git", "push", "-u", "origin", branch] (cwd=WORKDIR, env=ENV, check=False): Exit != 0 -> (False, False, None),
        keine weitere Aktion, Zeile alarm(f"issue{n}", "Push abgelehnt (Tests rot oder GitHub-Fehler)").
        Der Ausgabetext des Befehls kommt nie ins Log (Regel 5).
     4. ["git", "log", "--reverse", "--format=%B%x00", "origin/main..HEAD"] (cwd=WORKDIR, env=ENV,
@@ -1482,17 +1490,17 @@ def open_pr(n: int) -> bool:
        verwerfen, die übrigen getrimmt mit je einer Leerzeile dazwischen zu `summary` verbinden.
     5. title = gh("issue", "view", str(n), "--json", "title")["title"];
        body = build_pr_body(pr_template(), n, WORKER, summary);
-       gh("pr", "create", "--title", title, "--body", body, "--head", branch). Rückgabe True."""
+       gh("pr", "create", "--title", title, "--body", body, "--head", branch). Rückgabe (True, True, pr_number)."""
     branch = issue_branch(n)
     # Bewusst ohne --limit: tests/acceptance/test_issue_172.py prüft diesen gh-Aufruf zeichengenau
     # (gemergt, unveränderlich). Einmal je fertigem Issue ist die Abfrage auch kein Kontingentfresser.
     offen = gh("pr", "list", "--state", "open", "--head", branch, "--json", "number")
     if offen:
-        return True
+        return True, False, offen[0]["number"]
 
     if not os.path.isdir(WORKDIR):
         log(f"issue{n}: Arbeitsverzeichnis fehlt, kein PR.")
-        return False
+        return False, False, None
 
     res_count = subprocess.run(
         ["git", "rev-list", "--count", "origin/main..HEAD"],
@@ -1509,7 +1517,7 @@ def open_pr(n: int) -> bool:
         count = 0
     if count <= 1:
         log(f"issue{n}: keine Änderungen über den Akzeptanztest hinaus, kein PR.")
-        return False
+        return False, False, None
 
     res_push = subprocess.run(
         ["git", "push", "-u", "origin", branch],
@@ -1521,7 +1529,7 @@ def open_pr(n: int) -> bool:
     )
     if res_push.returncode != 0:
         alarm(f"issue{n}", "Push abgelehnt (Tests rot oder GitHub-Fehler)")
-        return False
+        return False, False, None
 
     res_log = subprocess.run(
         ["git", "log", "--reverse", "--format=%B%x00", "origin/main..HEAD"],
@@ -1537,8 +1545,12 @@ def open_pr(n: int) -> bool:
 
     title = gh("issue", "view", str(n), "--json", "title")["title"]
     body = build_pr_body(pr_template(), n, WORKER, summary)
+    # gh pr create gibt die PR-URL aus, wir holen die Nummer via gh pr list
     gh("pr", "create", "--title", title, "--body", body, "--head", branch)
-    return True
+    # Neue PR-Nummer ermitteln
+    neu = gh("pr", "list", "--state", "open", "--head", branch, "--json", "number")
+    pr_num = neu[0]["number"] if neu else None
+    return True, True, pr_num
 
 
 _DEP_LINE_RE = re.compile(r"^\s*Wartet\s+auf\s*:\s*(.+)$", re.IGNORECASE)
@@ -1892,6 +1904,9 @@ def format_usage(usage: object) -> str:
 # Kurztext des Anbieterfehlers im letzten Agentenlauf, sonst None. Nur log_stream_line setzt ihn;
 # main() liest ihn nach run_agent() und nimmt dann den Versuch zurück (#106).
 LAST_AGENT_ERROR: str | None = None
+# Token-Usage und Cost des letzten Agentenlaufs für audit("agent_run_finished", ...) (#222).
+# Wird von log_stream_line() (Qwen) befüllt; für OpenCode bleibt None.
+LAST_AGENT_USAGE: dict | None = None
 
 _API_ERROR_PREFIX = "[API Error:"
 # Bei LiteLLM folgt auf ein Leerzeichen „Key“ (bzw. „Received“) der Schlüsselteil samt Key-Hash;
@@ -1972,6 +1987,11 @@ def log_stream_line(line: str) -> None:
                 and isinstance(message, str) and message.startswith(_API_ERROR_PREFIX)):
             LAST_AGENT_ERROR = short_api_error(message)
             say(f"[Anbieterfehler] {LAST_AGENT_ERROR}")
+        # Usage für agent_run_finished Audit-Event speichern (#222)
+        usage = event.get("usage")
+        if isinstance(usage, dict):
+            global LAST_AGENT_USAGE
+            LAST_AGENT_USAGE = usage
         say(f"[Qwen Code: {event.get('subtype')}, {event.get('num_turns')} Züge, "
             f"{round((event.get('duration_ms') or 0) / 1000)} s{format_usage(event.get('usage'))}]")
 
@@ -2006,7 +2026,7 @@ def agent_identitaet() -> tuple[str | None, str | None]:
     return AGENT_USER, eintrag.pw_dir
 
 
-def run_agent(prompt: str) -> int:
+def run_agent(prompt: str) -> tuple[int, dict | None]:
     """Startet den Agenten; `timeout` beendet ihn hart, falls er selbst nicht aufhört.
 
     Der Agentenprozess bekommt `agent_env(ENV)` statt `ENV`: nur die Allowlist und der
@@ -2016,7 +2036,12 @@ def run_agent(prompt: str) -> int:
     `AGENT_USER` mit dessen Home (#217); damit reicht ein Ausbruch aus dem Werkzeugkasten
     nicht mehr an die Geheimnisse des Hosts. Die bei OpenCode ungefiltert gedruckte Ausgabe
     läuft durch `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home
-    Assistant kommt."""
+    Assistant kommt.
+
+    Gibt (exit_code, usage) zurück. `usage` ist ein dict mit Token-Infos (input_tokens,
+    output_tokens, cache_read_input_tokens, cost) oder None, wenn nicht verfügbar (#222)."""
+    global LAST_AGENT_USAGE
+    LAST_AGENT_USAGE = None
     cmd = ["timeout", "-k", "30", str(RUN_TIMEOUT + 60), *agent_cmd(prompt)]
     env = agent_env(ENV)
     user, home = agent_identitaet()
@@ -2031,7 +2056,7 @@ def run_agent(prompt: str) -> int:
                 print(redact(line), end="", flush=True)
             else:
                 log_stream_line(line)
-    return proc.returncode
+    return proc.returncode, LAST_AGENT_USAGE
 
 
 def _get_json(url: str, timeout: float):
@@ -3205,7 +3230,7 @@ def main() -> int:
         lauf_start, begonnen = datetime.now(timezone.utc), time.monotonic()
         audit("run_started", key=skey, spend_vorher=spend_vorher)
         LAST_AGENT_ERROR = None   # log_stream_line setzt ihn nur bei einem Anbieterfehler
-        rc = run_agent(prompt)
+        rc, usage = run_agent(prompt)
         lauf_ende, dauer = datetime.now(timezone.utc), round(time.monotonic() - begonnen, 1)
         if rc == 124:
             log(f"{skey}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
@@ -3214,6 +3239,10 @@ def main() -> int:
         slot_status("idle", message="Takt beendet", project=PROJECT)
         audit("run_finished", key=skey, exit_code=rc, dauer_s=dauer,
               anbieterfehler=bool(LAST_AGENT_ERROR))
+        # agent_run_finished für Dashboard (#222): Issue, Modell, Tokens, Cost, Exit-Code
+        issue_no = job_issue_number(key)
+        audit("agent_run_finished", issue=issue_no, model=ACTIVE_MODEL, exit_code=rc,
+              tokens=usage, cost=usage.get("cost") if isinstance(usage, dict) else None)
         state["_kosten_offen"] = {"key": skey, "slot": WORKER_SLOT, "spend_vorher": spend_vorher,
                                   "start": lauf_start.isoformat(), "ende": lauf_ende.isoformat()}
         save_state(state)
@@ -3234,7 +3263,10 @@ def main() -> int:
         if state.pop(f"_apierr:{skey}", None) is not None:
             save_state(state)   # ein früherer Anbieterfehler ist vorbei
         if n is not None:
-            open_pr(n)
+            success, pr_created, pr_num = open_pr(n)
+            # pr_opened Event nur bei neu erstelltem PR (#222)
+            if success and pr_created and pr_num is not None:
+                audit("pr_opened", issue=n, pr=pr_num, branch=issue_branch(n))
         # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
         if key.startswith("issue"):
             check_issue_result(key)

@@ -726,6 +726,7 @@ def post_review_status(sha: str, verdict: str) -> bool:
         hinweis = gh_http_hinweis(code)
         hinweis = f": {hinweis}" if hinweis else ""
         log(f"⚠ Stephan: Status review für {sha[:7]} nicht gesetzt ({type(exc).__name__}{zusatz}){hinweis}")
+        audit("stephan_alarm", pr="?", sha=sha[:7], reason=f"Status review nicht gesetzt: {type(exc).__name__}{zusatz}{hinweis}")
         return False
 
 
@@ -780,6 +781,8 @@ def to_stephan(n: int, key: str, reason: str, state: dict) -> None:
     log(f"PR #{n}: ⚠ Stephan: {reason}")
     # Der Schlüssel ist „pr<N>@<sha>“; andere Schlüssel (Tests, Sonderfälle) nennen keinen Commit.
     audit("to_stephan", pr=n, sha=key.split("@", 1)[1] if "@" in key else "", reason=reason)
+    # stephan_alarm für Dashboard (#222)
+    audit("stephan_alarm", pr=n, sha=key.split("@", 1)[1] if "@" in key else "", reason=reason)
     gemeldet = state.setdefault("gemeldet", [])
     if not POST or key in gemeldet:
         return
@@ -973,6 +976,7 @@ def _run_pr_review() -> int:
         config_key = f"config:{REVIEWER_NAME}"
         if config_key not in gemeldet:
             log(f"⚠ Stephan: {problem}")
+            audit("stephan_alarm", pr=n, reason=problem)
             gemeldet.append(config_key)
             save_state(state)
         return 0
