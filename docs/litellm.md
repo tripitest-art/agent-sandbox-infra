@@ -124,6 +124,24 @@ model_list:
       input_cost_per_token: 0
       output_cost_per_token: 0
 
+  # coder-mimo – Xiaomi MiMo-V2.6-Flash (Tau-Bench #7 Pareto: 78.7% Accuracy, OpenCode Go Flatrate)
+  # Hochpraezises Modell fuer Worker. Keine Token-Kosten.
+  - model_name: coder-mimo
+    litellm_params:
+      model: openai/mimo-v2.6-flash
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODE_GO_KEY
+      extra_headers:
+        x-opencode-session: "sandbox-session"
+        User-Agent: "opencode/1.0.0 (Linux; x86_64)"
+      rpm: 30
+      max_parallel_requests: 3
+      timeout: 600
+      stream_timeout: 90
+    model_info:
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+
   # reviewer-go – OpenCode Go Flatrate-Abo (GLM 5.3 Flash)
   # fuer Reviewer (GLM-Familie, unabhaengig von DeepSeek/Worker). Keine Token-Kosten.
   - model_name: reviewer-go

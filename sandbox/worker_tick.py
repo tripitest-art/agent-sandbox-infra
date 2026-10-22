@@ -94,6 +94,7 @@ WORKER_NAMES = {
     "coder-pro-go": "DeepSeek V4 Pro (LiteLLM coder-pro-go, OpenCode Go)",
     "coder-kimi-go": "Kimi K2.7 Code (LiteLLM coder-kimi-go, OpenCode Go)",
     "coder-qwen-go": "Qwen 3.8 Max (LiteLLM coder-qwen-go, OpenCode Go)",
+    "coder-mimo": "Xiaomi MiMo-V2.6-Flash (LiteLLM coder-mimo, OpenCode Go)",
     "reviewer-go": "GLM 5.3 Flash (LiteLLM reviewer-go, OpenCode Go)",
     "coder-fast": "DeepSeek (LiteLLM coder-fast, ohne Thinking)",
     "coder-or": "DeepSeek (LiteLLM coder-or, OpenRouter)",

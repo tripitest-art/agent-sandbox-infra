@@ -1,0 +1,2 @@
+- `worker_tick` / `review_tick`: Modell-Alias `coder-mimo` (Xiaomi MiMo-V2.6-Flash, 78,7 % Accuracy im Tau-Bench Leaderboard) über OpenCode Go als hochpräzises Modell für Worker integriert; Modellfamilie `mimo` in `FAMILIES` aufgenommen (Regel 6 bleibt gewahrt).
+- LiteLLM: Modell `coder-mimo` (`openai/mimo-v2.6-flash`) auf LXC 113 eingebunden mit automatischem Fallback auf `coder-pro-go` und `planner-pro`.
