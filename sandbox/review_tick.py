@@ -123,6 +123,7 @@ MISSING_CHECK_GRACE_S = agent_settings.value("MISSING_CHECK_GRACE_S", 600)
 # independence_problem()/reviewer_config_problem() den Review, statt die Regel still zu überspringen.
 FAMILIES = (("glm", r"glm|zhipu|z\.ai|reviewer-go"), ("mistral", r"mistral|codestral|coder-free"),
             ("nemotron", r"nemotron"), ("minimax", r"minimax"), ("beam", r"beam"),
+            ("mimo", r"mimo|xiaomi"),
             ("kimi", r"kimi|moonshot"),
             ("qwen", r"qwen|coder-nvidia|nvidia"), ("gemini", r"gemini|gemma|longctx"), ("claude", r"claude|anthropic|opus|sonnet"),
             ("deepseek", r"deepseek|\bcoder(?:-fast|-pro|-or|-go|-pro-go)?\b"))
