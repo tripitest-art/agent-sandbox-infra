@@ -1,5 +1,6 @@
 """Tests für sandbox/install-lib.sh (gemerkte Einstellungen, Projekte klonen) ohne Server und Netzwerk."""
 
+import json
 import os
 import shutil
 import stat
@@ -420,3 +421,76 @@ def test_logrotate_schritt_bricht_bei_ungueltiger_groesse_ab(tmp_path):
     r = sh(logrotate_step(), tmp_path, LOGROTATE_DIR=str(ziel), LOG_ROTATE_SIZE="viel")
     assert r.returncode != 0
     assert not (ziel / "agent-sandbox").exists()
+
+
+# ---- Agent und Context-Mode (#270) ----
+
+def test_agent_check_accepts_known_values(tmp_path):
+    for env in ({"AGENT": "qwen-code", "CONTEXT_MODE": "0"},
+                {"AGENT": "opencode", "CONTEXT_MODE": "1"},
+                {"AGENT": "opencode", "CONTEXT_MODE": ""}):
+        r = sh("agent_check", tmp_path, **env)
+        assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("env,var", [
+    ({"AGENT": "claude"}, "AGENT"),
+    ({"AGENT": "opencode", "CONTEXT_MODE": "2"}, "CONTEXT_MODE"),
+])
+def test_agent_check_rejects_unknown_values(tmp_path, env, var):
+    r = sh("agent_check", tmp_path, **env)
+    assert r.returncode != 0 and var in r.stderr
+
+
+def test_conf_save_merkt_agent_und_context_mode(tmp_path):
+    r = sh('AGENT=opencode; CONTEXT_MODE=1; conf_save AGENT CONTEXT_MODE\n'
+           'echo "$(conf_get AGENT)/$(conf_get CONTEXT_MODE)"', tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "opencode/1"
+    assert (tmp_path / "agent-sandbox.conf").read_text() == "AGENT=opencode\nCONTEXT_MODE=1\n"
+
+
+def opencode_cfg(tmp_path, **env):
+    r = sh("opencode_config_json", tmp_path, BACKEND="litellm", OLLAMA="http://192.0.2.1:11434",
+           MODEL="qwen3-coder-64k", LITELLM="http://192.0.2.2:4000", LITELLM_MODEL="coder",
+           LITELLM_ALL="coder coder-free", **env)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def test_opencode_config_haertet_rueckfragen_und_sandbox(tmp_path):
+    cfg = opencode_cfg(tmp_path, CONTEXT_MODE="0")
+    assert cfg["model"] == "litellm/coder"
+    perm = cfg["permission"]
+    assert perm["edit"] == "allow" and perm["bash"] == "allow"
+    for denied in ("webfetch", "question", "plan_enter", "plan_exit", "external_directory"):
+        assert perm[denied] == "deny", denied
+    assert "plugin" not in cfg
+
+
+def test_opencode_config_gibt_dem_ollama_modell_das_sampling(tmp_path):
+    modell = opencode_cfg(tmp_path, CONTEXT_MODE="0")["provider"]["ollama"]["models"]["qwen3-coder-64k"]
+    assert modell["options"] == {"temperature": 0.7, "topP": 0.8}
+
+
+def test_opencode_config_waehlt_das_modell_je_backend(tmp_path):
+    assert opencode_cfg(tmp_path, CONTEXT_MODE="0")["model"] == "litellm/coder"
+    r = sh("opencode_config_json", tmp_path, BACKEND="ollama", OLLAMA="http://192.0.2.1:11434",
+           MODEL="qwen3-coder-64k", LITELLM="http://192.0.2.2:4000", LITELLM_MODEL="coder",
+           LITELLM_ALL="coder", CONTEXT_MODE="0")
+    assert r.returncode == 0, r.stderr
+    cfg = json.loads(r.stdout)
+    assert cfg["model"] == "ollama/qwen3-coder-64k"
+    assert "plugin" not in cfg
+
+
+def test_opencode_config_plugin_nur_mit_context_mode(tmp_path):
+    assert opencode_cfg(tmp_path, CONTEXT_MODE="1")["plugin"] == ["context-mode"]
+
+
+def test_install_sh_merkt_agent_context_mode_und_ruft_den_generator():
+    text = (SANDBOX / "install.sh").read_text(encoding="utf-8")
+    assert "conf_get AGENT" in text and "conf_get CONTEXT_MODE" in text
+    assert "agent_check" in text
+    assert "opencode_config_json > /root/.config/opencode/opencode.json" in text
+    assert "npm install -g -s context-mode" in text
