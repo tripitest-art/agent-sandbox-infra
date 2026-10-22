@@ -1,19 +1,19 @@
-name: Aufgabe für einen Agenten
-description: Klar abgegrenzte Aufgabe, die ein Worker-Agent in einem Pull Request umsetzen kann
+name: Worker Task (Aufgabe für einen Agenten)
+description: Clearly scoped task that a worker agent can implement in a single Pull Request
 labels: ["worker-task"]
 body:
   - type: markdown
     attributes:
       value: |
-        Ein Issue ist der Vertrag mit dem Worker. Je genauer Schnittstellen und
-        Akzeptanztests, desto weniger rät der Worker. Ablauf: `AGENTS.md`, Abschnitt
-        „Worker-Aufgaben“.
+        An issue is the binding contract with the worker. The more precise the interface
+        signatures and acceptance tests, the less the model needs to guess. Workflow:
+        `AGENTS.md` (section „Worker-Aufgaben“).
 
   - type: textarea
     id: ziel
     attributes:
       label: Ziel
-      description: Was soll danach anders sein? Ein, zwei Sätze.
+      description: What should change afterwards? One or two sentences.
     validations:
       required: true
 
@@ -21,7 +21,7 @@ body:
     id: dateien
     attributes:
       label: Betroffene Dateien
-      description: Nur diese Dateien dürfen geändert werden (plus die Testdateien).
+      description: Only these files may be modified (plus test files).
       placeholder: |
         - sandbox/review_tick.py (pick_pr)
         - tests/test_review_tick.py
@@ -32,7 +32,7 @@ body:
     id: schnittstellen
     attributes:
       label: Schnittstellen
-      description: Neue oder geänderte Funktionen mit exakter Signatur, Rückgabewert und Verhalten im Fehlerfall.
+      description: New or modified functions with exact signature, return value, and error behavior.
       render: python
       placeholder: |
         def project_done(state: dict) -> frozenset:
@@ -44,7 +44,7 @@ body:
     id: nicht-anfassen
     attributes:
       label: Nicht Teil dieser Aufgabe
-      description: Was ausdrücklich nicht geändert oder „gleich mit aufgeräumt“ wird.
+      description: What is explicitly out of scope or will not be refactored.
       placeholder: |
         - keine Änderung an install.sh oder den systemd-Units
         - kein Umbenennen bestehender Funktionen
@@ -56,9 +56,9 @@ body:
     attributes:
       label: Akzeptanztests
       description: |
-        pytest-Code, den der Worker 1:1 als `tests/acceptance/test_issue_<Nummer>.py`
-        übernimmt. Der CI-Check `acceptance-guard` vergleicht die Datei mit diesem Block.
-        Netzwerk nur über Fakes. Leer lassen, wenn es keine festen Akzeptanztests gibt.
+        pytest code that the worker copies verbatim into `tests/acceptance/test_issue_<Number>.py`.
+        The CI check `acceptance-guard` compares the file against this block. Offline only (mocks for network/gh).
+        Leave empty only if there are no fixed acceptance tests.
       render: python
     validations:
       required: false
@@ -77,7 +77,7 @@ body:
     id: merge-modus
     attributes:
       label: Merge-Modus
-      description: Automatisch = Reviewer-Agent merged bei grünem CI. Manuell = Reviewer gibt frei, Stephan merged.
+      description: Automatic = Reviewer agent merges on green CI. Manual = Reviewer approves, Stephan merges.
       options:
         - automatisch nach Review
         - manuell durch Stephan (Betrieb, Server, Zugangsdaten)
@@ -88,6 +88,6 @@ body:
     id: kontext
     attributes:
       label: Kontext
-      description: ROADMAP-Abschnitt, Logs, Beispiele, Abhängigkeiten. Keine Zugangsdaten.
+      description: ROADMAP milestone, logs, examples, dependencies. Never include credentials.
     validations:
       required: false

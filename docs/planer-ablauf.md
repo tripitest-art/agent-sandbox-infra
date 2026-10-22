@@ -1,95 +1,73 @@
-# Planer-Ablauf und Agenten-Labels
+# Planer-Ablauf und Agenten-Labels (Planner Workflow and Agent Labels)
 
-Für jeden Planer, gleich welches Modell. Die Regeln stehen in [`AGENTS.md`](../AGENTS.md)
-(Worker-Aufgaben → Planer); hier steht, wie man zu einem Issue kommt, das ein anderes Modell ohne
-Rückfragen umsetzen kann. Diese Datei ist aus `ENTWICKLUNG.md` in `tripitest-art/sc-digger`
-übernommen und auf dieses Repository angepasst — Beispiele und Test-Helfer stammen von hier.
+For every planner agent, regardless of model family. The operating agreement is specified in [`AGENTS.md`](../AGENTS.md)
+(Worker Tasks → Planner); this guide explains how to craft an issue that an implementation model can execute without ambiguities.
+This document is tailored for this repository—all examples and test helpers originate directly here.
 
-Der Planer schreibt Issues, keinen Code: keine Branches, keine Commits, keine PRs, kein Merge.
+The Planner writes issues, never code: no branches, no commits, no PRs, no merges.
 
-## Planer-Ablauf
+## Planer-Ablauf (Planner Workflow)
 
-0. **Backlog:** Ideen ohne Akzeptanztest stehen als Issue ohne `bereit` (`ROADMAP.md`). Der Planer
-   macht daraus erst dann ein `worker-task`, wenn die offenen Fragen beantwortet sind.
-1. **Auftrag klären.** Aus dem Gespräch mit Stephan oder aus `ROADMAP.md`. Ein Thema pro Issue;
-   ist es größer als ein PR, in Teile schneiden („Teil 1 von #58"). Offene Fachfragen
-   (Schwellwerte, Verhalten im Fehlerfall) Stephan stellen, nicht raten.
-2. **Stand prüfen.** Offene Issues und PRs nach Dubletten und nach denselben Dateien durchsuchen
-   (Regel 8). Überschneidung → `blockiert` und eine Zeile `Wartet auf: #X` (siehe `AGENTS.md`).
-   Bestehende Akzeptanztests suchen, die die geänderten Funktionen prüfen
-   (`git grep <funktion> tests/acceptance`). Worker dürfen sie nicht ändern; die Aufgabe muss so
-   geschnitten sein, dass sie grün bleiben.
-   **Achtung:** Enthält der Issue-Text in einer Zeile die Wendung `Wartet auf:` und danach eine
-   Zahl (auch als Beispiel im Akzeptanztest), liest der Review-Takt das als echte Abhängigkeit —
-   das Issue wird dann nie automatisch freigegeben. Beispielnummern deshalb zusammensetzen oder
-   außerhalb einer solchen Zeile nennen (siehe #46).
-3. **Code lesen.** Jede Datei, die das Issue nennt, auf dem Stand von `main`. Bestehende Helfer
-   und Fakes wiederverwenden, statt dem Worker neue vorzuschreiben — hier sind das `FakeGH` in
-   [`tests/test_worker_tick.py`](../tests/test_worker_tick.py) und das `_load()`-Muster, mit dem
-   [`tests/test_acceptance_guard.py`](../tests/test_acceptance_guard.py) die Takt-Skripte per Pfad
-   lädt. Für die Projektliste gibt es `tests/test_projects.py`.
-4. **Issue-Text schreiben** in der Form, die das Formular erzeugt: Überschriften `### Ziel`,
-   `### Betroffene Dateien`, `### Schnittstellen`, `### Nicht Teil dieser Aufgabe`,
-   `### Akzeptanztests`, `### Fertig, wenn`, `### Berührt …` (Hotspot-Abschnitt des Formulars),
-   `### Merge-Modus`, `### Kontext`, in dieser Reihenfolge. Dropdowns als Klartext mit dem
-   genauen Optionstext.
-   - **Betroffene Dateien:** vollständig, mit Funktion und Stelle. Was fehlt, darf der Worker
-     nicht anfassen. Immer dabei: `tests/acceptance/test_issue_<N>.py` und die eigene Testdatei.
-     Bestehende Tests, deren Erwartung sich ändert, mit Datei und Stelle nennen; sonst darf der
-     Worker sie nicht anpassen.
-   - **Schnittstellen:** exakte Signaturen mit Typen, Rückgabe, Verhalten bei leer/`None`/Fehler,
-     Log-Meldungen im Wortlaut, wenn Tests sie prüfen. In einem ```` ```python ````-Block.
-   - **Nicht Teil dieser Aufgabe:** das naheliegende „gleich mit aufräumen" ausschließen.
-   - **Hotspot-Abschnitt:** in diesem Repository immer
-     `nein (Infra-Repo, kein Hotspot)` — die Überschrift stammt aus dem Formular der
-     Projektvorlage und nennt dort die Hauptdatei des anderen Projekts.
-   - **Merge-Modus:** `automatisch` ist der Standard: Nach „Freigegeben“ von GLM mergt der Review-Takt
-     selbst. Stephan prüft nur, wenn GLM Fehler meldet. `manuell durch Stephan (Betrieb, Server,
-     Zugangsdaten)` nur für ein Issue, das eine Aufsichtsdatei berührt (`manual_paths` der Projektliste:
-     `AGENTS.md`, `.github/*`, `tests/acceptance/*`, `skills/*`, `docs/main-schutz.ruleset.json`) oder wenn
-     Stephan es für dieses Issue verlangt. Der Review-Takt prüft die Dateiliste zusätzlich selbst, auch wenn
-     im Issue „automatisch“ steht; deployt wird nie automatisch (Regel 4).
-5. **Akzeptanztests** in **genau einem** ```` ```python ````-Block direkt unter
-   `### Akzeptanztests` (so liest ihn `acceptance-guard`). Sie
-   - prüfen nur die Schnittstellen aus dem Issue, keine Interna;
-   - laufen ohne Netzwerk, ohne `gh` und ohne Server (die Takt-Skripte lädt man wie in
-     `tests/test_worker_tick.py` per Pfad), ohne Uhrzeit und Zufall, ohne `skip`/`xfail`;
-   - importieren nur die Standardbibliothek und die Takt-Module dieses Repos;
-   - schreiben nur in `tmp_path`. **Nicht** nach `/root` — dort ist der Pfad auf dem
-     Entwicklungsrechner nicht schreibbar und in der CI nicht erlaubt (Fehler aus #39).
-6. **Akzeptanztests prüfen (mit Shell).** Entwurf als Datei speichern (z. B. `entwuerfe/issue-<thema>.md`)
-   und mit `python scripts/issuecheck.py <datei>` prüfen. Das Skript prüft die Pflichtüberschriften,
-   den Merge-Modus, AST-Regeln (kein Netzwerk, keine Zeit-/Zufallsaufrufe, kein `skip`/`xfail`, keine
-   harten `/root`-Pfade, keine versehentlichen `Wartet auf:`-Zeilen) und lässt den Akzeptanztest
-   isoliert mit pytest gegen das Repository laufen. Er muss vor der Umsetzung zwingend **rot** sein
-   (aus dem gemeinten Grund). Der Skill `skills/agent-sandbox-planner/SKILL.md` führt durch diesen Ablauf.
-   Ergebnis mit dem Commit-Hash von `main` in den Kontext („ohne Umsetzung rot (ImportError: ...), mit Umsetzung grün").
-   **Ohne Shell** geht das nicht: Label `entwurf` statt `bereit`, im Kontext „Akzeptanztests noch
-   nicht ausgeführt (Planer ohne Shell)". Stephan oder ein Agent mit Shell prüft sie mit `scripts/issuecheck.py`
-   und ersetzt `entwurf` durch `bereit`.
-7. **Entwurf zeigen.** Titel, Text und Labels Stephan im Chat vorlegen; erst nach seinem OK
-   anlegen (außer er hat ausdrücklich „direkt anlegen" gesagt).
-8. **Anlegen** mit Labels `worker-task`, `phase-N`, `bereit` (ohne Shell `entwurf`), genau einem
-   `agent-<familie>` (Abschnitt „Agenten-Labels"), bei Bedarf zusätzlich `blockiert`. Danach
-   Nummer und Link melden. Im Issue-Text `test_issue_<N>` stehen lassen; die Nummer kennt der
-   Worker.
+0. **Backlog:** Ideas without acceptance tests reside as issues without the label `bereit` (`ROADMAP.md`).
+   The planner only converts them into a `worker-task` once open domain questions are answered.
+1. **Clarify task:** From discussion with Stephan or from `ROADMAP.md`. Exactly one topic per issue;
+   if larger than a single PR, split into manageable slices („Part 1 of #58“). Clarify open domain
+   questions (thresholds, error-handling behavior) with Stephan; never guess.
+2. **Check status:** Search open issues and PRs for duplicates and file overlaps (Rule 8).
+   Overlaps → label `blockiert` and a line `Wartet auf: #X` (see `AGENTS.md`).
+   Inspect existing acceptance tests that cover modified functions (`git grep <function> tests/acceptance`).
+   Workers must not alter existing acceptance tests; the task must be designed so existing tests remain green.
+   **Caution:** If any line in the issue body contains `Wartet auf:` followed by a number (even inside an
+   example or acceptance test block), the review loop treats it as an active blocking dependency (#46)—preventing
+   automatic merge.
+3. **Inspect code:** Read every file mentioned in the issue on latest `main`. Reuse existing helpers and fakes
+   rather than prescribing new ones—such as `FakeGH` in [`tests/test_worker_tick.py`](../tests/test_worker_tick.py)
+   and the `_load()` pattern in [`tests/test_acceptance_guard.py`](../tests/test_acceptance_guard.py) to load loop scripts
+   by file path. For the project registry, reference `tests/test_projects.py`.
+4. **Draft issue text** using the exact sections produced by the issue template:
+   `### Ziel`, `### Betroffene Dateien`, `### Schnittstellen`, `### Nicht Teil dieser Aufgabe`,
+   `### Akzeptanztests`, `### Fertig, wenn`, `### Merge-Modus`, and `### Kontext`, in that exact order.
+   - **Betroffene Dateien (Affected Files):** Exhaustive list, including function and location. Anything omitted
+     must not be touched by the worker. Always include `tests/acceptance/test_issue_<N>.py` and a dedicated test file.
+     Existing tests whose assertions intentionally change must be explicitly cited with file and line.
+   - **Schnittstellen (Interfaces):** Exact signatures with types, return values, behavior on empty/`None`/error cases,
+     and verbatim log messages if tests assert them. Written in exactly one ```` ```python ```` block.
+   - **Nicht Teil dieser Aufgabe (Out of Scope):** Explicitly rule out adjacent "drive-by" refactoring.
+   - **Merge-Modus (Merge Mode):** `automatisch nach Review` is the default: once approved by GLM, the review loop
+     merges automatically. Stephan only reviews if GLM flags defects. `manuell durch Stephan (Betrieb, Server, Zugangsdaten)`
+     is required whenever a governance file is modified (`manual_paths` in project registry: `AGENTS.md`, `.github/*`,
+     `tests/acceptance/*`, `skills/*`, `docs/main-schutz.ruleset.json`) or Stephan requests manual review.
+5. **Akzeptanztests (Acceptance Tests)** in **exactly one** ```` ```python ```` block directly under
+   `### Akzeptanztests` (this is how `acceptance-guard` parses it). Tests must:
+   - verify strictly the public interface from the issue, not internal implementation details;
+   - run offline without network, `gh`, or server dependencies (scripts loaded by file path as in `tests/test_worker_tick.py`),
+     without real clock or randomness, and without `skip`/`xfail`;
+   - import only standard library modules and this repository's scripts;
+   - write only into `tmp_path`. **Never** write to `/root` (non-writable on developer machines and disallowed in CI, #39).
+6. **Verify acceptance tests (with shell):** Save draft locally (e.g. `entwuerfe/issue-<topic>.md`) and run
+   `python scripts/issuecheck.py <file>`. The script validates required headings, merge mode, AST constraints (no network,
+   no time/randomness calls, no `skip`/`xfail`, no hardcoded `/root` paths, no accidental `Wartet auf:` lines), and executes
+   the acceptance test in isolation with pytest. The test MUST be **red** (failing) prior to implementation.
+   The skill `skills/agent-sandbox-planner/SKILL.md` guides this workflow. Record the pre-flight result under context.
+   **Without shell access:** Apply label `entwurf` instead of `bereit` and state in context:
+   „Akzeptanztests noch nicht ausgeführt (Planer ohne Shell)“. Stephan or an agent with shell runs `issuecheck.py` and
+   updates `entwurf` → `bereit`.
+7. **Present draft:** Present title, body, and labels to Stephan in chat; only create the issue after his approval.
+8. **Create issue** with labels `worker-task`, `phase-N`, `bereit` (or `entwurf` without shell), exactly one
+   `agent-<family>` (see „Agenten-Labels“), and `blockiert` if dependent on other issues. Report issue number and link.
+   Keep `test_issue_<N>` in the text; the worker replaces `<N>` with the actual issue number.
 
-Nachträglich ändern darf der Planer ein Issue nur, solange es nicht `in-arbeit` ist. Danach nur
-noch kommentieren. Muss ein Akzeptanztest korrigiert werden: Issue korrigieren; der PR braucht
-dann `freigabe-geschützt` (`AGENTS.md`, Worker 5).
+Planners may only modify an issue as long as it does not carry label `in-arbeit`. Once in progress, communicate via comments.
+If an acceptance test must be corrected: update the issue; the subsequent PR will require `freigabe-geschützt` (`AGENTS.md`, Worker 5).
 
-## Agenten-Labels
+## Agenten-Labels (Agent Labels)
 
-Der Planer gibt jedem Worker-Issue genau ein Label, welche Modellfamilie es umsetzt. Worker nehmen
-nur Issues mit ihrem Label (`AGENTS.md`, Autonome Auswahl). Der Reviewer stammt aus einer anderen
-Familie (Regel 6).
+The planner assigns exactly one model family label to each worker issue. Workers pick up only issues carrying their label (`AGENTS.md`, Autonomous Selection). The Reviewer always belongs to a different family (Rule 6).
 
-| Label | Worker | Passende Issues |
+| Label | Worker | Matching Issues |
 |---|---|---|
-| `agent-qwen` | Sandbox-Worker (OpenCode/Qwen Code; Modell aktuell DeepSeek über LiteLLM, früher Qwen lokal) | Issues mit genauer Schnittstelle und Akzeptanztests, auch an den Engpassdateien aus Regel 8 |
-| `agent-antigravity` | Antigravity / Gemini | mittel: mehrere Dateien, Muster, Eskalationsstufe für Qwen |
-| `agent-claude` | Claude Code Opus + Mensch | schwer: Betrieb, Server, finale Eskalationsstufe |
+| `agent-qwen` | Sandbox Worker (OpenCode / Qwen Code; DeepSeek via LiteLLM) | Well-defined interface and acceptance tests, including bottleneck files from Rule 8 |
+| `agent-antigravity` | Antigravity / Gemini | Medium: multiple files, architectural patterns, first escalation level for Qwen |
+| `agent-claude` | Claude Code Opus + Human | Complex: operations, server configuration, final escalation tier |
 
-Im Zweifel die größere Stufe. Ein Issue, das an einem Agenten scheitert, wird explizit an die
-nächsthöhere Stufe eskaliert (`agent-qwen` → `agent-antigravity` → `agent-claude`); das ist keine
-Änderung am Vertrag und erlaubt, solange das Issue nicht mehr `in-arbeit` ist.
+When in doubt, choose the higher tier. An issue that fails three times under one agent family is escalated to the next tier (`agent-qwen` → `agent-antigravity` → `agent-claude`); this is permitted as long as the issue is no longer `in-arbeit`.
