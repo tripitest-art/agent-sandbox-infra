@@ -1,8 +1,5 @@
 import importlib.util
-import os
 from pathlib import Path
-
-import pytest
 
 _SANDBOX = Path(__file__).resolve().parents[1] / "sandbox"
 
@@ -37,15 +34,14 @@ def test_unlesbare_datei_ergibt_none(tmp_path, monkeypatch):
 
 
 def test_fehlende_rechte_ergeben_none(tmp_path, monkeypatch):
-    if os.geteuid() == 0:
-        pytest.skip("root ignoriert Dateirechte; der Fall ist dann nicht prüfbar")
+    # chmod 000 wirkt als root nicht; der PermissionError wird am Dateizugriff ausgelöst.
     conf = _konfiguration(tmp_path, monkeypatch, "AGENT=opencode\n")
-    pfad = tmp_path / "agent-sandbox.conf"
-    pfad.chmod(0o000)
-    try:
-        assert conf.lese_agent_konfiguration() == {"agent": None, "context_mode": None}
-    finally:
-        pfad.chmod(0o600)
+
+    def _kein_zugriff(pfad):
+        raise PermissionError(13, "Permission denied", pfad)
+
+    monkeypatch.setattr(conf, "_zeilen_lesen", _kein_zugriff)
+    assert conf.lese_agent_konfiguration() == {"agent": None, "context_mode": None}
 
 
 def test_fremde_schluessel_werden_ignoriert(tmp_path, monkeypatch):
