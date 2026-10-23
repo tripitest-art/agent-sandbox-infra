@@ -82,7 +82,10 @@ BACKEND = os.environ.get("BACKEND", "ollama")   # oder "litellm"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 LITELLM_MODEL = agent_settings.value("LITELLM_MODEL", os.environ.get("LITELLM_MODEL", "coder"))
 # Ausweichmodelle (Aliase im LiteLLM-Proxy, der Key »worker« muss sie dürfen), durch Komma getrennt.
-LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "coder-go,coder-or,coder-free").split(",") if m.strip()]
+LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "coder-go,coder,coder-or").split(",") if m.strip()]
+# #293: Diese Ausweichmodelle werden pay-as-you-go abgerechnet; der Anbietername steht im
+# Hinweis, damit ein Ausweichen im Log nicht wie ein kostenloser Go-Lauf aussieht.
+BEZAHLTE_MODELLE: dict[str, str] = {"coder": "DeepSeek-API", "coder-or": "OpenRouter"}
 PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT", "45"))   # Sekunden je Probe
 # #180: Erst nach 20 Minuten ist ein LiteLLM-Ausfall eine Meldung wert; ein Proxy-Neustart
 # oder ein kurzer Netzaussetzer bleibt still. Die Schlüssel liegen im Slot-Zustand, deshalb
@@ -2665,6 +2668,19 @@ def choose_model(primary: str | None = None) -> tuple[str | None, list[str]]:
     return None, failed
 
 
+def bezahltes_ausweichen(primary: str, model: str) -> str | None:
+    """Hinweiszeile, wenn `model` ein bezahltes Ausweichmodell ist, sonst None.
+
+    - model == primary => None (kein Ausweichen).
+    - model nicht in BEZAHLTE_MODELLE => None (z. B. coder-go, coder-pro-go).
+    - sonst genau: f"Ausweichmodell {model} ({BEZAHLTE_MODELLE[model]}) verbraucht Guthaben statt {primary}".
+    Reine Funktion, wirft nie.
+    """
+    if model == primary or model not in BEZAHLTE_MODELLE:
+        return None
+    return f"Ausweichmodell {model} ({BEZAHLTE_MODELLE[model]}) verbraucht Guthaben statt {primary}"
+
+
 def use_model(model: str) -> None:
     """Modell für diesen Lauf; die Worker-Zeile nennt bei einem Ausweichmodell dieses."""
     global ACTIVE_MODEL, WORKER
@@ -3703,6 +3719,9 @@ def main() -> int:
                 return 0
             if failed:
                 log(f"{'; '.join(failed)} – weiche auf {model} aus.")
+                hinweis = bezahltes_ausweichen(primary, model)
+                if hinweis:
+                    log(hinweis)
             if model != ACTIVE_MODEL:
                 use_model(model)
                 # Die Aufträge enthalten „Worker: …“; mit dem neuen Namen neu bauen.

@@ -11,6 +11,8 @@ Aufgabenteilung zwischen dem Proxy (LXC 113) und den Skripten im Worker (CT 112)
 ### Im Worker (`worker_tick.py` / CT 112)
 1. **Pre-Flight-Probe (`probe_model`, synchron, 45s, `stream=False`):**
    Schützt die Worker-Slots vor toten 30-Minuten-Runs bei leeren oder abbrechenden Streaming-Verbindungen.
+   Die Ausweichliste geht in Stephans Reihenfolge OpenCode Go (`coder-go`) → DeepSeek-API (`coder`)
+   → OpenRouter (`coder-or`); die Probe nimmt das erste Modell, das antwortet (#293).
 2. **Modellfamilien-Wahrheit (Regel 6):**
    `worker_tick.py` schreibt das genutzte Modell (`Worker: ...`) in den Pull Request.
    Der Reviewer (`review_tick.py`) prüft gegen `FAMILIES`, dass Worker und Reviewer nie derselben

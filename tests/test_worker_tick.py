@@ -1515,9 +1515,9 @@ def test_worker_names():
 
 
 def test_default_fallbacks_prefer_same_model_family():
-    # Fällt DeepSeek direkt aus, zuerst dasselbe Modell über OpenRouter, dann Codestral.
+    # Stephans Reihenfolge (#293): erst OpenCode Go, dann die DeepSeek-API, zuletzt OpenRouter.
     if "LITELLM_FALLBACKS" not in w.os.environ:
-        assert w.LITELLM_FALLBACKS == ["coder-go", "coder-or", "coder-free"]
+        assert w.LITELLM_FALLBACKS == ["coder-go", "coder", "coder-or"]
     assert w.worker_name("coder-go") == "DeepSeek (LiteLLM coder-go, OpenCode Go)"
     assert w.worker_name("coder-or") == "DeepSeek (LiteLLM coder-or, OpenRouter)"
 
