@@ -29,3 +29,16 @@ with open(_projekte, "w", encoding="utf-8") as _fh:
     json.dump({"projects": [{"name": "sc-digger", "repo": "tripitest-art/sc-digger",
                              "workdir": "/kein/klon/sc-digger"}]}, _fh)
 os.environ["AGENT_PROJECTS"] = _projekte
+
+# Slot-Status, Audit-Log, Zustandsdateien und Review-Entwürfe haben Vorgaben unter `/run` und `/root`. Auf dem
+# Server führen Auto-Deploy und Pre-Flight `pytest` als root aus; jeder Test, der `main()`, `slot_status()` oder
+# `audit()` ohne eigenes `monkeypatch` aufruft, schrieb dort in die echten Dateien (23.10.2026: Slot 1 stand auf
+# „idle“, während `w1` arbeitete, und `/root/audit.jsonl` enthielt 172 Fake-Läufe von „Issue 7“). Darum ein
+# eigenes Verzeichnis je Testlauf, bevor die Skripte ihre Pfade beim Import lesen.
+_lauf = tempfile.mkdtemp(prefix="sandbox-run-")
+os.environ["SLOT_DIR"] = os.path.join(_lauf, "slots")
+os.makedirs(os.environ["SLOT_DIR"])
+os.environ["AUDIT_LOG"] = os.path.join(_lauf, "audit.jsonl")
+os.environ["STATE"] = os.path.join(_lauf, "worker-state.json")
+os.environ["REVIEW_STATE"] = os.path.join(_lauf, "review-state.json")
+os.environ["REVIEW_DRAFTS"] = os.path.join(_lauf, "reviews")
