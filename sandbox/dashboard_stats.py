@@ -14,6 +14,8 @@ Gezählt in zwei Fenstern, 24 Stunden und 7 Tage (Ortszeit des Servers):
 - `worker_fehler`: Worker-Takt Alarm (aus `stephan_alarm` mit skey beginnend mit "issue"/"pr"/"text")
 - `quote`: Anteil `freigegeben` an allen Reviews in Prozent, sonst None
 - `modelle`: dieselben Zahlen für Reviews je Reviewer-Alias (7 Tage, aus `review_posted`)
+- `token_summary()` / `build_token_stats()`: Token-Kennzahlen der Agentenläufe aus
+  `agent_run_finished` (Summen, Cache-Quote, Eingabe je Lauf, je Modell; #322)
 
 Nur Standardbibliothek. Das Modul liest nur; es schreibt nichts.
 """
@@ -245,6 +247,117 @@ def build_stats(audit_log: str = "/root/audit.jsonl", worker_log: str = "/root/w
     if upto:
         stats.preload_log(worker_log, upto)
     return stats.snapshot(now)
+
+
+
+# --- Token-Kennzahlen der Agentenläufe (#322) -----------------------------------------------------
+
+_TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens")
+
+
+def _token_wert(wert) -> int | None:
+    """Token-Zahl als int; None für alles Unbrauchbare (bool ist keine Token-Zahl)."""
+    if isinstance(wert, bool) or not isinstance(wert, int) or wert < 0:
+        return None
+    return wert
+
+
+def _token_werte(tokens) -> dict | None:
+    """Die drei Token-Zahlen eines Laufs als dict; None, wenn keine davon brauchbar ist."""
+    if not isinstance(tokens, dict):
+        return None
+    roh = [_token_wert(tokens.get(key)) for key in _TOKEN_KEYS]
+    if all(wert is None for wert in roh):
+        return None
+    return {key: wert or 0 for key, wert in zip(_TOKEN_KEYS, roh)}
+
+
+def _token_zaehlung(laeufe: list[tuple[str, dict | None]]) -> dict:
+    """Summen, Cache-Quote und Eingabe je Lauf über die übergebenen Läufe."""
+    ein = aus = cache = mit_token = 0
+    for _, tokens in laeufe:
+        if tokens is None:
+            continue
+        mit_token += 1
+        ein += tokens["input_tokens"]
+        aus += tokens["output_tokens"]
+        cache += tokens["cache_read_input_tokens"]
+    return {
+        "laeufe": len(laeufe),
+        "mit_token": mit_token,
+        "ein": ein,
+        "aus": aus,
+        "cache": cache,
+        "cache_quote": round(cache / ein * 100) if ein > 0 else None,
+        "ein_je_lauf": round(ein / mit_token) if mit_token > 0 else None,
+    }
+
+
+def token_summary(events, now: datetime, window: timedelta = WINDOWS["7d"]) -> dict:
+    """Token-Kennzahlen der Agentenläufe im Fenster [now - window, now] (Grenzen eingeschlossen).
+
+    Gezählt wird nur `agent_run_finished` mit lesbarem `ts` (lokale naive Zeit wie `now`).
+    Ein Lauf hat brauchbare Token, wenn `tokens` ein dict mit mindestens einem int >= 0
+    (kein bool) unter den drei Token-Schlüsseln ist; unbrauchbare Einzelwerte zählen als 0,
+    Läufe ohne brauchbaren Wert nur unter `laeufe`. Wirft nie.
+    """
+    start = now - window
+    laeufe: list[tuple[str, dict | None]] = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("event") != AUDIT_AGENT_RUN_FINISHED:
+            continue
+        ts = _parse_iso(event.get("ts"))
+        if ts is None:
+            continue
+        try:
+            ts_local = ts.astimezone().replace(tzinfo=None)
+            if not start <= ts_local <= now:
+                continue
+            modell = event.get("model")
+            if not isinstance(modell, str) or not modell:
+                modell = "unbekannt"
+            laeufe.append((modell, _token_werte(event.get("tokens"))))
+        except (OverflowError, OSError, ValueError):
+            continue
+    out = _token_zaehlung(laeufe)
+    by_model: dict[str, list[tuple[str, dict | None]]] = {}
+    for modell, tokens in laeufe:
+        by_model.setdefault(modell, []).append((modell, tokens))
+    out["modelle"] = {name: _token_zaehlung(evs) for name, evs in sorted(by_model.items())}
+    return out
+
+
+def _read_audit_events(path: str, max_bytes: int = PRELOAD_BYTES) -> list[dict]:
+    """Die letzten `max_bytes` des Audit-Logs als JSON-Objekte; Müll und Fehlendes fallen weg."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            start = max(0, size - max_bytes)
+            fh.seek(start)
+            text = fh.read(size - start).decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    events: list[dict] = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def build_token_stats(audit_log: str = "/root/audit.jsonl", now: datetime | None = None) -> dict:
+    """{"24h": …, "7d": …} Token-Kennzahlen aus dem Audit-Log; wirft nie."""
+    if now is None:
+        now = datetime.now()
+    events = _read_audit_events(audit_log)
+    return {name: token_summary(events, now, span) for name, span in WINDOWS.items()}
 
 
 # Modulare Rückwärtskompatibilität
