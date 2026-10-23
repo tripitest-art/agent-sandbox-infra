@@ -1319,6 +1319,34 @@ def test_run_agent_leitet_auch_opencode_durch_log_stream_line(monkeypatch, tmp_p
     assert '{"type"' not in out
 
 
+def test_run_agent_belegt_last_agent_usage_fuer_opencode(monkeypatch, tmp_path, capsys):
+    """#316: der OpenCode-Lauf liefert Token-Usage und Cost wie ein Qwen-Lauf."""
+    class Proc:
+        returncode = 0
+        stdout = [json.dumps({"type": "step_finish",
+                              "part": {"reason": "stop",
+                                       "tokens": {"input": 1200, "output": 340,
+                                                  "cache": {"read": 9800}},
+                                       "cost": 0.0103}}) + "\n"]
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(w, "AGENT", "opencode")
+    monkeypatch.setattr(w.subprocess, "Popen", lambda cmd, **kw: Proc())
+    monkeypatch.setattr(w, "agent_identitaet", lambda: (None, None))
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    monkeypatch.setattr(w, "RUN_TIMEOUT", 60)
+    monkeypatch.setattr(w, "LAST_AGENT_USAGE", {"input_tokens": 1, "cost": 9.0})
+    assert w.run_agent("Auftrag") == 0
+    # run_agent() resettet vorher; das step_finish-Event setzt den Wert neu.
+    assert w.LAST_AGENT_USAGE == {"input_tokens": 1200, "output_tokens": 340,
+                                  "cache_read_input_tokens": 9800, "cost": 0.0103}
+    assert "[OpenCode: stop, Token: 1200 ein/340 aus/9800 Cache, Kosten: $0.0103]" \
+        in capsys.readouterr().out
+
+
 # --- Probe vor dem Lauf: hängt DeepSeek, nimmt der Worker das Ausweichmodell ---
 
 class _Resp:
