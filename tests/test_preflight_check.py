@@ -247,3 +247,43 @@ def test_unbekannter_sha_blockiert_nicht(monkeypatch, tmp_path, sha):
     assert w.check_main_health(str(tmp_path / "repo")) is True
     assert not any("worktree" in c and "add" in c for c in fake.cmds())
     assert not claims.exists(), "ohne SHA darf keine Cache-Marke entstehen"
+
+
+SERVER_ENV = {"LITELLM_MODEL": "coder-go", "LITELLM_FALLBACKS": "coder-go,coder-or", "BACKEND": "litellm",
+              "WORKER_SLOT": "1", "LITELLM_API_KEY": "nur-im-test", "AGENT_PROJECTS": "/etc/agent-projects.json"}
+
+
+def _pytest_aufruf(fake):
+    aufrufe = [(cmd, kw) for cmd, kw in fake.calls if "pytest" in cmd and "worktree" not in cmd]
+    assert len(aufrufe) == 1, "der Testlauf muss genau einmal starten"
+    return aufrufe[0][1]
+
+
+def test_main_health_env_enthaelt_nur_pfad_home_und_leere_projektpfade(monkeypatch):
+    """#221 Nachtrag: Servereinstellungen im Prozess (LITELLM_MODEL=coder-go) dürfen den Testlauf nicht erreichen."""
+    for name, wert in SERVER_ENV.items():
+        monkeypatch.setenv(name, wert)
+    monkeypatch.setenv("HOME", "/home/test")
+    env = w.main_health_env()
+    assert set(env) == {"PATH", "HOME", "AGENT_PROJECTS", "AGENT_SETTINGS"}
+    assert env["PATH"] == w.ENV["PATH"] and env["HOME"] == "/home/test"
+    assert env["AGENT_PROJECTS"] == "/nonexistent/agent-projects.json"
+    assert env["AGENT_SETTINGS"] == "/nonexistent/agent-settings.json"
+
+
+def test_main_health_env_ohne_home_wirft_nicht(monkeypatch):
+    monkeypatch.delenv("HOME", raising=False)
+    assert set(w.main_health_env()) == {"PATH", "AGENT_PROJECTS", "AGENT_SETTINGS"}
+
+
+def test_testlauf_bekommt_die_saubere_umgebung_git_aufrufe_nicht(monkeypatch, tmp_path):
+    for name, wert in SERVER_ENV.items():
+        monkeypatch.setenv(name, wert)
+    fake = FakeRun()
+    _mount(monkeypatch, tmp_path, fake)
+    assert w.check_main_health(str(tmp_path / "repo")) is True
+    env = _pytest_aufruf(fake)["env"]
+    assert env == w.main_health_env()
+    assert "LITELLM_MODEL" not in env and "LITELLM_API_KEY" not in env
+    git_aufrufe = [kw for cmd, kw in fake.calls if "pytest" not in cmd]
+    assert git_aufrufe and all(kw.get("env") == w.ENV for kw in git_aufrufe), "git braucht die gewohnte Umgebung"
