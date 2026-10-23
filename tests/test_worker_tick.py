@@ -1448,6 +1448,68 @@ def test_main_litellm_without_work_does_not_probe(monkeypatch, tmp_path):
     assert w.main() == 0
 
 
+# --- Modellprobe aus der Zustandsdatei cachen (#266) ---
+
+def _cache_state(tmp_path, primary, ok_at):
+    (tmp_path / "state.json").write_text(json.dumps(
+        {w.PROBE_CACHE_KEY: {"modell": primary, "ok_at": ok_at}}))
+
+
+def test_main_litellm_probe_cache_hit_ueberspringt_die_probe(monkeypatch, tmp_path, capsys):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "PROBE_CACHE_S", 600.0)
+    primary = w.model_for_attempt(0)
+    _cache_state(tmp_path, primary, w.jetzt_s())
+    monkeypatch.setattr(w, "probe_model", lambda m: pytest.fail("Probe trotz frischem Cache-Treffer"))
+    monkeypatch.setattr(w, "choose_model", lambda *a: pytest.fail("choose_model trotz Cache-Treffer"))
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+    runs = []
+    monkeypatch.setattr(w, "run_agent", lambda prompt: runs.append(prompt) or 0)
+    assert w.main() == 0
+    assert len(runs) == 1                    # der Auftrag läuft trotz übersprungener Probe
+    assert capsys.readouterr().out.count("issue102 Modellprobe übersprungen (Cache-Treffer).") == 1
+
+
+def test_main_litellm_probe_cache_speichert_nur_die_primaerprobe(monkeypatch, tmp_path):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "PROBE_CACHE_S", 600.0)
+    primary = w.model_for_attempt(0)
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
+    assert w.main() == 0
+    eintrag = json.loads((tmp_path / "state.json").read_text())[w.PROBE_CACHE_KEY]
+    assert eintrag["modell"] == primary and isinstance(eintrag["ok_at"], (int, float))
+
+
+def test_main_litellm_probe_cache_verwirft_abgelaufenen_eintrag(monkeypatch, tmp_path):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "PROBE_CACHE_S", 600.0)
+    primary = w.model_for_attempt(0)
+    _cache_state(tmp_path, primary, w.jetzt_s() - 601.0)
+    asked = []
+    monkeypatch.setattr(w, "probe_model", lambda m: asked.append(m) or None)
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
+    assert w.main() == 0
+    assert asked == [primary]                # abgelaufen: es wird wieder geprobt
+
+
+def test_main_litellm_probe_cache_speichert_kein_ausweichmodell(monkeypatch, tmp_path):
+    _litellm(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "PROBE_CACHE_S", 600.0)
+    primary = w.model_for_attempt(0)
+    monkeypatch.setattr(w, "LITELLM_FALLBACKS", ["coder-free"])
+    monkeypatch.setattr(w, "probe_model", lambda m: "TimeoutError" if m == primary else None)
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()], prs=[]))
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
+    assert w.main() == 0
+    assert w.PROBE_CACHE_KEY not in json.loads((tmp_path / "state.json").read_text())
+
+
 # --- Tagesbudget vor dem Lauf prüfen (#90) ---
 
 def test_key_info_liefert_den_verbrauch_des_eigenen_keys(monkeypatch):
