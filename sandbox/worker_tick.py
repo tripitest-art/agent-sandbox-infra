@@ -2449,13 +2449,21 @@ def sandbox_health_check(workdir: str | Path, user: str | None = None) -> bool:
                               os.path.basename(os.path.normpath(pfad))))
     geprueft = 0
     for wurzel in (pfad, admin):
-        if not wurzel.is_dir():
+        try:
+            if not wurzel.is_dir():
+                continue
+        except OSError:
+            # Nicht prüfbar (z. B. `/root` im CI-Läufer): überspringen, statt den Check mit
+            # einer Ausnahme abzubrechen. Der Arbeitsordner selbst ist oben schon geprüft.
             continue
         for ordner, unterordner, dateien in os.walk(wurzel, followlinks=False):
             unterordner[:] = sorted(u for u in unterordner if u != ".git")
             for name in sorted(dateien):
                 datei = Path(ordner) / name
-                if not datei.is_file():
+                try:
+                    if not datei.is_file():
+                        continue
+                except OSError:
                     continue
                 if not _datei_schreibbar(datei, uid, gids):
                     log(f"⚠ Stephan: Sandbox-Check: {datei} ist für Nutzer {user} nicht schreibbar.")

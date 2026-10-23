@@ -171,5 +171,26 @@ def test_stichprobe_bleibt_bei_hoechstens_max_files(monkeypatch, tmp_path):
     assert w.sandbox_health_check(baum, "worker") is True
 
 
+def test_stichprobe_ueberspringt_nicht_statbares_admin_verzeichnis(monkeypatch, tmp_path):
+    # Im CI-Läufer ist `/root` für den Laufnutzer nicht durchquerbar; `is_dir()` auf
+    # `<klon>/.git/worktrees/<slot>` wirft dann PermissionError. Die Stichprobe darf dort
+    # auslassen, statt den ganzen Check mit einer Ausnahme zu beenden.
+    baum = tmp_path / "ok"
+    baum.mkdir()
+    os.chmod(baum, 0o777)
+    nicht_statbar = Path(w.BASE_WORKDIR) / ".git" / "worktrees" / "ok"
+    echtes_is_dir = Path.is_dir
+
+    def is_dir(self):
+        if self == nicht_statbar:
+            raise PermissionError(13, "Permission denied", str(self))
+        return echtes_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    _durchquerbar(tmp_path)
+    _zielnutzer(monkeypatch)
+    assert w.sandbox_health_check(baum, "worker") is True
+
+
 def test_max_files_ist_die_obergrenze_der_stichprobe():
     assert w.HEALTH_CHECK_MAX_FILES == 20
