@@ -1,0 +1,1 @@
+- `scripts/ws.py`: Neuer Aufruf `ws.py plan <werkzeug> <repo>` hält einen festen Planungs-Worktree `<repo>-planung` auf dem aktuellen `origin/main` bereit (ohne Branch, damit nichts versehentlich gepusht wird). Lokale Änderungen, ein Branch oder ein fremder Ordner gleichen Namens werden nicht angefasst, sondern gemeldet. Der Aufruf mit `<kurz>` bleibt unverändert (#300).

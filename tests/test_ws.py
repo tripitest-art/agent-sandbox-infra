@@ -163,3 +163,148 @@ def test_main_lehnt_unbekanntes_werkzeug_per_argparse_ab(capsys):
         ws.main(["cursor", "demo", "aufgabe-1"], env={})
 
     assert exc.value.code == 2
+
+
+# --- ws plan: fester Planungs-Worktree auf origin/main -------------------------------------------
+
+
+def _ist_detached(ziel: Path) -> bool:
+    return subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=ziel, capture_output=True).returncode != 0
+
+
+def test_plan_legt_worktree_ohne_branch_auf_origin_main_an(lage):
+    ziel, zustand = ws.plan("opencode", "demo", lage["projects"], lage["work"])
+
+    assert ziel == lage["work"] / "opencode" / "demo-planung"
+    assert zustand == "angelegt"
+    assert (ziel / "README.txt").read_text(encoding="utf-8") == "erster Stand\n"
+    assert _ist_detached(ziel)
+    assert git("rev-parse", "HEAD", cwd=ziel) == git("rev-parse", "main", cwd=lage["origin"])
+    # Es entsteht kein Branch, den man versehentlich pushen könnte.
+    assert git("branch", "--list", "feature/*", cwd=lage["projects"] / "demo") == ""
+
+
+def test_plan_zieht_den_bestehenden_worktree_auf_den_neuen_origin_stand(lage):
+    ziel, _ = ws.plan("claude", "demo", lage["projects"], lage["work"])
+    commit_file(lage["seed"], "neu.txt", "zweiter Stand\n")
+    git("push", "origin", "main", cwd=lage["seed"])
+
+    ziel2, zustand = ws.plan("claude", "demo", lage["projects"], lage["work"])
+
+    assert ziel2 == ziel and zustand == "aktualisiert"
+    assert (ziel / "neu.txt").read_text(encoding="utf-8") == "zweiter Stand\n"
+    assert git("rev-parse", "HEAD", cwd=ziel) == git("rev-parse", "main", cwd=lage["origin"])
+    assert _ist_detached(ziel)
+
+
+def test_plan_ohne_neuen_stand_bleibt_unveraendert_und_fehlerfrei(lage):
+    ziel, _ = ws.plan("claude", "demo", lage["projects"], lage["work"])
+    vorher = git("rev-parse", "HEAD", cwd=ziel)
+
+    _, zustand = ws.plan("claude", "demo", lage["projects"], lage["work"])
+
+    assert zustand == "aktualisiert"
+    assert git("rev-parse", "HEAD", cwd=ziel) == vorher
+
+
+def test_plan_ueberschreibt_keine_lokalen_aenderungen(lage):
+    ziel, _ = ws.plan("claude", "demo", lage["projects"], lage["work"])
+    (ziel / "README.txt").write_text("meine Notiz\n", encoding="utf-8")
+    commit_file(lage["seed"], "neu.txt", "zweiter Stand\n")
+    git("push", "origin", "main", cwd=lage["seed"])
+
+    with pytest.raises(ws.WsError, match="lokale Änderungen"):
+        ws.plan("claude", "demo", lage["projects"], lage["work"])
+
+    assert (ziel / "README.txt").read_text(encoding="utf-8") == "meine Notiz\n"
+    assert not (ziel / "neu.txt").exists()
+
+
+def test_plan_ueberschreibt_keine_neuen_ungetrackten_dateien(lage):
+    ziel, _ = ws.plan("claude", "demo", lage["projects"], lage["work"])
+    (ziel / "entwurf.md").write_text("Idee\n", encoding="utf-8")
+
+    with pytest.raises(ws.WsError, match="lokale Änderungen"):
+        ws.plan("claude", "demo", lage["projects"], lage["work"])
+
+    assert (ziel / "entwurf.md").exists()
+
+
+def test_plan_lehnt_einen_worktree_auf_einem_branch_ab(lage):
+    ziel, _ = ws.plan("claude", "demo", lage["projects"], lage["work"])
+    git("checkout", "-b", "feature/versehentlich", cwd=ziel)
+
+    with pytest.raises(ws.WsError, match="Branch"):
+        ws.plan("claude", "demo", lage["projects"], lage["work"])
+
+    assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=ziel) == "feature/versehentlich"
+
+
+def test_plan_fasst_einen_fremden_ordner_gleichen_namens_nicht_an(lage):
+    fremd = lage["work"] / "claude" / "demo-planung"
+    fremd.mkdir(parents=True)
+    (fremd / "wichtig.txt").write_text("nicht anfassen\n", encoding="utf-8")
+
+    with pytest.raises(ws.WsError, match="kein Worktree"):
+        ws.plan("claude", "demo", lage["projects"], lage["work"])
+
+    assert (fremd / "wichtig.txt").read_text(encoding="utf-8") == "nicht anfassen\n"
+
+
+def test_plan_meldet_fehlenden_klon_und_nicht_erreichbares_origin(lage):
+    with pytest.raises(ws.WsError, match="Kein Klon"):
+        ws.plan("claude", "gibtsnicht", lage["projects"], lage["work"])
+
+    lage["origin"].rename(lage["origin"].with_name("weg.git"))
+    with pytest.raises(ws.WsError, match="fetch"):
+        ws.plan("claude", "demo", lage["projects"], lage["work"])
+    assert not (lage["work"] / "claude" / "demo-planung").exists()
+
+
+def test_plan_lehnt_unbekanntes_werkzeug_und_repo_mit_pfadanteil_ab(lage):
+    with pytest.raises(ws.WsError, match="Unbekanntes Werkzeug"):
+        ws.plan("cursor", "demo", lage["projects"], lage["work"])
+    with pytest.raises(ws.WsError, match="Repo-Name"):
+        ws.plan("claude", "../demo", lage["projects"], lage["work"])
+
+
+def test_plan_jedes_werkzeug_hat_seinen_eigenen_planungs_worktree(lage):
+    a, _ = ws.plan("claude", "demo", lage["projects"], lage["work"])
+    b, _ = ws.plan("opencode", "demo", lage["projects"], lage["work"])
+
+    assert a != b and a.parent.name == "claude" and b.parent.name == "opencode"
+
+
+def test_main_plan_meldet_zustand_und_hinweis(lage, capsys):
+    env = {"WS_PROJECTS": str(lage["projects"]), "WS_WORK": str(lage["work"])}
+
+    code = ws.main(["plan", "opencode", "demo"], env=env)
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Planungs-Worktree angelegt" in out and "demo-planung" in out
+    assert "ws <werkzeug> <repo> <kurz>" in out
+    assert str(lage["work"] / "entwuerfe") in out
+
+
+def test_main_plan_gibt_fehler_mit_exitcode_1_aus(lage, capsys):
+    env = {"WS_PROJECTS": str(lage["projects"]), "WS_WORK": str(lage["work"])}
+
+    code = ws.main(["plan", "claude", "gibtsnicht"], env=env)
+
+    assert code == 1
+    assert capsys.readouterr().err.startswith("Fehler:")
+
+
+def test_main_plan_lehnt_unbekanntes_werkzeug_per_argparse_ab():
+    with pytest.raises(SystemExit) as exc:
+        ws.main(["plan", "cursor", "demo"], env={})
+
+    assert exc.value.code == 2
+
+
+def test_aufruf_ohne_plan_funktioniert_unveraendert(lage, capsys):
+    env = {"WS_PROJECTS": str(lage["projects"]), "WS_WORK": str(lage["work"])}
+
+    assert ws.main(["claude", "demo", "aufgabe-1"], env=env) == 0
+    assert "feature/aufgabe-1" in capsys.readouterr().out
