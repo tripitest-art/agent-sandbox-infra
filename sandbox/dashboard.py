@@ -215,6 +215,26 @@ def redact(text: str, env: dict | None = None) -> str:
     return text
 
 
+# Regel 8: `worker_tick` protokolliert übersprungene Kandidaten als
+# „Issue #<N> übersprungen: <Grund>“ und deren Übernahme als „… auf 'in-arbeit' gesetzt.“
+_UEBERSPRUNGEN_RE = re.compile(r"Issue #(\d+) übersprungen: (.*)$")
+_UEBERNOMMEN_RE = re.compile(r"Issue #(\d+) erfolgreich auf 'in-arbeit' gesetzt\.")
+
+
+def parse_uebersprungen(lines: list[str]) -> list[dict]:
+    """Warteschlange aus Logzeilen: letzter Skip-Grund je Issue, übernommene fallen raus."""
+    gruende: dict[int, str] = {}
+    for line in lines:
+        m = _UEBERSPRUNGEN_RE.search(line)
+        if m:
+            gruende[int(m.group(1))] = m.group(2).strip()
+            continue
+        m = _UEBERNOMMEN_RE.search(line)
+        if m:
+            gruende.pop(int(m.group(1)), None)
+    return [{"issue": num, "grund": gruende[num]} for num in sorted(gruende)]
+
+
 class LogBuffer:
     """Hält die letzten Log-Zeilen mit laufender Nummer; liest neue Zeilen nach."""
 
@@ -265,6 +285,11 @@ class LogBuffer:
         with self._lock:
             hits = [ln for _, ln in self.lines if STEPHAN_MARK in ln]
         return hits[-limit:]
+
+    def texts(self) -> list[str]:
+        """Die Texte der gepufferten Zeilen in Reihenfolge (ohne Nummern)."""
+        with self._lock:
+            return [ln for _, ln in self.lines]
 
 
 class StatusCache:
@@ -593,9 +618,11 @@ def _slot_sort(item: tuple[str, dict]) -> tuple[int, str]:
 
 
 def build_state(slots: dict[str, dict], status: dict | None, veraltet: bool,
-                stephan_lines: list[str], now: datetime, version: dict | None = None) -> dict:
+                stephan_lines: list[str], now: datetime, version: dict | None = None,
+                uebersprungen: list[dict] | None = None) -> dict:
     """Gesamtstand für `/api/state` und die SSE-Ereignisse (ohne Log-Zeilen)."""
     views = [slot_view(s, d, now) for s, d in sorted(slots.items(), key=_slot_sort)]
+    warteschlange = uebersprungen or []
     projekte = (status or {}).get("projekte", [])
     issues = sum(sum(p.get("issues", {}).values()) for p in projekte)
     prs = sum(p.get("prs", {}).get("offen", 0) for p in projekte)
@@ -610,7 +637,9 @@ def build_state(slots: dict[str, dict], status: dict | None, veraltet: bool,
         "zeit": now.isoformat(timespec="seconds"),
         "slots": views,
         "kopf": {"aktive_slots": sum(v["status"] == "running" for v in views),
-                 "offene_issues": issues, "offene_prs": prs},
+                 "offene_issues": issues, "offene_prs": prs,
+                 "wartend": len(warteschlange)},
+        "warteschlange": warteschlange,
         "projekte": projekte,
         "braucht_stephan": (status or {}).get("braucht_stephan", 0),
         "budgets": (status or {}).get("budgets", {}),
@@ -643,7 +672,8 @@ class Dashboard:
         status, veraltet = self.cache.get()
         slots = read_slots(self.slot_dir, self.is_pid_alive)
         version = read_version(self.infra_dir)
-        state = build_state(slots, status, veraltet, self.logbuf.stephan(), self.clock(), version)
+        state = build_state(slots, status, veraltet, self.logbuf.stephan(), self.clock(), version,
+                            parse_uebersprungen(self.logbuf.texts()))
         state["schreiben"] = self.writer.enabled   # zeigt den „Limit ändern“-Knopf
         state["wecken"] = self.waker.enabled       # zeigt den Knopf „Takt starten“
         state["einstellungen"] = {
@@ -714,6 +744,7 @@ background:var(--card);color:var(--fg);cursor:pointer}
 <div id="alerts"></div><div id="veraltet"></div>
 <div class="kopf" id="kopf"></div>
 <h2>Worker-Slots</h2><div class="grid" id="slots"></div>
+<h2 id="wartet-titel" style="display:none">Wartet</h2><div class="grid" id="wartet"></div>
 <h2>Braucht Stephan</h2><div id="stephan"></div>
 <h2>Projekte</h2><div class="table-wrap"><table id="projekte"></table></div>
 <h2>Reviews und Merges</h2><div class="table-wrap"><table id="statistik"></table></div>
@@ -781,12 +812,18 @@ function renderLog(){const l=$("log"),nur=$("nur").checked,
  l.textContent=logLines.filter(x=>!nur||x.includes("⚠ Stephan")).join("\n");
  if(stick)l.scrollTop=l.scrollHeight}
 $("nur").onchange=renderLog;
+function renderWartet(wq){const titel=$("wartet-titel"),box=$("wartet"),
+ sichtbar=wq.length?"":"none";
+ titel.style.display=box.style.display=sichtbar;
+ box.replaceChildren(...wq.map(x=>{const d=el("div","card");
+  d.append(el("b",null,"#"+x.issue),el("div","mut",x.grund));return d}))}
 function render(s){
  const al=$("alerts");al.replaceChildren(...s.alerts.map(a=>el("div","banner",a.text)));
  $("veraltet").replaceChildren(...(s.veraltet?[el("div","warn","GitHub-/Budgetdaten veraltet oder nicht erreichbar")]:[]));
  const ver=(s.version&&s.version.commit)?s.version.commit+(s.version.zeit?" ("+s.version.zeit.slice(0,16).replace("T"," ")+")":""):"–";
  $("kopf").replaceChildren(...[["Aktive Slots",s.kopf.aktive_slots],["Offene Issues",s.kopf.offene_issues],
-  ["Offene PRs",s.kopf.offene_prs],["Stand",(s.stand||"–").slice(11,19)],["Version",ver]].map(([k,v])=>{
+  ["Offene PRs",s.kopf.offene_prs],["Wartend",s.kopf.wartend],["Stand",(s.stand||"–").slice(11,19)],
+  ["Version",ver]].map(([k,v])=>{
   const d=el("div","kpi");d.append(el("span","mut",k),el("b",null,v));return d}));
  renderWake(s);
  $("slots").replaceChildren(...s.slots.map(v=>{const d=el("div","card");
@@ -795,6 +832,7 @@ function render(s){
   if(v.issue)rows.push("Issue #"+v.issue);if(v.pr)rows.push("PR #"+v.pr);
   if(v.laufzeit_s!=null)rows.push("Laufzeit "+fmt(v.laufzeit_s));
   rows.filter(Boolean).forEach(r=>d.append(el("div","mut",r)));return d}));
+ renderWartet(s.warteschlange||[]);
  const st=s.projekte.flatMap(p=>(p.prs?p.prs.wartet_auf_stephan:[]).map(x=>({...x,projekt:p.name})));
  $("stephan").replaceChildren(...(st.length?st.map(x=>{const d=el("div","card");
   const a=el("a",null,"#"+x.number+" "+x.title);a.href=x.url;a.rel="noopener";
