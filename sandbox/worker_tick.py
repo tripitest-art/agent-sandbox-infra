@@ -1851,8 +1851,8 @@ The issue is below; it is the contract. Run these steps sequentially and execute
    repeat step 5. A red test is not a reason to stop, it is the next work item. Continue only when
    everything is green.
 6. Save all changes in commits (`git add -A && git commit -m "<what and why>"`). Each commit
-   message describes what changed and why (it becomes the PR text), then stop. The tick creates
-   push and PR: Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an.
+   message describes what changed and why (it becomes the PR text), then stop.
+   Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an.
    {PUSH_RULE}
 If you think an acceptance test is wrong: stop and write the reason to the issue with
 `gh issue comment {n} --body-file .git/frage.md`. Never make the test fit.

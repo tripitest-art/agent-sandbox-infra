@@ -221,6 +221,9 @@ def test_issue_job(monkeypatch):
                  "Never modify the file tests/acceptance/test_issue_102.py.",
                  "Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an."):
         assert step in task
+    # Der halb übersetzte Vorschlag vor dem deutschen Satz blieb als sinnentstellter
+    # Doppelausdruck stehen (#291 Review).
+    assert "The tick creates" not in task
     assert f"Worker: {w.WORKER}" in task
     assert ISSUE_BODY in task  # Issue wörtlich, nicht vom Modell nachzulesen
     assert "A red test is not a reason to stop" in task  # erster Lauf endete dort
