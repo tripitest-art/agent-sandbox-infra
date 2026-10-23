@@ -1172,6 +1172,102 @@ def test_agent_cmd_qwen_litellm_passes_model(monkeypatch):
     assert w.agent_cmd("tu was")[:4] == ["opencode", "run", "-m", "litellm/coder-free"]
 
 
+# --- OpenCode-Stream: JSON-Events, Tool-Ausgaben, Tokens und Kosten (#271) ---
+
+def test_agent_cmd_opencode_haengt_format_json_vor_den_prompt(monkeypatch):
+    monkeypatch.setattr(w, "AGENT", "opencode")
+    monkeypatch.setattr(w, "BACKEND", "ollama")
+    assert w.agent_cmd("Auftrag") == ["opencode", "run", "-m", "ollama/qwen3-coder-64k",
+                                      "--format", "json", "Auftrag"]
+
+
+def test_opencode_text_leer_und_fremdes_event_schweigen(capsys):
+    w.log_stream_line(json.dumps({"type": "text", "part": {"text": "   "}}))
+    w.log_stream_line(json.dumps({"type": "step_start", "part": {"id": "x"}}))
+    w.log_stream_line(json.dumps({"type": "step_finish", "part": {"reason": "tool-calls"}}))
+    assert capsys.readouterr().out == ""
+
+
+def test_opencode_tool_use_fehler_markiert_die_ausgabe(capsys):
+    w.log_stream_line(json.dumps({
+        "type": "tool_use",
+        "part": {"tool": "bash",
+                 "state": {"status": "error", "input": {"command": "false"},
+                           "output": "Exit 1", "metadata": {"exit": 1}}},
+    }))
+    w.log_stream_line(json.dumps({
+        "type": "tool_use",
+        "part": {"tool": "grep", "state": {"input": {"pattern": "TODO"},
+                                           "error": "kein Treffer",
+                                           "metadata": {"exit": 2}}},
+    }))
+    out = capsys.readouterr().out
+    assert "$ false\n✗ Fehler:\n    Exit 1\n" in out
+    # Ein gesetzter exit ungleich 0 markiert auch ohne status == "error".
+    assert "→ grep TODO\n✗ Fehler:\n    kein Treffer" in out
+
+
+def test_opencode_tool_use_ziel_feld_varianten(capsys):
+    for feld, wert in (("file_path", "a.py"), ("path", "b.py"), ("pattern", "c")):
+        w.log_stream_line(json.dumps({
+            "type": "tool_use",
+            "part": {"tool": "read_file", "state": {"input": {feld: wert}}},
+        }))
+    zeilen = capsys.readouterr().out.splitlines()
+    assert zeilen == ["→ read_file a.py", "→ read_file b.py", "→ read_file c"]
+
+
+def test_format_opencode_step_ohne_kosten_und_ohne_tokens(capsys):
+    w.log_stream_line(json.dumps({"type": "step_finish", "part": {"reason": "stop"}}))
+    w.log_stream_line(json.dumps({
+        "type": "step_finish",
+        "part": {"reason": "stop", "cost": 0,
+                 "tokens": {"input": 5, "output": 2}},
+    }))
+    zeilen = capsys.readouterr().out.splitlines()
+    assert zeilen == ["[OpenCode: stop]",
+                      "[OpenCode: stop, Token: 5 ein/2 aus/0 Cache]"]
+
+
+def test_format_opencode_step_ist_fuer_nicht_dict_leer():
+    assert w.format_opencode_step(None) == ""
+    assert w.format_opencode_step(["tokens"]) == ""
+    # Kaputte Werte dürfen den Logpfad nicht abbrechen.
+    assert w.format_opencode_step({"tokens": {"input": "viele"}, "cost": "teuer"}) == ""
+
+
+def test_opencode_error_ohne_meldung_bleibt_still(monkeypatch, capsys):
+    monkeypatch.setattr(w, "LAST_AGENT_ERROR", "alt", raising=False)
+    w.log_stream_line(json.dumps({"type": "error"}))
+    w.log_stream_line(json.dumps({"type": "error", "error": {"data": {}}}))
+    assert w.LAST_AGENT_ERROR == "alt"
+    assert capsys.readouterr().out == ""
+
+
+def test_run_agent_leitet_auch_opencode_durch_log_stream_line(monkeypatch, tmp_path, capsys):
+    class Proc:
+        returncode = 0
+        stdout = [json.dumps({"type": "text", "part": {"text": "Ich prüfe."}}) + "\n",
+                  json.dumps({"type": "step_finish",
+                              "part": {"reason": "stop", "cost": 0.5,
+                                       "tokens": {"input": 1, "output": 1}}}) + "\n"]
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(w, "AGENT", "opencode")
+    monkeypatch.setattr(w.subprocess, "Popen", lambda cmd, **kw: Proc())
+    monkeypatch.setattr(w, "agent_identitaet", lambda: (None, None))
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    monkeypatch.setattr(w, "RUN_TIMEOUT", 60)
+    assert w.run_agent("Auftrag") == 0
+    out = capsys.readouterr().out
+    assert "Ich prüfe." in out
+    assert "[OpenCode: stop, Token: 1 ein/1 aus/0 Cache, Kosten: $0.5000]" in out
+    assert '{"type"' not in out
+
+
 # --- Probe vor dem Lauf: hängt DeepSeek, nimmt der Worker das Ausweichmodell ---
 
 class _Resp:
