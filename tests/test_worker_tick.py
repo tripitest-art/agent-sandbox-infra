@@ -3749,3 +3749,15 @@ def test_pick_job_nutzt_das_naechste_projekt_ohne_leerlauf(monkeypatch, tmp_path
     assert state["_last_project"] == "proj2"
     # PREFIX gehört zum ersten Projekt der Liste, auch wenn proj1 nicht zuerst geprüft wurde.
     assert (w.PROJECT, w.PREFIX, w.BASE_WORKDIR) == ("proj2", "proj2/", projs[1].workdir)
+
+
+def test_issue_auftrag_ohne_pytest_nennt_den_befehl_einmal(monkeypatch):
+    """#323: Ohne pytest gibt es keinen fokussierten Schritt; Schritt 3 bleibt beim vollen Befehl."""
+    monkeypatch.setattr(w, "TEST_CMD", "make test")
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()]))
+
+    _, task, _, _ = w.issue_job()
+
+    assert "3. `make test`. If a test is red:" in task
+    assert "tests/acceptance/test_issue_102.py -x" not in task
+    assert task.count("`make test`") == 1
