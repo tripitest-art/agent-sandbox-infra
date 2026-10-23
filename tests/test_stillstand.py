@@ -62,6 +62,56 @@ def test_main_entfernt_den_eintrag_wenn_nichts_mehr_wartet(monkeypatch):
     assert "_stillstand" not in state
 
 
+def test_main_nennt_die_kollision_als_ursache(monkeypatch, capsys):
+    """#274: Die Ursache steht vor den Gründen, damit die Dreier-Grenze sie nicht verdrängt."""
+    state = {"_stillstand": {"seit": T0, "gemeldet": False},
+             f"{w.KOLLISION}223:221": {"start": T0, "warned": False},
+             f"{w.KOLLISION}224:221": {"start": T0, "warned": False}}
+    monkeypatch.setattr(w, "load_state", lambda: state)
+    monkeypatch.setattr(w, "SKIPPED", [GRUND])
+    monkeypatch.setattr(w, "pick_job", lambda s: None)
+    monkeypatch.setattr(w, "jetzt_s", lambda: T0 + 60 * MIN)
+
+    assert w.main() == 0
+
+    zeilen = [z for z in capsys.readouterr().out.splitlines() if "⚠ Stephan:" in z]
+    assert len(zeilen) == 1
+    assert "Minuten: Ursache: belegt durch #221; " in zeilen[0]
+    assert GRUND in zeilen[0]
+
+
+def test_main_nennt_den_geparkten_auftrag_als_ursache(monkeypatch, capsys):
+    """#274: Ein geparkter Auftrag ist selbst die Ursache, auch ohne Datei-Kollision."""
+    state = {"_stillstand": {"seit": T0, "gemeldet": False},
+             "_park:pr269@2026-10-22T04:39:54Z": True}
+    monkeypatch.setattr(w, "load_state", lambda: state)
+    monkeypatch.setattr(w, "SKIPPED", [GRUND])
+    monkeypatch.setattr(w, "pick_job", lambda s: None)
+    monkeypatch.setattr(w, "jetzt_s", lambda: T0 + 60 * MIN)
+
+    assert w.main() == 0
+
+    zeilen = [z for z in capsys.readouterr().out.splitlines() if "⚠ Stephan:" in z]
+    assert len(zeilen) == 1
+    assert "Ursache: pr269@2026-10-22T04:39:54Z wartet auf Stephan; " in zeilen[0]
+
+
+def test_main_ohne_bestimmbare_ursache_bleibt_die_alarmzeile_gleich(monkeypatch, capsys):
+    """#274: Ohne Halter und ohne geparkten Auftrag kommt kein „Ursache:“ in die Zeile."""
+    state = {"_stillstand": {"seit": T0, "gemeldet": False}}
+    monkeypatch.setattr(w, "load_state", lambda: state)
+    monkeypatch.setattr(w, "SKIPPED", [GRUND])
+    monkeypatch.setattr(w, "pick_job", lambda s: None)
+    monkeypatch.setattr(w, "jetzt_s", lambda: T0 + 60 * MIN)
+
+    assert w.main() == 0
+
+    zeilen = [z for z in capsys.readouterr().out.splitlines() if "⚠ Stephan:" in z]
+    assert len(zeilen) == 1
+    assert "Minuten: " + GRUND in zeilen[0]
+    assert "Ursache" not in zeilen[0]
+
+
 def test_main_raeumt_den_eintrag_sobald_ein_auftrag_laeuft(monkeypatch):
     """#218: Findet main wieder Arbeit, verschwindet der Stillstand aus dem Zustand."""
     state = {"_stillstand": {"seit": T0, "gemeldet": True}}

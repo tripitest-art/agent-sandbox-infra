@@ -2390,7 +2390,38 @@ def litellm_up(state: dict, now: float | None = None) -> bool:
     return True
 
 
-def stillstand_pruefen(state: dict, gruende: list[str], now: float | None = None) -> bool:
+def stillstand_ursache(state: dict, parked: str | None) -> str | None:
+    """Kurzer Klartext, was den Stillstand hält; None, wenn nichts bestimmbar ist (#274).
+
+    Der Alarm nannte bisher nur die Folge (übersprungene Issues), nicht den Halter der Datei
+    und nicht dessen Warten. Am 22.10.2026 standen #223, #224, #227 und #271 über eine Stunde
+    still, weil #221 (PR #269) auf Stephan wartete; der geparkte Auftrag fiel als vierter Grund
+    aus der Dreier-Grenze und aus der Längenkürzung von alarm(). Deshalb nennt main() die
+    Ursache getrennt und stellt sie in der Alarmzeile voran.
+
+    Halter sind die Zustandsschlüssel `_kollision:<kandidat>:<halter>` (siehe
+    _track_kollision); gezählt wird die Zahl hinter dem letzten ":", andere Schlüssel werden
+    still übergangen. Ausgegeben werden nur Nummern und feste Wörter, nie Texte aus Issues
+    oder PRs (Regel 9). Wirft nie.
+    """
+    halter: set[int] = set()
+    for key in list(state or {}):
+        if not isinstance(key, str) or not key.startswith(KOLLISION):
+            continue
+        try:
+            halter.add(int(key.rsplit(":", 1)[-1]))
+        except (TypeError, ValueError):
+            continue    # unlesbarer Schlüssel: still übergehen
+    teile: list[str] = []
+    if halter:
+        teile.append("belegt durch " + ", ".join(f"#{n}" for n in sorted(halter)))
+    if parked:
+        teile.append(f"{parked} wartet auf Stephan")
+    return "; ".join(teile) if teile else None
+
+
+def stillstand_pruefen(state: dict, gruende: list[str], now: float | None = None,
+                       ursache: str | None = None) -> bool:
     """Merkt und meldet einen Stillstand (#218). Speichert nicht (main speichert danach).
 
     - Nur der erste Slot (WORKER_SLOT "", "1" oder "w1") prüft; sonst False, state unberührt.
@@ -2399,6 +2430,8 @@ def stillstand_pruefen(state: dict, gruende: list[str], now: float | None = None
     - Dauer >= STILLSTAND_MINUTEN * 60 und noch nicht gemeldet: gemeldet = True und genau eine
       alarm("-", "Stillstand seit <M> Minuten: <bis zu 3 Gründe, mit „; “ getrennt, ggf. „; +K weitere“>"),
       Rückgabe True. Sonst False. `now` ist Standard jetzt_s().
+    - Ist `ursache` gesetzt (nicht leer), steht sie aus demselben Grund wie in #274 voran:
+      alarm("-", "Stillstand seit <M> Minuten: Ursache: <ursache>; <Gründe wie bisher>").
     """
     if WORKER_SLOT not in ("", "1", "w1"):
         return False
@@ -2422,6 +2455,8 @@ def stillstand_pruefen(state: dict, gruende: list[str], now: float | None = None
     weitere = len(gruende) - 3
     if weitere > 0:
         text += f"; +{weitere} weitere"
+    if ursache:
+        text = f"Ursache: {ursache}; {text}"
     alarm("-", f"Stillstand seit {minuten} Minuten: {text}")
     return True
 
@@ -3491,7 +3526,10 @@ def main() -> int:
             if parked:
                 gruende.append(f"{parked}: geparkt (wartet auf Stephan)")
             stillstand_vorher = state.get(STILLSTAND)
-            gemeldet = stillstand_pruefen(state, gruende)
+            # #274: Die Ursache (haltendes Issue, geparkter Auftrag) vorne nennen, damit sie
+            # weder der Dreier-Grenze noch der Längenkürzung von alarm() zum Opfer fällt.
+            gemeldet = stillstand_pruefen(state, gruende,
+                                          ursache=stillstand_ursache(state, parked))
             if gemeldet or state.get(STILLSTAND) != stillstand_vorher:
                 save_state(state)
             slot_status("idle", project=PROJECT, message=idle_message(parked, SKIPPED))
