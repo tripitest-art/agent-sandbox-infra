@@ -1143,8 +1143,15 @@ def _run_pr_review() -> int:
                 try:
                     raw, usage = call_llm(model, messages)
                 except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
-                    log(f"PR #{n}: Modell {model} antwortet nicht ({type(exc).__name__}), nächster Takt.")
+                    # #275: Ein Ausfall ist kein Grund aufzugeben, solange das zweite eingestellte
+                    # Modell unabhängig vom Worker ist: derselbe Aufruf geht im selben Takt dorthin.
+                    # Nur der Klassenname kommt ins Log, nie der Ausnahmetext (Regel 5).
                     note_llm_outage(state, model, exc, n)
+                    if alt is not None:
+                        log(f"PR #{n}: Modell {model} antwortet nicht ({type(exc).__name__}), weiche auf {alt} aus.")
+                        model, alt = alt, None
+                        continue
+                    log(f"PR #{n}: Modell {model} antwortet nicht ({type(exc).__name__}), nächster Takt.")
                     return 0
                 note_llm_ok(state, model)
                 # #178: Jeder Aufruf zählt, auch der unbrauchbare, der das Ausweichen auslöst.
