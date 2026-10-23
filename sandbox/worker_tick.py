@@ -1904,7 +1904,9 @@ def warn_text(key: str, pr_no: int, body: str | None, issue_no: int) -> None:
 def agent_cmd(prompt: str) -> list[str]:
     if AGENT == "opencode":
         model = f"litellm/{ACTIVE_MODEL}" if BACKEND == "litellm" else f"ollama/{MODEL}"
-        return ["opencode", "run", "-m", model, prompt]
+        # --format json liefert JSONL-Events wie bei Qwen Code; die ersten vier Argumente bleiben
+        # gleich, damit bestehende Tests weiter cmd[:4] prüfen können (#271).
+        return ["opencode", "run", "-m", model, "--format", "json", prompt]
     # stream-json statt text: Sonst zeigt das Log nur den Schlussbericht, nicht die Befehle.
     cmd = ["qwen", "-p", prompt, "--yolo", "--output-format", "stream-json",
            "--max-wall-time", f"{RUN_TIMEOUT // 60}m"]
@@ -1941,6 +1943,33 @@ def format_usage(usage: object) -> str:
         return ""
     ein, aus, cache = (0 if v is None else v for v in zahlen)
     return f", Token: {ein} ein/{aus} aus/{cache} Cache"
+
+
+def format_opencode_step(part: object) -> str:
+    """Token- und Kostenangabe aus dem `part` eines OpenCode-`step_finish`-Events (#271).
+
+    Übersetzt `part["tokens"]` ({"input": …, "output": …, "cache": {"read": …}}) in das Format
+    von `format_usage(...)` und hängt bei einer Kostenangabe > 0 `, Kosten: $<cost:.4f>` an.
+    Gibt '' zurück, wenn `part` kein dict ist. Wirft nie — die Zeile entsteht im Logpfad."""
+    try:
+        if not isinstance(part, dict):
+            return ""
+        tokens = part.get("tokens")
+        if not isinstance(tokens, dict):
+            tokens = {}
+        cache = tokens.get("cache")
+        if not isinstance(cache, dict):
+            cache = {}
+        usage = {"input_tokens": tokens.get("input"),
+                 "output_tokens": tokens.get("output"),
+                 "cache_read_input_tokens": cache.get("read")}
+        text = format_usage(usage)
+        cost = part.get("cost")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
+            text += f", Kosten: ${cost:.4f}"
+        return text
+    except Exception:
+        return ""
 
 
 # Kurztext des Anbieterfehlers im letzten Agentenlauf, sonst None. Nur log_stream_line setzt ihn;
@@ -1988,12 +2017,12 @@ def short_api_error(message: str) -> str:
 
 
 def log_stream_line(line: str) -> None:
-    """Eine Zeile stream-json von Qwen Code als lesbares Log: Text, `$ befehl`, Ausgabe.
+    """Eine Zeile des Agenten-Streams als lesbares Log: Text, `$ befehl`, Ausgabe.
 
-    Ein Ergebnis-Ereignis mit Anbieterfehler ({"type": "result", "is_error": true,
-    "subtype": "error_during_execution", "error": {"message": "[API Error: …"}}) setzt zusätzlich
-    LAST_AGENT_ERROR und schreibt dessen Kurzfassung als eigene Logzeile (#106). Jede Zeile
-    landet zusätzlich im Merker für `detect_infra_error` (#243)."""
+    Verarbeitet die stream-json-Ereignisse von Qwen Code (`assistant`, `user`, `result`) und die
+    JSONL-Events von `opencode run --format json` (`text`, `tool_use`, `step_finish`, `error`,
+    #271). Ein Anbieterfehler setzt LAST_AGENT_ERROR und schreibt dessen Kurzfassung als eigene
+    Logzeile (#106). Jede Zeile landet zusätzlich im Merker für `detect_infra_error` (#243)."""
     global LAST_AGENT_ERROR
     merke_agent_zeile(line)
 
@@ -2008,7 +2037,11 @@ def log_stream_line(line: str) -> None:
             say(line.rstrip())
         return
     kind = event.get("type")
-    content = (event.get("message") or {}).get("content") or []
+    # `message` ist bei Qwen Code ein dict; ein OpenCode-`error`-Event kann dort auch nur einen
+    # String tragen, deshalb vor dem Zugriff prüfen.
+    nachricht = event.get("message")
+    content = (nachricht.get("content") or []) if isinstance(nachricht, dict) else []
+    part = event.get("part")
     if kind == "assistant":
         for part in content:
             if part.get("type") == "text" and part.get("text", "").strip():
@@ -2041,6 +2074,41 @@ def log_stream_line(line: str) -> None:
             LAST_AGENT_USAGE = usage
         say(f"[Qwen Code: {event.get('subtype')}, {event.get('num_turns')} Züge, "
             f"{round((event.get('duration_ms') or 0) / 1000)} s{format_usage(event.get('usage'))}]")
+    elif kind == "text" and isinstance(part, dict):
+        text = part.get("text", "")
+        if isinstance(text, str) and text.strip():
+            say(text.strip())
+    elif kind == "tool_use" and isinstance(part, dict):
+        tool = part.get("tool") or ""
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+        if tool == "bash":
+            say(f"$ {inp.get('command', '')}")
+        else:
+            target = (inp.get("filePath") or inp.get("file_path") or inp.get("path")
+                      or inp.get("pattern") or "")
+            say(f"→ {tool} {target}".rstrip())
+        ausgabe = state.get("output")
+        if not (isinstance(ausgabe, str) and ausgabe):
+            ausgabe = state.get("error")
+        if isinstance(ausgabe, str) and ausgabe:
+            metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+            fehler = state.get("status") == "error" or metadata.get("exit") not in (None, 0)
+            say(("✗ Fehler:\n" if fehler else "") + _clip(ausgabe))
+    elif kind == "step_finish" and isinstance(part, dict):
+        if part.get("reason") == "stop":
+            say(f"[OpenCode: stop{format_opencode_step(part)}]")
+    elif kind == "error":
+        err = event.get("error")
+        daten = err.get("data") if isinstance(err, dict) else None
+        fehlertext = daten.get("message") if isinstance(daten, dict) else None
+        if not (isinstance(fehlertext, str) and fehlertext.strip()) and isinstance(err, dict):
+            fehlertext = err.get("message")
+        if not (isinstance(fehlertext, str) and fehlertext.strip()):
+            fehlertext = nachricht
+        if isinstance(fehlertext, str) and fehlertext.strip():
+            LAST_AGENT_ERROR = short_api_error(fehlertext)
+            say(f"[Anbieterfehler] {LAST_AGENT_ERROR}")
 
 
 # #243: Infrastruktur- und Laufzeitfehler der Sandbox (fehlende Rechte, volles Laufwerk,
@@ -2201,10 +2269,11 @@ def run_agent(prompt: str) -> int:
     `/root/venv/bin:/root/.opencode/bin` steht; die Worker-Units setzen keinen PATH, und
     `pytest` liegt nur im venv (#72). Läuft der Takt als root, startet der Agent als
     `AGENT_USER` mit dessen Home (#217); damit reicht ein Ausbruch aus dem Werkzeugkasten
-    nicht mehr an die Geheimnisse des Hosts. Die bei OpenCode ungefiltert gedruckte Ausgabe
-    läuft durch `redact()`, damit kein Schlüssel in `/root/worker.log` und damit zu Home
-    Assistant kommt. Mit `user` geht auch `group` mit (#243): ohne eigenen GID behielte das
-    Kind die Gruppe des Takts (auf dem Server 0) und der Rechte-Drop wäre nur halb.
+    nicht mehr an die Geheimnisse des Hosts. Beide Agenten laufen durch `log_stream_line()`,
+    das jede Zeile mit `redact()` ausgibt, damit kein Schlüssel in `/root/worker.log` und damit
+    zu Home Assistant kommt (#35, #271). Mit `user` geht auch `group` mit (#243): ohne eigenen
+    GID behielte das Kind die Gruppe des Takts (auf dem Server 0) und der Rechte-Drop wäre nur
+    halb.
 
     Gibt den Exit-Code zurück. Token-Usage und Cost des Laufs stehen danach in
     `LAST_AGENT_USAGE` (dict oder None, #222); die Rückgabe bleibt bewusst ein int, weil
@@ -2222,11 +2291,7 @@ def run_agent(prompt: str) -> int:
                           stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                           errors="replace") as proc:
         for line in proc.stdout:
-            if AGENT == "opencode":
-                merke_agent_zeile(line)   # geht nicht durch log_stream_line (#243)
-                print(redact(line), end="", flush=True)
-            else:
-                log_stream_line(line)
+            log_stream_line(line)
     return proc.returncode
 
 
