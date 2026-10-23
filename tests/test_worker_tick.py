@@ -151,7 +151,7 @@ def test_rework_job_embeds_review_and_checkout(monkeypatch):
     assert "Titel von Issue" not in task
     assert '--title "$(gh issue view 100 --json title -q .title)"' in task
     # Mit gh 2.23 schlug `gh pr edit` mit „GraphQL: …“ fehl, Qwen meldete trotzdem Erfolg (#103).
-    assert "GraphQL" in task and "NICHT erledigt" in task
+    assert "GraphQL" in task and "NOT" in task
     assert "gh pr view 103 --json title,body" in task
 
 
@@ -218,13 +218,16 @@ def test_issue_job(monkeypatch):
     # Mit „nach AGENTS.md“ allein übersprang Qwen Label, Branch und Akzeptanz-Commit (#102).
     for step in ("gh issue edit 102 --add-label in-arbeit --remove-label bereit",
                  "Der Takt hat den Branch feature/issue-102 ausgecheckt und den Akzeptanztest bereits als Commit gesichert.",
-                 "Die Datei tests/acceptance/test_issue_102.py darf der Agent nie ändern.",
+                 "Never modify the file tests/acceptance/test_issue_102.py.",
                  "Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an."):
         assert step in task
+    # Der halb übersetzte Vorschlag vor dem deutschen Satz blieb als sinnentstellter
+    # Doppelausdruck stehen (#291 Review).
+    assert "The tick creates" not in task
     assert f"Worker: {w.WORKER}" in task
     assert ISSUE_BODY in task  # Issue wörtlich, nicht vom Modell nachzulesen
-    assert "Ein roter Test ist kein Grund aufzuhören" in task  # erster Lauf endete dort
-    assert "NICHT erledigt" in task and "ins Issue #102" in task
+    assert "A red test is not a reason to stop" in task  # erster Lauf endete dort
+    assert "NOT" in task and "on issue #102" in task
     assert "/tmp/" not in task
     assert not any(c[:2] == ("issue", "edit") for c in fake.calls)
 
@@ -571,10 +574,10 @@ def test_text_fix_job(monkeypatch):
     monkeypatch.setattr(w, "gh", FakeGH(prs=[pr]))
     key, task, pr_no, before = w.text_fix_job()
     assert key == "text112@3373e35" and pr_no == 112 and before == w.pr_snapshot(pr)
-    assert "„Closes #102“" in task and "keinen Code" in task
+    assert "„Closes #102“" in task and "no code" in task
     assert "gh pr diff 112" in task and "--body-file .git/pr-body.md" in task
     assert "## Umgesetzt von / Review durch" in task  # Vorlage wörtlich
-    assert "NICHT erledigt" in task
+    assert "NOT" in task
 
 
 @pytest.mark.parametrize("pr, labels", [
@@ -597,7 +600,23 @@ def test_tasks_embed_template(monkeypatch):
     monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()]))
     _, task, _, _ = w.issue_job()
     assert "----- PR-Vorlage" in task and "## Wie getestet" in task
-    assert "Ein Kästchen [x] nur, wenn es stimmt" in task
+    assert "Tick a box [x] only if it is true" in task
+
+
+def test_nacharbeit_und_textauftrag_sind_englisch(monkeypatch):
+    """#282: Auch Review-Nacharbeit und PR-Text-Auftrag sind englisch; die Kennungszeile bleibt."""
+    monkeypatch.setattr(w, "gh", FakeGH(prs=[_pr()]))
+    _, task, _, _ = w.rework_job()
+    assert task.startswith("Du arbeitest ein Review ab")
+    assert "Run these steps sequentially" in task
+    assert "Gehe genau diese Schritte durch" not in task
+
+    pr = _pr(number=112, branch="feature/issue-102", review_at=None)
+    monkeypatch.setattr(w, "gh", FakeGH(prs=[pr]))
+    _, task, _, _ = w.text_fix_job()
+    assert task.startswith("Im Text von PR #112")
+    assert "Run these steps sequentially" in task
+    assert "Du änderst nur den PR-Text" not in task
 
 
 # --- PR-Vorlage aus origin/main statt aus dem Arbeitsbaum (#37) ---

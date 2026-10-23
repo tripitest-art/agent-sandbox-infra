@@ -251,21 +251,20 @@ _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 # Belegungsdateien werden nach dem Auftragsschlüssel benannt: alles außer A-Z a-z 0-9 . @ - wird „_“.
 _CLAIM_UNSAFE_RE = re.compile(r"[^A-Za-z0-9.@-]")
 
-# In beiden Aufträgen: Qwen hielt „GraphQL: …“ von gh für Erfolg (#103).
+# In beiden Aufträgen: Qwen hielt „GraphQL: …“ von gh für Erfolg (#103). Englisch seit #282.
 ERROR_RULE = (
-    "Gibt ein Befehl eine Fehlermeldung aus (z. B. „GraphQL: …“, „error“, Exit-Code ungleich 0), ist\n"
-    "der Schritt NICHT erledigt, auch wenn danach nichts mehr kommt. Beheben und wiederholen; geht\n"
-    "das nicht, nicht „fertig“ melden, sondern den Fehler wörtlich als Kommentar {where} schreiben\n"
-    "und aufhören.")
+    "If a command prints an error (e.g. „GraphQL: …“, „error“, exit code not 0), the step is NOT\n"
+    "done, even if nothing follows. Fix it and repeat; if that is impossible, do not report\n"
+    "„done“, but write the error verbatim as a comment {where} and stop.")
 
 # Steht im Issue-Auftrag direkt nach Schritt 6 (#68). Der pre-push-Hook lehnt einen Push mit roten
 # Tests ab; nur die Eskalation (Draft-PR nach drei Fehlschlägen, AGENTS.md Worker 6) darf ihn
 # umgehen. Ohne diesen Satz hält der Agent den abgebrochenen Push für einen Fehler und weicht ihm
 # aus, statt die Tests zu beheben.
 PUSH_RULE = (
-    "Der Push wird bei roten Tests abgelehnt (pre-push-Hook). Dann die Fehlermeldung lesen und "
-    "beheben, nicht umgehen. Nur für die Eskalation mit Draft-PR (nach drei erfolglosen Anläufen, "
-    "AGENTS.md Worker 6) gilt `git push --no-verify`.")
+    "A push with red tests is rejected (pre-push hook). Read the error and fix it; do not bypass "
+    "it. Only the escalation with a Draft-PR (after three failed attempts, AGENTS.md Worker 6) may "
+    "use `git push --no-verify`.")
 
 ENV = dict(os.environ, PATH=f"/root/venv/bin:/root/.opencode/bin:{os.environ.get('PATH', '/usr/bin:/bin')}")
 
@@ -777,9 +776,9 @@ def pr_text_problems(body: str | None, issue_no: int) -> list[str]:
 def template_rules() -> str:
     """Vorlage wörtlich in den Auftrag: Mit nur dem Dateinamen schrieb Qwen eigene Überschriften
     ohne „Closes #N“ und hakte Tests ab, die es nicht gab (#112)."""
-    return f"""Regeln für den PR-Text: genau die Überschriften der Vorlage unten, in dieser Reihenfolge.
-Die Kommentare <!-- … --> ersetzt du durch Inhalt. Ein Kästchen [x] nur, wenn es stimmt und du es
-geprüft hast; was es nicht gibt, bleibt [ ]. Unter „Offene Punkte“ steht eine Antwort („keine“ reicht).
+    return f"""Rules for the PR text: exactly the template headings below, in this order.
+Replace the <!-- … --> comments with content. Tick a box [x] only if it is true and you checked it;
+anything that does not apply stays [ ]. Under „Offene Punkte“ there is an answer („keine“ is enough).
 
 ----- PR-Vorlage ({PR_TEMPLATE}) -----
 {pr_template().strip()}
@@ -880,21 +879,21 @@ def rework_job(done=frozenset(), skip: Callable[[str], bool] | None = None):
         if review_is_current(review, pr) and "Änderungen nötig" in review["body"][:80]:
             n = pr["number"]
             task = f"""Du arbeitest ein Review ab (AGENTS.md, Worker, Schritt 8). Du bist Worker: {WORKER}.
-Gehe genau diese Schritte durch und führe jeden als Befehl aus:
+Run these steps sequentially and execute each one as a command:
 
-1. `gh pr checkout {n}` (du bist danach auf dem PR-Branch, nicht auf main).
-2. Lies das Review unten. Setze jeden „Muss“-Punkt um. „Kann“-Punkte nur, wenn sie im Umfang
-   von Issue #{issue_no} liegen. Nie Dateien unter tests/acceptance/ ändern.
-3. Ist der PR-Text gefordert: schreib ihn in .git/pr-body.md nach der Vorlage unten,
-   mit „Closes #{issue_no}“ und „Worker: {WORKER}“, und führe aus:
+1. `gh pr checkout {n}` (you are then on the PR branch, not on main).
+2. Read the review below. Implement every „Muss“ item. „Kann“ items only if they are within the
+   scope of issue #{issue_no}. Never modify files under tests/acceptance/.
+3. If the review asks for the PR text: write it to .git/pr-body.md following the template below,
+   with „Closes #{issue_no}“ and „Worker: {WORKER}“, then run:
    `gh pr edit {n} --title "$(gh issue view {issue_no} --json title -q .title)" --body-file .git/pr-body.md`
-4. `{TEST_CMD}` muss komplett grün sein.
-5. Alle Code-Änderungen in einem Commit, dann `git push`. Verlangt das Review nur den PR-Text,
-   gibt es keinen Commit.
-6. Prüfe mit `git log -1 --oneline` und `gh pr view {n} --json title,body`, dass Commit und Text
-   angekommen sind: Die Ausgabe muss deinen neuen Titel und Text zeigen.
-{ERROR_RULE.format(where=f"in den PR #{n}")}
-Du gibst den PR nie selbst frei und mergst nie; das macht der Reviewer.
+4. `{TEST_CMD}` must be completely green.
+5. Put all code changes into one commit, then `git push`. If the review only asks for the PR text,
+   there is no commit.
+6. Check with `git log -1 --oneline` and `gh pr view {n} --json title,body` that commit and text
+   arrived: the output must show your new title and text.
+{ERROR_RULE.format(where=f"on PR #{n}")}
+Never approve or merge the PR yourself; the reviewer does that.
 
 {template_rules()}
 
@@ -929,15 +928,16 @@ def text_fix_job(skip: Callable[[str], bool] | None = None):
         if skip and skip(key):
             continue   # geparkt: der nächste Kandidat kommt dran, der Takt läuft weiter
         task = f"""Im Text von PR #{n} (Issue #{issue_no}) fehlt: {", ".join(missing)}.
-Du bist Worker: {WORKER}. Du änderst nur den PR-Text, keinen Code, keinen Commit.
-Gehe genau diese Schritte durch und führe jeden als Befehl aus:
+Du bist Worker: {WORKER}. You only change the PR text, no code, no commit.
+Run these steps sequentially and execute each one as a command:
 
-1. `gh pr diff {n}` und `gh issue view {issue_no}` lesen: Was wurde wirklich geändert und getestet?
-2. Schreib den ganzen PR-Text neu in .git/pr-body.md, nach der Vorlage unten, mit „Closes #{issue_no}“
-   unter „Was und warum“ und „Worker: {WORKER}“ unter „Umgesetzt von / Review durch“.
+1. Read `gh pr diff {n}` and `gh issue view {issue_no}`: what really changed and what was tested?
+2. Rewrite the whole PR text into .git/pr-body.md, following the template below, with
+   „Closes #{issue_no}“ under „Was und warum“ and „Worker: {WORKER}“ under
+   „Umgesetzt von / Review durch“.
 3. `gh pr edit {n} --title "$(gh issue view {issue_no} --json title -q .title)" --body-file .git/pr-body.md`
-4. Prüfe mit `gh pr view {n} --json title,body`, dass dein neuer Text da ist.
-{ERROR_RULE.format(where=f"in den PR #{n}")}
+4. Check with `gh pr view {n} --json title,body` that your new text is there.
+{ERROR_RULE.format(where=f"on PR #{n}")}
 
 {template_rules()}"""
         return f"text{n}@{pr['headRefOid'][:7]}", task, n, pr_snapshot(pr)
@@ -1839,25 +1839,25 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
     n, branch = selected["number"], issue_branch(selected["number"])
 
     task = f"""Du setzt Issue #{n} um (AGENTS.md, Worker-Aufgaben → Worker). Du bist Worker: {WORKER}.
-Das Issue steht unten; es ist der Vertrag. Gehe genau diese Schritte durch und führe jeden als Befehl aus:
+The issue is below; it is the contract. Run these steps sequentially and execute each one as a command:
 
 1. `gh issue edit {n} --add-label in-arbeit --remove-label bereit`
 2. Der Takt hat den Branch {branch} ausgecheckt und den Akzeptanztest bereits als Commit gesichert.
-3. Die Datei tests/acceptance/test_issue_{n}.py darf der Agent nie ändern.
-4. Setze das Issue um, nur in den Dateien unter „### Betroffene Dateien“. Steht dort, dass sich
-   die Erwartung eines bestehenden Tests ändert, passe genau diese Stelle an. Ergänze die Tests
-   aus „### Fertig, wenn“.
-5. `{TEST_CMD}`. Ist ein Test rot: Fehlermeldung lesen, Code (nicht den Akzeptanztest)
-   korrigieren, Schritt 5 wiederholen. Ein roter Test ist kein Grund aufzuhören, sondern der
-   nächste Arbeitsschritt. Erst weiter, wenn alles grün ist.
-6. Alle Änderungen in Commits sichern (`git add -A && git commit -m "<was und warum>"`). Die
-   Nachricht jedes Commits beschreibt, was und warum geändert wurde (sie wird zum PR-Text), und
-   aufhören. Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an.
+3. Never modify the file tests/acceptance/test_issue_{n}.py.
+4. Implement the issue, only in the files listed under „### Betroffene Dateien“. If that section
+   says the expectation of an existing test changes, adjust exactly that spot. Add the tests from
+   „### Fertig, wenn“.
+5. `{TEST_CMD}`. If a test is red: read the error, fix the code (not the acceptance test), and
+   repeat step 5. A red test is not a reason to stop, it is the next work item. Continue only when
+   everything is green.
+6. Save all changes in commits (`git add -A && git commit -m "<what and why>"`). Each commit
+   message describes what changed and why (it becomes the PR text), then stop.
+   Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an.
    {PUSH_RULE}
-Hältst du einen Akzeptanztest für falsch: aufhören und die Begründung mit
-`gh issue comment {n} --body-file .git/frage.md` ins Issue schreiben. Nie den Test passend machen.
-{ERROR_RULE.format(where=f"ins Issue #{n}")}
-Du gibst den PR nie selbst frei und mergst nie; das macht der Reviewer.
+If you think an acceptance test is wrong: stop and write the reason to the issue with
+`gh issue comment {n} --body-file .git/frage.md`. Never make the test fit.
+{ERROR_RULE.format(where=f"on issue #{n}")}
+Never approve or merge the PR yourself; the reviewer does that.
 
 {template_rules()}
 
