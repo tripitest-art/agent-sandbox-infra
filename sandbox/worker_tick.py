@@ -2957,6 +2957,22 @@ MAIN_HEALTH_TIMEOUT = int(os.environ.get("MAIN_HEALTH_TIMEOUT", "600"))
 # Sekunden für den lokalen Testlauf; danach gilt der Zustand als „unbekannt“.
 
 
+def main_health_env() -> dict[str, str]:
+    """Saubere Umgebung für den lokalen Testlauf auf origin/main (wie der pre-push-Hook, #216).
+
+    Der Dienst erbt Servereinstellungen (etwa LITELLM_MODEL=coder-go), auf die die Tests nicht
+    eingerichtet sind: Mit ihnen fielen am 23.10.2026 sechs Tests in test_worker_tick.py durch,
+    obwohl die CI grün war, und das fälschlich rote main sperrte jeden Issue-Auftrag. Deshalb nur
+    PATH (der von ENV, mit der venv des Servers vorn), HOME (wenn gesetzt) und leere Projekt- und
+    Einstellungspfade."""
+    env = {"PATH": ENV["PATH"]}
+    if "HOME" in os.environ:
+        env["HOME"] = os.environ["HOME"]
+    env["AGENT_PROJECTS"] = "/nonexistent/agent-projects.json"
+    env["AGENT_SETTINGS"] = "/nonexistent/agent-settings.json"
+    return env
+
+
 def main_sha(repo_dir: str) -> str | None:
     """Voller SHA von origin/main im Klon `repo_dir`; None, wenn er nicht ermittelbar ist.
 
@@ -3017,7 +3033,7 @@ def check_main_health(repo_dir: str) -> bool:
             return True
         try:
             res = subprocess.run(TEST_CMD.split(), cwd=tmp, capture_output=True, text=True,
-                                 check=False, env=ENV, timeout=MAIN_HEALTH_TIMEOUT)
+                                 check=False, env=main_health_env(), timeout=MAIN_HEALTH_TIMEOUT)
         except Exception as e:
             log(f"Warnung: Lokaler Gesundheitscheck: Testlauf fehlgeschlagen ({type(e).__name__}).")
             return True

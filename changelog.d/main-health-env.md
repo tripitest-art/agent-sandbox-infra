@@ -1,0 +1,1 @@
+- `worker_tick`: Der lokale Pre-Flight-Check (#221) testet `origin/main` in einer sauberen Umgebung (`main_health_env()`: nur `PATH`, `HOME` und leere Projekt- und Einstellungspfade, wie der Pre-Push-Hook). Servereinstellungen wie `LITELLM_MODEL=coder-go` ließen sechs Tests durchfallen und meldeten ein CI-grünes `main` als lokal rot; das sperrte alle Issue-Aufträge (#277).
