@@ -299,6 +299,44 @@ PUSH_RULE = (
     "it. Only the escalation with a Draft-PR (after three failed attempts, AGENTS.md Worker 6) may "
     "use `git push --no-verify`.")
 
+# Anker für den Testbefehl im Auftrag. TEST_CMD bleibt für pre-push-Hook und Gesundheitscheck
+# unverändert; im Auftrag zählt kurze Ausgabe und erst der eigene Akzeptanztest (#323).
+RUN_RULES = (
+    "IMPORTANT RULES FOR THIS RUN:\n"
+    "1. BRANCH CHECK: Verify with `git branch` that you are on the target branch before changing anything.\n"
+    "2. PRECISE CHANGES: Never overwrite whole files! Use small Python scripts (e.g. with `open()`, `.replace()`) or `sed` to replace only the affected lines.\n"
+    "3. ESCALATION: Work without asking back. If you get stuck, write the problem as a comment on the issue or PR and stop.\n\n"
+    "Use gh for all GitHub steps.")
+
+
+def agent_test_cmd(acceptance: str | None = None) -> str:
+    """Testbefehl für den Auftrag an den Agenten (nicht für Hook oder Gesundheitscheck).
+
+    Ist TEST_CMD ein pytest-Aufruf, hängt ein kurzer Traceback an: erst der eigene Akzeptanztest
+    mit `-x`, am Ende die ganze Suite. Ein fremder Befehl (z. B. „make test“) bleibt unverändert,
+    weil dessen Ausgabe der Takt nicht kennt.
+    """
+    cmd = TEST_CMD.strip()
+    if not (cmd.startswith("python -m pytest") or cmd.startswith("pytest")):
+        return cmd
+    hat_tb = "--tb" in cmd
+    if acceptance is None:
+        return cmd if hat_tb else f"{cmd} --tb=short"
+    fokus = f"{cmd} {acceptance} -x"
+    return fokus if hat_tb else f"{fokus} --tb=short"
+
+
+def review_wants_pr_text(body: str | None) -> bool:
+    """Spricht das Review den PR-Text an? Dann gehört die Vorlage in den Auftrag (#323).
+
+    Die Zeile „Worker: …, Reviewer: …“, die review_tick in jedes Review setzt, zählt bewusst
+    nicht: Sie erwähnt den Text nicht und würde die Vorlage wieder in jede Nacharbeit hängen.
+    """
+    text = (body or "").lower()
+    return any(hinweis in text for hinweis in
+               ("pr-text", "pr text", "pr-beschreibung", "closes #", "pull_request_template"))
+
+
 ENV = dict(os.environ, PATH=f"/root/venv/bin:/root/.opencode/bin:{os.environ.get('PATH', '/usr/bin:/bin')}")
 
 # Regel 5: Diese Werte dürfen nie ins Log (#35) und, bis auf AGENT_ENV_PASS, nie in den Agentenprozess.
@@ -960,6 +998,7 @@ def rework_job(done=frozenset(), skip: Callable[[str], bool] | None = None):
             continue   # geparkt: der nächste Kandidat kommt dran, der Takt läuft weiter
         if review_is_current(review, pr) and "Änderungen nötig" in review["body"][:80]:
             n = pr["number"]
+            vorlage = f"\n{template_rules()}\n" if review_wants_pr_text(review["body"]) else "\n"
             task = f"""Du arbeitest ein Review ab (AGENTS.md, Worker, Schritt 8). Du bist Worker: {WORKER}.
 Run these steps sequentially and execute each one as a command:
 
@@ -969,7 +1008,7 @@ Run these steps sequentially and execute each one as a command:
 3. If the review asks for the PR text: write it to .git/pr-body.md following the template below,
    with „Closes #{issue_no}“ and „Worker: {WORKER}“, then run:
    `gh pr edit {n} --title "$(gh issue view {issue_no} --json title -q .title)" --body-file .git/pr-body.md`
-4. `{TEST_CMD}` must be completely green.
+4. `{agent_test_cmd()}` must be completely green.
 5. Put all code changes into one commit, then `git push`. If the review only asks for the PR text,
    there is no commit.
 6. Check with `git log -1 --oneline` and `gh pr view {n} --json title,body` that commit and text
@@ -977,8 +1016,7 @@ Run these steps sequentially and execute each one as a command:
 {ERROR_RULE.format(where=f"on PR #{n}")}
 Never approve or merge the PR yourself; the reviewer does that.
 
-{template_rules()}
-
+{vorlage}
 ----- Review -----
 {review['body']}
 ----- Ende Review -----"""
@@ -1937,6 +1975,18 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
 
     n, branch = selected["number"], issue_branch(selected["number"])
 
+    fokus = agent_test_cmd(f"tests/acceptance/test_issue_{n}.py")
+    voll = agent_test_cmd()
+    if fokus == voll:
+        schritt3 = (f"3. `{voll}`. If a test is red: read the error, fix the code "
+                    "(not the acceptance test), and\n"
+                    "   repeat step 3. A red test is not a reason to stop, it is the next work "
+                    "item. Continue only when\n   everything is green.")
+    else:
+        schritt3 = (f"3. `{fokus}` until it is green, then `{voll}`. If a test is red: read the "
+                    "error, fix the code\n   (not the acceptance test), and repeat step 3. A red "
+                    "test is not a reason to stop, it is the next\n   work item. Continue only "
+                    "when everything is green.")
     task = f"""Du setzt Issue #{n} um (AGENTS.md, Worker-Aufgaben → Worker). Du bist Worker: {WORKER}.
 The issue is below; it is the contract.
 
@@ -1949,9 +1999,7 @@ Run these steps sequentially and execute each one as a command:
 2. Implement the issue, only in the files listed under „### Betroffene Dateien“. If that section
    says the expectation of an existing test changes, adjust exactly that spot. Add the tests from
    „### Fertig, wenn“.
-3. `{TEST_CMD}`. If a test is red: read the error, fix the code (not the acceptance test), and
-   repeat step 3. A red test is not a reason to stop, it is the next work item. Continue only when
-   everything is green.
+{schritt3}
 4. Save all changes in commits (`git add -A && git commit -m "<what and why>"`). Each commit
    message describes what changed and why (it becomes the PR text), then stop.
    Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an.
@@ -1959,7 +2007,6 @@ Run these steps sequentially and execute each one as a command:
 If you think an acceptance test is wrong: stop and write the reason to the issue with
 `gh issue comment {n} --body-file .git/frage.md`. Never make the test fit.
 {ERROR_RULE.format(where=f"on issue #{n}")}
-Never approve or merge the PR yourself; the reviewer does that.
 
 ----- Issue #{n}: {selected['title']} -----
 {selected['body']}
@@ -4034,13 +4081,7 @@ def main() -> int:
             # würde sonst wegen längst behobener Tests jeden Push ablehnen.
             sync_issue_branch_with_main(n)
 
-        prompt = (f"{task}\n\n"
-                  "IMPORTANT RULES FOR THIS RUN:\n"
-                  "1. BRANCH CHECK: Verify with `git branch` that you are on the target branch before changing anything.\n"
-                  "2. PRECISE CHANGES: Never overwrite whole files! Use small Python scripts (e.g. with `open()`, `.replace()`) or `sed` to replace only the affected lines.\n"
-                  f"3. TEST DUTY: Run `{TEST_CMD}` before every commit and before you finish. A red test means: keep fixing the code.\n"
-                  "4. ESCALATION: Work without asking back. If you get stuck, write the problem as a comment on the issue or PR and stop.\n\n"
-                  "Use gh for all GitHub steps.")
+        prompt = f"{task}\n\n{RUN_RULES}"
         name = "OpenCode" if AGENT == "opencode" else "Qwen Code"
         if BACKEND == "litellm":
             name += f" mit {ACTIVE_MODEL}"
