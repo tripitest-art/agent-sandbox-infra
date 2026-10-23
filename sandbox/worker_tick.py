@@ -28,6 +28,7 @@ Worker-Zeile nennt dann dieses Modell. Antwortet keins, wartet er, ohne einen Ve
 LiteLLMs eigener Fallback reicht nicht: Bei der DeepSeek-Störung am 01.10. kam HTTP 200, dann
 hing der Stream ohne Daten; stream_timeout griff nicht.
 """
+import hashlib
 import inspect
 import json
 import os
@@ -201,6 +202,12 @@ CLAIM_DIR = os.environ.get("CLAIM_DIR", "/var/lib/worker-claims")
 # Ab diesem Alter räumt cleanup_claims() auf (#170). Bewusst lang: Eine .done-Marke verhindert
 # sonst, dass dieselbe Nacharbeit in einem anderen Slot erneut anläuft (#59).
 CLAIM_MAX_AGE_DAYS = 30
+# #311: Strikte Aufnahme. Ohne CLAIM_STRIKT=1 bleibt alles wie bisher; Stephan schaltet den
+# Schalter in der Worker-Umgebung ein. Dann loest ein neues `bereit` eine Parkmarke nur noch,
+# wenn sich der Issue-Text geaendert hat, und ein Issue ohne den Vermerk aus
+# docs/planer-ablauf.md Punkt 6 wird gar nicht erst aufgenommen.
+CLAIM_STRIKT: bool = os.environ.get("CLAIM_STRIKT", "") == "1"
+REFERENZ_VERMERK = "Referenzumsetzung: Akzeptanztests grün"
 # #183: Ein Issue mit `in-arbeit`, das so lange unverändert ist, ohne offenen PR auf seinem Branch
 # und ohne lebende Belegung, steht still. Der Takt meldet das einmal, setzt aber kein Label zurück
 # (Stephan entscheidet). 40 Minuten: länger als ein Lauf (`timeout -k 30 1860`).
@@ -1848,6 +1855,14 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
         cand_body = cand.get("body", "")
         if skip and skip(f"issue{cand_no}"):
             continue   # geparkt: der nächste Kandidat kommt dran, kein claim_issue
+
+        # #311: Bei CLAIM_STRIKT nimmt der Takt nur Aufträge mit dem Vermerk aus
+        # docs/planer-ablauf.md Punkt 6 auf; der nächste Kandidat kommt dran.
+        if CLAIM_STRIKT and not hat_referenz_vermerk(cand_body):
+            log(f"Issue #{cand_no} übersprungen: kein Vermerk „{REFERENZ_VERMERK}“ im Text "
+                "(Planer-Ablauf, Punkt 6).")
+            SKIPPED.append(f"#{cand_no}: kein Vermerk Referenzumsetzung")
+            continue
         cand_touches_main = touches_main_py(cand)
 
         # Regel 8: Ohne belegte Dateiliste ist der Kandidat nicht beurteilbar -> überspringen.
@@ -2836,6 +2851,58 @@ def _job_repo(skey: str) -> str | None:
     return None
 
 
+def text_hash(text: str | None) -> str | None:
+    """Hash des Issue-Textes für den Vergleich vor/nach dem Parken.
+
+    None, wenn `text` kein str ist oder nach dem Entfernen von Rand-Leerraum leer. Sonst die
+    ersten 16 Hexzeichen von sha256 über den Text mit "\r\n" und "\r" zu "\n" vereinheitlicht und
+    an beiden Enden gestrippt. Reine Funktion, wirft nie."""
+    if not isinstance(text, str):
+        return None
+    normalisiert = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalisiert:
+        return None
+    return hashlib.sha256(normalisiert.encode("utf-8")).hexdigest()[:16]
+
+
+def hat_referenz_vermerk(body: str | None) -> bool:
+    """True, wenn eine Zeile von `body` (nach optionalem Listenzeichen "-", "*", ">" und Leerraum)
+    mit REFERENZ_VERMERK beginnt, Groß-/Kleinschreibung egal. Die Schreibweise „gruen“ statt „grün“
+    zählt ebenfalls. None oder kein str: False. Reine Funktion, wirft nie."""
+    if not isinstance(body, str):
+        return False
+    gesucht = (REFERENZ_VERMERK.lower(), REFERENZ_VERMERK.lower().replace("grün", "gruen"))
+    for zeile in body.splitlines():
+        zeile = zeile.strip()
+        while zeile[:1] in ("-", "*", ">"):
+            zeile = zeile[1:].lstrip()
+        if zeile.lower().startswith(gesucht):
+            return True
+    return False
+
+
+def issue_body_text(skey: str) -> str | None:
+    """Text des Issues zu einem Auftragsschlüssel `issue<N>` (mit oder ohne Projektvorsatz
+    `<projekt>/`) über gh("issue", "view", str(N), "--json", "body", repo=repo) mit
+    repo = _job_repo(skey). None bei fremdem Schlüssel, unbekanntem Projekt, gh-Fehler oder
+    fehlendem Feld. Wirft nie."""
+    repo = _job_repo(skey)
+    if repo is None:
+        return None
+    key = skey.split("/", 1)[1] if "/" in skey else skey
+    m = _ISSUE_JOB_KEY_RE.match(key)
+    if not m:
+        return None
+    try:
+        antwort = gh("issue", "view", m.group(1), "--json", "body", repo=repo)
+    except Exception:
+        return None
+    if not isinstance(antwort, Mapping):
+        return None
+    body = antwort.get("body")
+    return body if isinstance(body, str) else None
+
+
 def job_still_open(skey: str) -> bool:
     """True, wenn der Auftrag noch offen ist. `skey` = PREFIX + Schlüssel:
     `pr<N> @<sha>` / `text<N> @<sha>` -> PR N offen (state OPEN); `issue<N>` -> Issue N offen.
@@ -2886,11 +2953,22 @@ def idle_message(parked: str | None, skipped: list[str]) -> str:
 
 def versuch_zaehlen(state: dict, skey: str, now: float | None = None) -> int:
     """Zählt einen Versuch: state[skey] += 1 und state[f"_versuch:{skey}"] = now (Standard jetzt_s()).
-    Gibt den neuen Zählerstand zurück. main() ersetzt damit `state[skey] = state.get(skey, 0) + 1`."""
+    Gibt den neuen Zählerstand zurück. main() ersetzt damit `state[skey] = state.get(skey, 0) + 1`.
+
+    Mit CLAIM_STRIKT merkt der Zähler zusätzlich den Hash des Issue-Textes in
+    `state[f"_text:{skey}"]`; entparken() vergleicht später dagegen. Eine Ausnahme oder ein
+    leerer Text beim Abfragen verhindert das Zählen nicht (#311)."""
     aktuell = jetzt_s() if now is None else now
     neuer_stand = state.get(skey, 0) + 1
     state[skey] = neuer_stand
     state[f"_versuch:{skey}"] = aktuell
+    if CLAIM_STRIKT:
+        try:
+            text_stand = text_hash(issue_body_text(skey))
+        except Exception:
+            text_stand = None
+        if text_stand is not None:
+            state[f"_text:{skey}"] = text_stand
     return neuer_stand
 
 
@@ -2932,7 +3010,12 @@ def entparken(state: dict, bereit_seit: Callable[[str], float | None]) -> list[s
     liegt. Fehlt `_versuch:<skey>` (Zustand aus der Zeit vor dieser Änderung), bleibt die Marke
     (im Zweifel geparkt). Wirft bereit_seit, bleibt die Marke. Pro entfernter Marke eine Logzeile
     „<skey>: wieder auf bereit gesetzt, Parkmarke entfernt.“. Gibt die entfernten skey zurück.
-    Speichert nicht (main speichert danach)."""
+    Speichert nicht (main speichert danach).
+
+    Mit CLAIM_STRIKT und gemerktem Text-Hash (`_text:<skey>`) fällt die Marke zusätzlich nur,
+    wenn der aktuelle Issue-Text vom gemerkten abweicht. Ist er unverändert (genau eine Logzeile
+    je bereit-Zeitpunkt) oder nicht abfragbar, bleibt der Auftrag geparkt (#311). Ohne Schalter
+    oder ohne gemerkten Hash gilt das bisherige Verhalten."""
     entfernt: list[str] = []
     for key in list(state):
         if not key.startswith("_park:"):
@@ -2948,12 +3031,29 @@ def entparken(state: dict, bereit_seit: Callable[[str], float | None]) -> list[s
             b_ts = bereit_seit(skey)
         except Exception:
             continue
-        if b_ts is not None and b_ts > versuch_ts:
-            state.pop(key, None)
-            state.pop(skey, None)
-            state.pop(f"_versuch:{skey}", None)
-            log(f"{skey}: wieder auf bereit gesetzt, Parkmarke entfernt.")
-            entfernt.append(skey)
+        if b_ts is None or b_ts <= versuch_ts:
+            continue
+        text_key = f"_text:{skey}"
+        if CLAIM_STRIKT and text_key in state:
+            gemerkt = state.get(text_key)
+            try:
+                aktuell = text_hash(issue_body_text(skey))
+            except Exception:
+                aktuell = None
+            if aktuell is None or aktuell == gemerkt:
+                gleich_key = f"_text_gleich:{skey}"
+                if aktuell is not None and state.get(gleich_key) != b_ts:
+                    state[gleich_key] = b_ts
+                    log(f"{skey}: bereit gesetzt, aber der Issue-Text ist seit dem letzten "
+                        "Versuch unverändert, bleibt geparkt.")
+                continue
+        state.pop(key, None)
+        state.pop(skey, None)
+        state.pop(f"_versuch:{skey}", None)
+        state.pop(text_key, None)
+        state.pop(f"_text_gleich:{skey}", None)
+        log(f"{skey}: wieder auf bereit gesetzt, Parkmarke entfernt.")
+        entfernt.append(skey)
     return entfernt
 
 
