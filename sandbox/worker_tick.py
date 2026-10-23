@@ -54,6 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py l
 import agent_settings  # noqa: E402
 import projects  # noqa: E402
 import worker_frame  # noqa: E402  (#234) deterministischer Rahmen für Branch, Test und PR-Text
+import repomap  # noqa: E402  (#227) kompakte Symbol-Map der betroffenen Dateien für den Auftrag
 
 PROJECTS = projects.load_projects()   # ohne /etc/agent-projects.json: sc-digger allein
 # Aktives Projekt dieses Laufs. Ohne Projektliste bleiben die Vorgaben und die Umgebung (BASE_WORKDIR,
@@ -1931,6 +1932,12 @@ Never approve or merge the PR yourself; the reviewer does that.
 ----- Issue #{n}: {selected['title']} -----
 {selected['body']}
 ----- Ende Issue -----"""
+    # #227: Kompakte Symbol-Map der betroffenen Dateien anhängen; ohne Treffer bleibt
+    # der Auftrag exakt wie bisher (bestehende Auftrags-Tests bleiben grün).
+    karte = repomap.build_repomap(Path(WORKDIR), sorted(cand_files))
+    if karte:
+        task += (f"\n----- Repomap (vom Taktgeber erzeugt) -----\n"
+                 f"{karte}\n----- Ende Repomap -----\n")
     return f"issue{n}", task, None, None
 
 
