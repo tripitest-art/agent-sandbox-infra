@@ -637,3 +637,44 @@ def test_seite_weckt_ueber_die_relative_adresse_und_den_gemerkten_token():
     assert 'fetch("api/wake"' in js and "X-Dashboard-Token" in js
     # Ein 403 heißt: Token abgelehnt oder Wecken aus -> gemerkten Token vergessen.
     assert "r.status===403" in js and 'sessionStorage.removeItem("wt")' in js
+
+
+# --- Warteschlange übersprungener Issues -------------------------------------------------------
+
+def test_warteschlange_aus_log_und_uebernahme_entfernt(tmp_path):
+    log = tmp_path / "worker.log"
+    log.write_text(
+        "2026-10-23 12:24:17 [w2] Issue #282 übersprungen: Regel 8\n"
+        "2026-10-23 12:25:00 [w2] Issue #281 übersprungen: Grund A\n"
+        "2026-10-23 12:26:00 [w2] Issue #281 erfolgreich auf 'in-arbeit' gesetzt.\n",
+        encoding="utf-8",
+    )
+    state = _dash(tmp_path).state()
+    assert state["warteschlange"] == [{"issue": 282, "grund": "Regel 8"}]
+    assert state["kopf"]["wartend"] == 1
+
+
+def test_api_state_liefert_die_warteschlange(tmp_path):
+    log = tmp_path / "worker.log"
+    log.write_text("2026-10-23 12:24:17 [w2] Issue #282 übersprungen: Grund A\n", encoding="utf-8")
+    server = d.ThreadingHTTPServer(("127.0.0.1", 0), d.make_handler(_dash(tmp_path), interval=0.01))
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        state = json.load(urllib.request.urlopen(base + "/api/state", timeout=5))
+        assert state["warteschlange"] == [{"issue": 282, "grund": "Grund A"}]
+        assert state["kopf"]["wartend"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_seite_zeigt_wartet_abschnitt_und_kopf_wartend():
+    start = d.PAGE.index("function renderWartet(")
+    js = d.PAGE[start:d.PAGE.index("\nfunction render(s){", start)]
+    assert "style.display=box.style.display=sichtbar" in js
+    assert '"#"+x.issue' in js and "x.grund" in js
+    assert "renderWartet(s.warteschlange||[])" in d.PAGE
+    assert 'id="wartet-titel"' in d.PAGE and ">Wartet<" in d.PAGE
+    assert '["Wartend",s.kopf.wartend]' in d.PAGE
