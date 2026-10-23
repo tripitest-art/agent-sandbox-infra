@@ -639,6 +639,71 @@ def test_reviewer_zeile_nennt_nach_dem_ausweichen_das_zweite_modell(monkeypatch,
     assert draft.startswith("<!-- PR #7 ") and "Modell longctx-lite Token 1000/100" in draft.splitlines()[0]
 
 
+def test_ausfall_des_ersten_modells_weicht_auf_das_zweite_aus(monkeypatch, tmp_path, capsys):
+    """#275: Antwortet das erste Review-Modell nicht, geht derselbe Aufruf im selben Takt an das
+    zweite eingestellte Modell. Der Entwurf nennt den Reviewer, der wirklich geantwortet hat, und
+    nur der Klassenname der Ausnahme kommt ins Log (Regel 5)."""
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "longctx-lite")
+    _fake_github(monkeypatch, [_pr()])
+    aufrufe = []
+
+    def call_llm(model, messages):
+        aufrufe.append(model)
+        if model == "coder-glm":
+            raise urllib.error.HTTPError("https://example.invalid", 503, "geheimer Text", None, None)
+        return OK_REVIEW, {"prompt_tokens": 1000, "completion_tokens": 100}
+
+    monkeypatch.setattr(r, "call_llm", call_llm)
+    assert r.run_once() == 0
+    assert aufrufe == ["coder-glm", "longctx-lite"]
+    draft = next((tmp_path / "reviews").glob("pr7-*.md")).read_text(encoding="utf-8")
+    assert "Reviewer: longctx-lite" in draft and "Reviewer: coder-glm" not in draft
+    log = capsys.readouterr().out
+    assert "Modell coder-glm antwortet nicht (HTTPError), weiche auf longctx-lite aus" in log
+    assert "geheimer Text" not in log
+    # Der Fehlschlag bleibt für die Ausfallmeldung (#273) gezählt.
+    assert r.load_state()["ausfall"]["coder-glm"]["fehler"] == 1
+
+
+def test_ausfall_weicht_nicht_auf_die_familie_des_workers_aus(monkeypatch, tmp_path, capsys):
+    """#275: Regel 6 bleibt strenger als die Verfügbarkeit — das Ersatzmodell muss unabhängig
+    vom Worker sein, sonst gibt der Takt wie bisher auf."""
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "longctx-lite")
+    calls = _fake_github(monkeypatch, [_pr(body="Closes #5\n\nWorker: Gemini Flash\n")])
+
+    def call_llm(model, messages):
+        calls.setdefault("models", []).append(model)
+        raise urllib.error.URLError("Modell weg")
+
+    monkeypatch.setattr(r, "call_llm", call_llm)
+    assert r.run_once() == 0
+    assert calls["models"] == ["coder-glm"]
+    assert not list((tmp_path / "reviews").glob("pr7-*.md"))
+    assert "nächster Takt" in capsys.readouterr().out
+
+
+def test_ausfall_beider_modelle_gibt_der_takt_auf(monkeypatch, tmp_path, capsys):
+    """#275: Ohne drittes Modell bleibt es beim bisherigen Verhalten: genau zwei Aufrufe, kein
+    Entwurf, und die Ausfallzählung (#273) erfasst beide Aliasse."""
+    monkeypatch.setattr(r, "REVIEW_MODEL_BIG", "longctx-lite")
+    calls = _fake_github(monkeypatch, [_pr()])
+    aufrufe = []
+
+    def call_llm(model, messages):
+        aufrufe.append(model)
+        raise OSError("Modell weg")
+
+    monkeypatch.setattr(r, "call_llm", call_llm)
+    assert r.run_once() == 0
+    assert aufrufe == ["coder-glm", "longctx-lite"]
+    assert not list((tmp_path / "reviews").glob("pr7-*.md"))
+    log = capsys.readouterr().out
+    assert "Modell coder-glm antwortet nicht (OSError), weiche auf longctx-lite aus" in log
+    assert "Modell longctx-lite antwortet nicht (OSError), nächster Takt" in log
+    zustand = r.load_state()["ausfall"]
+    assert zustand["coder-glm"]["fehler"] == 1 and zustand["longctx-lite"]["fehler"] == 1
+
+
 def test_unusable_answer_is_retried_once_then_dropped(monkeypatch, capsys):
     calls = _fake_github(monkeypatch, [_pr()], llm_text="Mein Review: sieht gut aus")
     r.run_once(); r.run_once(); r.run_once()
