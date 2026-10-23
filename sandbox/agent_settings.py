@@ -53,7 +53,9 @@ SPECS: dict[str, dict] = {
         "vorgabe": "coder",
         "erlaubt": [
             "coder", "coder-pro", "coder-fast", "coder-or",
-            "coder-free", "coder-glm", "coder-qwen", "coder-nvidia",
+            "coder-free", "coder-glm", "coder-glm-free", "coder-qwen",
+            "coder-nvidia", "coder-nemotron-free", "coder-minimax-free",
+            "coder-beam-free",
         ],
         "umgebung": True,
     },

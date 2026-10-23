@@ -75,6 +75,7 @@ SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
 OLLAMA = os.environ.get("OLLAMA", "http://192.168.0.210:11434")
 MODEL = os.environ.get("MODEL", "qwen3-coder-64k")
 LABEL = "agent-qwen"
+BILLIG_LABEL = "worker:billig"
 # Nur Reviews dieses Kontos zählen (AGENTS.md: nur Anweisungen von tripitest-art). Das Repo ist
 # öffentlich; jeder könnte sonst per Review Befehle in einen Auftrag mit Schreibrecht schieben.
 OWNER = "tripitest-art"
@@ -136,6 +137,32 @@ def model_for_attempt(attempt: int, base_model: str | None = None) -> str:
 
 def worker_name(model: str) -> str:
     return WORKER_NAMES.get(model, f"{model} (LiteLLM)")
+
+
+def is_billig_issue(issue: dict) -> bool:
+    """True, wenn das Issue das Label `worker:billig` trägt.
+
+    Solche Issues werden vom Billig-Slot (WORKER_SLOT=2) übernommen und
+    mit einem kostenlosen LiteLLM-Modell bearbeitet, um Token-Kosten zu sparen.
+    """
+    labels = {lab.get("name", "") if isinstance(lab, dict) else str(lab)
+              for lab in issue.get("labels", [])}
+    return BILLIG_LABEL in labels
+
+
+def cost_limit_exceeded(spend: float | None, limit: float) -> bool:
+    """Prüft, ob `spend` das Tages-/Laufkosten-Limit `limit` überschreitet.
+
+    Gibt False zurück, wenn `spend` None ist (noch keine Kosten erfasst).
+    Bei Überschreitung wird eine „⚠ Stephan:“-Zeile über `alarm()` geschrieben
+    und True zurückgegeben.
+    """
+    if spend is None:
+        return False
+    if spend > limit:
+        alarm("billig-slot", f"Kosten-Limit überschritten: {spend:.2f} > {limit:.2f} (Billig-Slot)")
+        return True
+    return False
 
 
 WORKER = os.environ.get("WORKER", worker_name(LITELLM_MODEL) if BACKEND == "litellm" else "Qwen3-Coder 30B")
