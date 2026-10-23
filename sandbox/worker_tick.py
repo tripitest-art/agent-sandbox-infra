@@ -1762,9 +1762,9 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
               state: dict | None = None):
     """(Schlüssel, Auftrag, None, None) für das älteste freie Issue ohne Konflikt oder None.
 
-    Neu: die Auswahl ändert KEINE Labels mehr — kein claim_issue-Aufruf. Der Auftragstext bleibt
-    wörtlich wie bisher; Schritt 1 des Auftrags an das Modell bleibt
-    `gh issue edit <N> --add-label in-arbeit --remove-label bereit`.
+    Das Label `in-arbeit` setzt `main()` per `claim_issue` vor dem Agentenlauf; der Auftrag nennt
+    diesen Befehl nur noch als bereits erledigt und enthält keine PR-Vorlage — den PR-Text baut
+    `open_pr()` deterministisch (#296).
 
     Neu (#32):
     - `active_in_progress_issues() is None` -> kein Auftrag (Rückgabe None), Logzeile mit Grund.
@@ -1900,18 +1900,21 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
     n, branch = selected["number"], issue_branch(selected["number"])
 
     task = f"""Du setzt Issue #{n} um (AGENTS.md, Worker-Aufgaben → Worker). Du bist Worker: {WORKER}.
-The issue is below; it is the contract. Run these steps sequentially and execute each one as a command:
+The issue is below; it is the contract.
 
-1. `gh issue edit {n} --add-label in-arbeit --remove-label bereit`
-2. Der Takt hat den Branch {branch} ausgecheckt und den Akzeptanztest bereits als Commit gesichert.
-3. Never modify the file tests/acceptance/test_issue_{n}.py.
-4. Implement the issue, only in the files listed under „### Betroffene Dateien“. If that section
+Already done by the tick, do not run it: `gh issue edit {n} --add-label in-arbeit --remove-label bereit`
+Der Takt hat den Branch {branch} ausgecheckt und den Akzeptanztest bereits als Commit gesichert.
+
+Run these steps sequentially and execute each one as a command:
+
+1. Never modify the file tests/acceptance/test_issue_{n}.py.
+2. Implement the issue, only in the files listed under „### Betroffene Dateien“. If that section
    says the expectation of an existing test changes, adjust exactly that spot. Add the tests from
    „### Fertig, wenn“.
-5. `{TEST_CMD}`. If a test is red: read the error, fix the code (not the acceptance test), and
-   repeat step 5. A red test is not a reason to stop, it is the next work item. Continue only when
+3. `{TEST_CMD}`. If a test is red: read the error, fix the code (not the acceptance test), and
+   repeat step 3. A red test is not a reason to stop, it is the next work item. Continue only when
    everything is green.
-6. Save all changes in commits (`git add -A && git commit -m "<what and why>"`). Each commit
+4. Save all changes in commits (`git add -A && git commit -m "<what and why>"`). Each commit
    message describes what changed and why (it becomes the PR text), then stop.
    Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an.
    {PUSH_RULE}
@@ -1919,8 +1922,6 @@ If you think an acceptance test is wrong: stop and write the reason to the issue
 `gh issue comment {n} --body-file .git/frage.md`. Never make the test fit.
 {ERROR_RULE.format(where=f"on issue #{n}")}
 Never approve or merge the PR yourself; the reviewer does that.
-
-{template_rules()}
 
 ----- Issue #{n}: {selected['title']} -----
 {selected['body']}
@@ -3798,12 +3799,12 @@ def main() -> int:
             sync_issue_branch_with_main(n)
 
         prompt = (f"{task}\n\n"
-                  "WICHTIGE REGELN FÜR DIESEN LAUF:\n"
-                  "1. BRANCHE-CHECK: Verifiziere mit `git branch`, ob du auf dem Ziel-Branch bist, bevor du etwas änderst.\n"
-                  "2. PRÄZISE ÄNDERUNGEN: Überschreibe niemals ganze Dateien! Nutze kleine Python-Skripte (z.B. mit `open()`, `.replace()`) oder `sed`, um nur die betroffenen Zeilen auszutauschen.\n"
-                  f"3. TEST-PFLICHT: Führe vor jedem Push zwingend `{TEST_CMD}` aus. Ein roter Test heißt: Code weiter korrigieren.\n"
-                  "4. ESKALATION: Arbeite ohne Rückfragen. Kommst du nicht weiter, schreibe das Problem als Kommentar ins Issue bzw. den PR und beende deine Arbeit.\n\n"
-                  "Nutze gh für alle GitHub-Schritte.")
+                  "IMPORTANT RULES FOR THIS RUN:\n"
+                  "1. BRANCH CHECK: Verify with `git branch` that you are on the target branch before changing anything.\n"
+                  "2. PRECISE CHANGES: Never overwrite whole files! Use small Python scripts (e.g. with `open()`, `.replace()`) or `sed` to replace only the affected lines.\n"
+                  f"3. TEST DUTY: Run `{TEST_CMD}` before every commit and before you finish. A red test means: keep fixing the code.\n"
+                  "4. ESCALATION: Work without asking back. If you get stuck, write the problem as a comment on the issue or PR and stop.\n\n"
+                  "Use gh for all GitHub steps.")
         name = "OpenCode" if AGENT == "opencode" else "Qwen Code"
         if BACKEND == "litellm":
             name += f" mit {ACTIVE_MODEL}"
