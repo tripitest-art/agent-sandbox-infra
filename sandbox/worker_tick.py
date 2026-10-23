@@ -87,6 +87,11 @@ LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "cod
 # Hinweis, damit ein Ausweichen im Log nicht wie ein kostenloser Go-Lauf aussieht.
 BEZAHLTE_MODELLE: dict[str, str] = {"coder": "DeepSeek-API", "coder-or": "OpenRouter"}
 PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT", "45"))   # Sekunden je Probe
+# #266: Eine gelungene Primärprobe gilt PROBE_CACHE_S Sekunden (Vorgabe 10 Minuten). Jeder Lauf ist
+# ein frischer Prozess; den Zeitstempel trägt deshalb der Zustand, den der nächste Lauf wieder
+# einliest. Ein frischer Treffer erspart LiteLLM die Probe, ein Fehlschlag wird nie vermerkt.
+PROBE_CACHE_S = float(os.environ.get("PROBE_CACHE_S", "600"))
+PROBE_CACHE_KEY = "_probe_cache"   # Schlüssel im Zustand: {"modell": str, "ok_at": Zahl}
 # #180: Erst nach 20 Minuten ist ein LiteLLM-Ausfall eine Meldung wert; ein Proxy-Neustart
 # oder ein kurzer Netzaussetzer bleibt still. Die Schlüssel liegen im Slot-Zustand, deshalb
 # meldet nur der erste Slot.
@@ -2650,6 +2655,44 @@ def budget_problem(info: dict | None) -> str | None:
     return f"LiteLLM-Tagesbudget aufgebraucht (Reset {str(reset)[:16] if reset else 'unbekannt'})"
 
 
+def probe_cache_hit(state: dict, primary: str, now: float | None = None) -> str | None:
+    """`primary` zurückgeben, wenn der gecachte Treffer frisch und passend ist, sonst None.
+
+    Treffer, wenn `state[PROBE_CACHE_KEY]` ein `dict` ist, dessen
+    - `"modell"` ein `str` ist und genau `primary` entspricht, und
+    - `"ok_at"` eine Zahl (kein `bool`) ist mit `0 <= now - ok_at <= PROBE_CACHE_S`
+      (`now` ist Standard `jetzt_s()`; Uhrrückläufer mit negativem Alter → None).
+    Jeder andere Fall (kein Eintrag, fremdes Modell, abgelaufen, unlesbare Daten, `state`
+    kein `dict`) gibt None und ändert nichts; die Funktion wirft nie.
+    """
+    if not isinstance(state, dict):
+        return None
+    eintrag = state.get(PROBE_CACHE_KEY)
+    if not isinstance(eintrag, dict) or eintrag.get("modell") != primary:
+        return None
+    ok_at = eintrag.get("ok_at")
+    if isinstance(ok_at, bool) or not isinstance(ok_at, (int, float)):
+        return None
+    if now is None:
+        now = jetzt_s()
+    if not 0 <= now - ok_at <= PROBE_CACHE_S:
+        return None
+    return primary
+
+
+def probe_cache_speichern(state: dict, primary: str, now: float | None = None) -> None:
+    """Nach gelungener Primärprobe den Eintrag setzen; **kein** `save_state()` hier.
+
+    Genau: `state[PROBE_CACHE_KEY] = {"modell": primary, "ok_at": now}` (vorhandene
+    Einträge werden vollständig überschrieben, nie vermischt). `now` ist Standard
+    `jetzt_s()`. Der Aufrufer speichert — in `main()` direkt danach einmal
+    `save_state(state)`.
+    """
+    if now is None:
+        now = jetzt_s()
+    state[PROBE_CACHE_KEY] = {"modell": primary, "ok_at": now}
+
+
 def probe_model(model: str) -> str | None:
     """None, wenn `model` über LiteLLM binnen PROBE_TIMEOUT antwortet, sonst der Grund.
 
@@ -3726,19 +3769,31 @@ def main() -> int:
             # Erst hier prüfen: ohne Arbeit kostet der Takt keine Anfrage. Vor dem Zähler, damit ein
             # gestörter Anbieter keine Versuche verbraucht.
             primary = model_for_attempt(state.get(skey, 0))
-            try:
-                model, failed = choose_model(primary)
-            except TypeError:
-                model, failed = choose_model()
+            # #266: Gilt die Primärprobe aus einem früheren Lauf noch, entfällt die Anfrage an
+            # LiteLLM. `failed` muss auch beim Treffer existieren, sonst NameError vor dem Agenten.
+            model = probe_cache_hit(state, primary)
+            failed: list[str] = []
             if model is None:
-                log_on_change(state, LAST_WORK, f"{skey} kein Modell",
-                              f"{skey}: kein Modell antwortet ({'; '.join(failed)}), warte. Versuch zählt nicht.")
-                return 0
-            if failed:
-                log(f"{'; '.join(failed)} – weiche auf {model} aus.")
-                hinweis = bezahltes_ausweichen(primary, model)
-                if hinweis:
-                    log(hinweis)
+                try:
+                    model, failed = choose_model(primary)
+                except TypeError:
+                    model, failed = choose_model()
+                if model is None:
+                    log_on_change(state, LAST_WORK, f"{skey} kein Modell",
+                                  f"{skey}: kein Modell antwortet ({'; '.join(failed)}), warte. Versuch zählt nicht.")
+                    return 0
+                if failed:
+                    log(f"{'; '.join(failed)} – weiche auf {model} aus.")
+                    hinweis = bezahltes_ausweichen(primary, model)
+                    if hinweis:
+                        log(hinweis)
+                # Nur die Primärprobe cachen: Ein bezahltes Ausweichmodell beantwortet die Frage
+                # nicht, ob das Primärmodell antwortet.
+                if model == primary:
+                    probe_cache_speichern(state, primary)
+                    save_state(state)
+            else:
+                log(f"{skey} Modellprobe übersprungen (Cache-Treffer).")
             if model != ACTIVE_MODEL:
                 use_model(model)
                 # Die Aufträge enthalten „Worker: …“; mit dem neuen Namen neu bauen.
