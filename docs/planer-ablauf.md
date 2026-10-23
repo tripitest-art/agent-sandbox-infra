@@ -59,7 +59,9 @@ The Planner writes issues, never code: no branches, no commits, no PRs, no merge
    in a fake, one `gh` fake answering every query with the same list) and blocked `sandbox/worker_tick.py` for hours. Also reject:
    `lambda *a, **k: <list>` as a catch-all `gh` fake (separate the candidate list from the `in-arbeit` list and give candidates an
    `author` and a „Betroffene Dateien“ section, see `FakeGH` in `tests/test_worker_tick.py`), and names used in fakes that the
-   test file does not define. Record under context: „Referenzumsetzung: Akzeptanztests grün“.
+   test file does not define. Record the result under context as its own line, exactly in this spelling:
+
+   Referenzumsetzung: Akzeptanztests grün
 7. **Present draft:** Present title, body, and labels to Stephan in chat; only create the issue after his approval.
 8. **Create issue** with labels `worker-task`, `phase-N`, `bereit` (or `entwurf` without shell), exactly one
    `agent-<family>` (see „Agenten-Labels“), and `blockiert` if dependent on other issues. Report issue number and link.
