@@ -2096,7 +2096,8 @@ def format_opencode_step(part: object) -> str:
 # main() liest ihn nach run_agent() und nimmt dann den Versuch zurück (#106).
 LAST_AGENT_ERROR: str | None = None
 # Token-Usage und Cost des letzten Agentenlaufs für audit("agent_run_finished", ...) (#222).
-# Wird von log_stream_line() (Qwen) befüllt; für OpenCode bleibt None.
+# Wird von log_stream_line() für beide Agenten befüllt: Qwen aus dem `result`-Event, OpenCode
+# aus `step_finish` mit reason "stop" (#316).
 LAST_AGENT_USAGE: dict | None = None
 # Nummer des PRs, den open_pr() in diesem Lauf neu angelegt hat, sonst None (#222).
 LAST_OPENED_PR: int | None = None
@@ -2108,6 +2109,16 @@ _API_ERROR_CUT_RE = re.compile(r"\s+(?:Key|Received)\b")
 _API_ERROR_KEY_RE = re.compile(r"\bsk-\S*")
 _API_ERROR_CODE_RE = re.compile(r"^(\d{3})\b")
 _API_ERROR_MAX = 160
+
+
+def _tokenzahl(value: object) -> int | None:
+    """Token-Zahl aus einem OpenCode-Event, sonst None (#316).
+
+    Bewusst typgestreng: nur echte `int` (kein `bool`) gelten als belegt, damit
+    `dashboard_stats.py` nie einen unbrauchbaren Wert aus dem Audit-Log liest."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
 
 
 def short_api_error(message: str) -> str:
@@ -2144,6 +2155,9 @@ def log_stream_line(line: str) -> None:
     #271). Ein Anbieterfehler setzt LAST_AGENT_ERROR und schreibt dessen Kurzfassung als eigene
     Logzeile (#106). Jede Zeile landet zusätzlich im Merker für `detect_infra_error` (#243)."""
     global LAST_AGENT_ERROR
+    # Ein `global` je Funktion, nicht im OpenCode-Zweig: Python verbietet die Deklaration,
+    # nachdem der Qwen-Zweig LAST_AGENT_USAGE bereits zugewiesen hat (#316).
+    global LAST_AGENT_USAGE
     merke_agent_zeile(line)
 
     def say(text: str) -> None:
@@ -2217,6 +2231,26 @@ def log_stream_line(line: str) -> None:
             say(("✗ Fehler:\n" if fehler else "") + _clip(ausgabe))
     elif kind == "step_finish" and isinstance(part, dict):
         if part.get("reason") == "stop":
+            # Usage fuer agent_run_finished Audit-Event speichern (#222), Paritaet zum
+            # Qwen-`result`-Zweig: dashboard_stats.py sieht damit beide Agenten (#316).
+            try:
+                tokens = part.get("tokens")
+                if not isinstance(tokens, dict):
+                    tokens = {}
+                cache = tokens.get("cache")
+                if not isinstance(cache, dict):
+                    cache = {}
+                kosten = part.get("cost")
+                LAST_AGENT_USAGE = {
+                    "input_tokens": _tokenzahl(tokens.get("input")),
+                    "output_tokens": _tokenzahl(tokens.get("output")),
+                    "cache_read_input_tokens": _tokenzahl(cache.get("read")),
+                    "cost": (float(kosten) if isinstance(kosten, (int, float))
+                             and not isinstance(kosten, bool) else 0.0),
+                }
+            except Exception:
+                # Wie format_opencode_step(): der Logpfad darf an keinem Inhalt scheitern.
+                pass
             say(f"[OpenCode: stop{format_opencode_step(part)}]")
     elif kind == "error":
         err = event.get("error")
@@ -2464,7 +2498,8 @@ def run_agent(prompt: str) -> int:
     (`MAX_TRIES`), gibt aber Slot und Datei früher frei.
 
     Gibt den Exit-Code zurück. Token-Usage und Cost des Laufs stehen danach in
-    `LAST_AGENT_USAGE` (dict oder None, #222); die Rückgabe bleibt bewusst ein int, weil
+    `LAST_AGENT_USAGE` (dict oder None, #222) — für Qwen Code wie für OpenCode gleich (#316);
+    die Rückgabe bleibt bewusst ein int, weil
     tests/acceptance/test_issue_106.py und -178.py sie zeichengenau prüfen."""
     global LAST_AGENT_USAGE
     LAST_AGENT_USAGE = None
