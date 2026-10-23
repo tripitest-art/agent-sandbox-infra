@@ -596,6 +596,26 @@ def test_text_fix_job_ignores_complete_text(monkeypatch):
     assert w.text_fix_job() is None
 
 
+def test_text_fix_job_loggt_autofix_rueckfall(monkeypatch, capsys):
+    """#294: Scheitert `gh pr edit`, nennt das Log den Rückfall auf den Agentenauftrag."""
+    pr = _pr(number=112, branch="feature/issue-102", review_at=None)
+
+    def fake_gh(*args):
+        if args[:2] == ("pr", "list"):
+            return [pr]
+        if args[:2] == ("issue", "view"):
+            return {"labels": [{"name": "agent-qwen"}]}
+        if args[:2] == ("pr", "edit"):
+            raise RuntimeError("gh nicht erreichbar")
+        raise AssertionError(f"unerwarteter gh-Aufruf: {args}")
+
+    monkeypatch.setattr(w, "gh", fake_gh)
+    key, task, pr_no, _ = w.text_fix_job()
+    assert key == "text112@3373e35" and pr_no == 112
+    assert "no code" in task
+    assert "PR #112: Autofix fehlgeschlagen, Agentenauftrag als Rückfall." in capsys.readouterr().out
+
+
 def test_tasks_embed_template(monkeypatch):
     monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()]))
     _, task, _, _ = w.issue_job()
