@@ -57,6 +57,13 @@ SPECS: dict[str, dict] = {
         ],
         "umgebung": True,
     },
+    "LITELLM_MODEL_BILLIG": {
+        "text": "Modell-Alias des Billig-Slots (WORKER_SLOT=2, nur Issues mit Label worker:billig)",
+        "vorgabe": None,
+        "erlaubt": ["coder-mimo-free", "coder-deepseek-free", "coder-nemotron-free",
+                    "coder-minimax-free", "coder-beam-free"],
+        "umgebung": True,
+    },
 }
 
 
