@@ -52,6 +52,14 @@ The Planner writes issues, never code: no branches, no commits, no PRs, no merge
    **Without shell access:** Apply label `entwurf` instead of `bereit` and state in context:
    „Akzeptanztests noch nicht ausgeführt (Planer ohne Shell)“. Stephan or an agent with shell runs `issuecheck.py` and
    updates `entwurf` → `bereit`.
+   **Satisfiability check (before `bereit`):** A test that is red is not yet a test that *can* turn green. Before setting `bereit`,
+   write a throwaway reference implementation in a temporary worktree (never committed) and run the acceptance block against it:
+   it MUST pass. Reason: on 22/23 Oct 2026 four issues (#223, #224, #227, #264) reached the worker with unsatisfiable tests
+   (unconditional `pytest.fail(...)` bodies, `pytest.raises(AssertionError)` around the code under test, an undefined `TEST_CMD`
+   in a fake, one `gh` fake answering every query with the same list) and blocked `sandbox/worker_tick.py` for hours. Also reject:
+   `lambda *a, **k: <list>` as a catch-all `gh` fake (separate the candidate list from the `in-arbeit` list and give candidates an
+   `author` and a „Betroffene Dateien“ section, see `FakeGH` in `tests/test_worker_tick.py`), and names used in fakes that the
+   test file does not define. Record under context: „Referenzumsetzung: Akzeptanztests grün“.
 7. **Present draft:** Present title, body, and labels to Stephan in chat; only create the issue after his approval.
 8. **Create issue** with labels `worker-task`, `phase-N`, `bereit` (or `entwurf` without shell), exactly one
    `agent-<family>` (see „Agenten-Labels“), and `blockiert` if dependent on other issues. Report issue number and link.
