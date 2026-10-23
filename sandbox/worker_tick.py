@@ -250,6 +250,10 @@ _AUDIT_SECRET_KEYS = frozenset({"password", "secret", "api_key", "authorization"
 # Wie .github/scripts/acceptance_guard.py: Kommentare der Vorlage zählen nicht.
 _LINK_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b", re.I)
 _WORKER_LINE_RE = re.compile(r"^[\s>*_-]*Worker[*_]*\s*:[\s*_]*\w", re.I | re.M)
+# Gleicher Fund wie _WORKER_LINE_RE, aber mit dem Inhalt hinter „Worker:“ als Gruppe: Der
+# deterministische Autofix übernimmt eine schon vorhandene Zeile, statt sie mit dem WORKER des
+# aktuellen Takts zu überschreiben (#294).
+_WORKER_LINE_CAPTURE_RE = re.compile(r"^[\s>*_-]*Worker[*_]*\s*:[\s*_]*(\S.*)$", re.I | re.M)
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 # Belegungsdateien werden nach dem Auftragsschlüssel benannt: alles außer A-Z a-z 0-9 . @ - wird „_“.
 _CLAIM_UNSAFE_RE = re.compile(r"[^A-Za-z0-9.@-]")
@@ -959,8 +963,10 @@ Never approve or merge the PR yourself; the reviewer does that.
 def text_fix_job(skip: Callable[[str], bool] | None = None):
     """(Schlüssel, Auftrag, PR-Nummer, pr_snapshot) für den ältesten PR mit unvollständigem Text.
 
-    Der Schlüssel hängt am Head-Commit: Neue Commits geben einen neuen Anlauf, sonst gilt
-    MAX_TRIES wie für jeden Auftrag.
+    Zuerst versucht `autofix_pr_text()` den Text ohne Modell zu vervollständigen (#234). Gelingt
+    das, ist der Kandidat erledigt und die Suche geht zum nächsten PR; erst wenn `gh pr edit`
+    scheitert, entsteht der Agentenauftrag als Rückfall. Der Schlüssel hängt am Head-Commit: Neue
+    Commits geben einen neuen Anlauf, sonst gilt MAX_TRIES wie für jeden Auftrag.
     """
     prs = gh("pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT), "--json",
              "number,headRefName,headRefOid,isCrossRepository,title,body")
@@ -979,6 +985,9 @@ def text_fix_job(skip: Callable[[str], bool] | None = None):
         key = f"text{n}@{pr['headRefOid'][:7]}"
         if skip and skip(key):
             continue   # geparkt: der nächste Kandidat kommt dran, der Takt läuft weiter
+        if autofix_pr_text(n, issue_no, pr.get("body")):
+            continue   # ohne Modell erledigt; der nächste Kandidat kommt dran
+        log(f"PR #{n}: Autofix fehlgeschlagen, Agentenauftrag als Rückfall.")
         task = f"""Im Text von PR #{n} (Issue #{issue_no}) fehlt: {", ".join(missing)}.
 Du bist Worker: {WORKER}. You only change the PR text, no code, no commit.
 Run these steps sequentially and execute each one as a command:
@@ -1939,11 +1948,18 @@ def autofix_pr_text(pr_no: int, issue_no: int, body: str | None = None) -> bool:
     Fehlt nichts (`pr_text_problems`), gibt die Funktion False zurück und ruft kein `gh` auf.
     Sonst baut sie mit `worker_frame.build_pr_body` einen vollständigen Text aus `pr_template()` und
     `WORKER`, schreibt ihn per `gh("pr", "edit", …)` und loggt die fehlenden Teile. Scheitert `gh`,
-    fällt sie auf `warn_text` zurück (nächster Takt trägt nach) und gibt False zurück."""
+    fällt sie auf `warn_text` zurück (nächster Takt trägt nach) und gibt False zurück.
+
+    Eine im alten `body` schon vorhandene `Worker:`-Zeile wird wörtlich übernommen – der Autofix
+    soll den Autor des PRs nicht mit dem Worker des aktuellen Takts überschreiben (#294). Fehlt
+    sie, gilt `WORKER` wie bisher; die Erkennung läuft intern aus `body`, die Signatur bleibt.
+    """
     missing = pr_text_problems(body, issue_no)
     if not missing:
         return False
-    text = worker_frame.build_pr_body(pr_template(), issue_no, WORKER)
+    m_worker = _WORKER_LINE_CAPTURE_RE.search(_HTML_COMMENT_RE.sub("", body or ""))
+    worker = m_worker.group(1).strip() if m_worker else WORKER
+    text = worker_frame.build_pr_body(pr_template(), issue_no, worker)
     try:
         gh("pr", "edit", str(pr_no), "--body", text)
     except Exception:
