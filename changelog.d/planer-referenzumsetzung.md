@@ -1,0 +1,1 @@
+- `docs/planer-ablauf.md`: Neuer Schritt vor `bereit`: Der Planer prüft mit einer Wegwerf-Referenzumsetzung in einem temporären Worktree, dass der Akzeptanztest grün werden kann (nicht nur rot ist). Anlass: #223, #224, #227 und #264 erreichten den Worker mit unerfüllbaren Tests und sperrten `worker_tick.py` (#283).
