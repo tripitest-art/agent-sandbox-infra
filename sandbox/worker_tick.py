@@ -41,6 +41,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -141,6 +142,12 @@ DONE = "erledigt"           # Schlüssel in STATE: angekommene Nacharbeiten, nic
 # Minuten je Lauf des Agenten. Über LiteLLM kürzer: das Modell ist schneller, und jede Minute
 # kostet Token; 90 min hat bei #122 nur Zeit verbrannt.
 RUN_TIMEOUT = int(os.environ.get("RUN_TIMEOUT_MIN", "30" if BACKEND == "litellm" else "90")) * 60
+# Ohne Dateiänderung und ohne Commit seit so vielen Minuten wird der Agent beendet (#281).
+# Am 22./23.10.2026 liefen #223 und #227 je die vollen 30 Minuten, ohne dass der Agent etwas
+# schrieb; solange standen andere Aufträge an denselben Dateien (Regel 8). 15 Minuten, weil
+# schnelle Läufe (z. B. #224 in 137 Sekunden) weit darunter bleiben und der Agent vor der
+# ersten Änderung erst Dateien lesen muss.
+NO_PROGRESS_MINUTEN = int(os.environ.get("NO_PROGRESS_MIN", "15"))
 AGENT = os.environ.get("AGENT", "qwen-code")   # oder "opencode"
 # #217: Der Agentenprozess läuft nicht als root, sondern als eigener unprivilegierter Nutzer.
 # Damit kann das Modell über Shell-Aufrufe weder /etc/*.env (600 root) noch /root/.config/gh
@@ -2261,6 +2268,70 @@ def agent_identitaet() -> tuple[str | None, str | None]:
     return AGENT_USER, eintrag.pw_dir
 
 
+def workdir_zustand(cwd: str) -> str | None:
+    """Fingerabdruck des Arbeitsstands in `cwd`: HEAD-Zeile und `git status --porcelain` (#281).
+
+    Ein neuer Commit ändert die erste Zeile, eine neue oder geänderte Datei die zweite. Nur so
+    erkennt der Wächter, ob der Agent überhaupt etwas getan hat – nicht, ob es sinnvoll war.
+    None, sobald einer der beiden Aufrufe scheitert oder irgendetwas anderes schiefgeht: ein
+    unbekannter Zustand darf nie als „nichts geändert“ gelten. Wirft nie."""
+    try:
+        kopf = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True,
+                              text=True, check=False, env=ENV)
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True,
+                                text=True, check=False, env=ENV)
+        if kopf.returncode != 0 or status.returncode != 0:
+            return None
+        return kopf.stdout.strip() + "\n" + status.stdout.strip()
+    except Exception:
+        return None
+
+
+def ohne_fortschritt(vorher: str | None, jetzt: str | None, laufzeit_s: float) -> bool:
+    """True nur, wenn der Arbeitsstand seit `NO_PROGRESS_MINUTEN` unverändert ist (#281).
+
+    Zwei gleiche Zustände belegen Stillstand; ein unbekannter Zustand (None) belegt nichts und
+    ist deshalb nie „ohne Fortschritt“. Reine Funktion."""
+    return (vorher is not None and jetzt is not None and vorher == jetzt
+            and laufzeit_s >= NO_PROGRESS_MINUTEN * 60)
+
+
+def watchdog_pruefen(proc, vorher: str | None, seit: float, cwd: str,
+                     jetzt: float | None = None) -> bool:
+    """Ein Prüfschritt des Wächters: beendet den Agenten bei Stillstand (#281).
+
+    `seit` ist der Start des Agenten in Sekunden, `jetzt` standardmäßig `jetzt_s()`. Genau eine
+    WARNUNG-Zeile, dann `proc.terminate()` und True; sonst nichts und False. Wirft nie, damit
+    ein Fehler im Wächter den Agentenlauf nicht abbricht."""
+    try:
+        if jetzt is None:
+            jetzt = jetzt_s()
+        if not ohne_fortschritt(vorher, workdir_zustand(cwd), jetzt - seit):
+            return False
+        log(f"WARNUNG: Agent hat seit {int((jetzt - seit) // 60)} Minuten nichts geändert, "
+            "beende ihn.")
+        proc.terminate()
+        return True
+    except Exception:
+        return False
+
+
+def _waechter(proc, vorher: str | None, start: float) -> None:
+    """Prüft alle 60 Sekunden den Arbeitsstand, bis der Agent endet oder beendet wird (#281).
+
+    Daemon-Thread: er blockiert `run_agent()` nicht und wird mit dem Takt-Prozess beendet.
+    Fehler (etwa ein bereits geschlossener Prozess) enden nur den Thread."""
+    try:
+        while proc.poll() is None:
+            time.sleep(60)
+            if proc.poll() is not None:
+                return
+            if watchdog_pruefen(proc, vorher, start, WORKDIR):
+                return
+    except Exception:
+        return
+
+
 def run_agent(prompt: str) -> int:
     """Startet den Agenten; `timeout` beendet ihn hart, falls er selbst nicht aufhört.
 
@@ -2275,11 +2346,20 @@ def run_agent(prompt: str) -> int:
     GID behielte das Kind die Gruppe des Takts (auf dem Server 0) und der Rechte-Drop wäre nur
     halb.
 
+    Ein Wächter-Thread beendet den Agenten, wenn er seit `NO_PROGRESS_MINUTEN` weder eine
+    Datei geändert noch einen Commit angelegt hat (#281). Das zählt wie ein Fehlversuch
+    (`MAX_TRIES`), gibt aber Slot und Datei früher frei.
+
     Gibt den Exit-Code zurück. Token-Usage und Cost des Laufs stehen danach in
     `LAST_AGENT_USAGE` (dict oder None, #222); die Rückgabe bleibt bewusst ein int, weil
     tests/acceptance/test_issue_106.py und -178.py sie zeichengenau prüfen."""
     global LAST_AGENT_USAGE
     LAST_AGENT_USAGE = None
+    # Bezugspunkt vor dem Start: der Stand, den der Lauf vorfindet. `workdir_zustand()` ruft
+    # `subprocess.run()`; das muss vor dem Agenten-Popen passieren, damit Tests, die nur
+    # `subprocess.Popen` faken, weiter den Agentenaufruf sehen (#35, #72).
+    vorher = workdir_zustand(WORKDIR)
+    start = jetzt_s()
     cmd = ["timeout", "-k", "30", str(RUN_TIMEOUT + 60), *agent_cmd(prompt)]
     env = agent_env(ENV)
     user, home = agent_identitaet()
@@ -2290,6 +2370,7 @@ def run_agent(prompt: str) -> int:
                           stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                           errors="replace") as proc:
+        threading.Thread(target=_waechter, args=(proc, vorher, start), daemon=True).start()
         for line in proc.stdout:
             log_stream_line(line)
     return proc.returncode
