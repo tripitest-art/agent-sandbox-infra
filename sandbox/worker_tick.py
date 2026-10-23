@@ -85,6 +85,11 @@ LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 LITELLM_MODEL = agent_settings.value("LITELLM_MODEL", os.environ.get("LITELLM_MODEL", "coder"))
 # Ausweichmodelle (Aliase im LiteLLM-Proxy, der Key »worker« muss sie dürfen), durch Komma getrennt.
 LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "coder-go,coder,coder-or").split(",") if m.strip()]
+# #312: Billig-Slot. Slot 2 nimmt ausschließlich Issues mit BILLIG_LABEL an und probt nur freie
+# Aliase; ohne Einstellung verhält sich der Slot exakt wie jeder andere.
+BILLIG_LABEL: str = "worker:billig"
+BILLIG_MODEL: str | None = agent_settings.value("LITELLM_MODEL_BILLIG", None)
+IS_BILLIG_SLOT: bool = WORKER_SLOT == "2" and bool(BILLIG_MODEL)
 # #293: Diese Ausweichmodelle werden pay-as-you-go abgerechnet; der Anbietername steht im
 # Hinweis, damit ein Ausweichen im Log nicht wie ein kostenloser Go-Lauf aussieht.
 BEZAHLTE_MODELLE: dict[str, str] = {"coder": "DeepSeek-API", "coder-or": "OpenRouter"}
@@ -118,6 +123,9 @@ WORKER_NAMES = {
     "coder-nemotron-free": "Nemotron 3.5 Lightning (LiteLLM, OpenCode Free)",
     "coder-minimax-free": "MiniMax M3.1 Flash (LiteLLM, OpenCode Free)",
     "coder-beam-free": "Beam (LiteLLM, OpenCode Free)",
+    # #312: freie Aliase des Billig-Slots; die Familienprüfung des Reviewers löst den Namen auf.
+    "coder-mimo-free": "MiMo-V2.6-Flash (LiteLLM coder-mimo-free, OpenCode Free)",
+    "coder-deepseek-free": "DeepSeek V4.1 Flash (LiteLLM coder-deepseek-free, OpenCode Free)",
 }
 
 # Mehrstufige Modell-Eskalation über OpenCode Go:
@@ -145,8 +153,13 @@ def worker_name(model: str) -> str:
     return WORKER_NAMES.get(model, f"{model} (LiteLLM)")
 
 
-WORKER = os.environ.get("WORKER", worker_name(LITELLM_MODEL) if BACKEND == "litellm" else "Qwen3-Coder 30B")
-ACTIVE_MODEL = LITELLM_MODEL   # BACKEND=litellm: Alias dieses Laufs, nach der Probe ggf. ein Ausweichmodell
+# #312: Der Billig-Slot nennt in PR-Zeile und Audit das freie Modell — unabhängig davon, ob der
+# Lauf über LiteLLM oder Ollama startet; die Probe bleibt bei freien Aliasen.
+WORKER = os.environ.get("WORKER",
+                        worker_name(BILLIG_MODEL) if IS_BILLIG_SLOT
+                        else worker_name(LITELLM_MODEL) if BACKEND == "litellm"
+                        else "Qwen3-Coder 30B")
+ACTIVE_MODEL = BILLIG_MODEL if IS_BILLIG_SLOT else LITELLM_MODEL   # BACKEND=litellm: Alias dieses Laufs, nach der Probe ggf. ein Ausweichmodell
 MAX_TRIES = agent_settings.value("MAX_TRIES", 2)   # Versuche je Auftrag, danach liegt er bei Stephan
 DONE = "erledigt"           # Schlüssel in STATE: angekommene Nacharbeiten, nicht wiederholen
 # Minuten je Lauf des Agenten. Über LiteLLM kürzer: das Modell ist schneller, und jede Minute
@@ -1798,9 +1811,13 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
     if state is None:
         state = load_state()
     SKIPPED.clear()
+    # #312: Das Routing entscheidet die Abfrage selbst, nicht ein Filter danach. Slot 2 fragt nur
+    # nach worker:billig, jeder andere Slot sperrt das Label aus (nie als Rückfallebene).
+    billig_label = ["--label", BILLIG_LABEL] if IS_BILLIG_SLOT else []
+    billig_ausschluss = "" if IS_BILLIG_SLOT else f" -label:{BILLIG_LABEL}"
     issues = gh("issue", "list", "--state", "open", "--label", "worker-task", "--label", "bereit",
-                "--label", LABEL, "--limit", str(ISSUE_LIST_LIMIT),
-                "--search", "sort:created-asc -label:blockiert",
+                "--label", LABEL, *billig_label, "--limit", str(ISSUE_LIST_LIMIT),
+                "--search", f"sort:created-asc -label:blockiert{billig_ausschluss}",
                 "--json", "number,title,body,author,labels")
     # Wie bei Reviews: Nur Issues von Stephans Konto werden zum Auftrag mit Schreibrecht.
     issues = [i for i in issues or [] if (i.get("author") or {}).get("login") == OWNER]
@@ -2738,11 +2755,28 @@ def probe_model(model: str) -> str | None:
     return None if isinstance(data, dict) and data.get("choices") else "leere Antwort"
 
 
-def choose_model(primary: str | None = None) -> tuple[str | None, list[str]]:
-    """Erstes Modell aus primary (oder LITELLM_MODEL) + LITELLM_FALLBACKS, das antwortet, und die Fehlschläge davor."""
+def billig_fallbacks(primary: str | None) -> list[str]:
+    """Freie Aliase des Billig-Slots ohne `primary`, in der Reihenfolge der Einstellung (#312).
+
+    `None`, "" oder ein Alias außerhalb der erlaubt-Liste ergibt []: Der Billig-Slot probt
+    niemals ein bezahltes Ausweichmodell, dann wartet er lieber.
+    """
+    erlaubt = agent_settings.SPECS["LITELLM_MODEL_BILLIG"]["erlaubt"]
+    if not primary or primary not in erlaubt:
+        return []
+    return [alias for alias in erlaubt if alias != primary]
+
+
+def choose_model(primary: str | None = None,
+                 fallbacks: list[str] | None = None) -> tuple[str | None, list[str]]:
+    """Erstes Modell aus primary (oder LITELLM_MODEL) + `fallbacks`, das antwortet, und die Fehlschläge davor.
+
+    `fallbacks=None` behält LITELLM_FALLBACKS, damit bisherige Aufrufe unverändert gelten.
+    """
     failed = []
+    kette = LITELLM_FALLBACKS if fallbacks is None else fallbacks
     first = primary or LITELLM_MODEL
-    for model in dict.fromkeys([first, *LITELLM_FALLBACKS]):
+    for model in dict.fromkeys([first, *kette]):
         reason = probe_model(model)
         if reason is None:
             return model, failed
@@ -3512,7 +3546,9 @@ def find_job(state: dict):
         skey = PREFIX + key
         return job_parked(state, key) or claimed_elsewhere(skey) or job_done_anywhere(skey)
 
-    job = rework_job(project_done(state), skip) or text_fix_job(skip)
+    # #312: Der Billig-Slot arbeitet nur Issues ab; Nacharbeit und PR-Text bleiben beim
+    # normalen Modell, weil beide kein worker:billig-Label tragen.
+    job = None if IS_BILLIG_SLOT else (rework_job(project_done(state), skip) or text_fix_job(skip))
     if job:
         return job
     # issue_job erhält den Takt-Zustand (#206). Ältere, eingefrorene Akzeptanztests
@@ -3798,7 +3834,7 @@ def main() -> int:
                 litellm_down(state)
                 return 0
             litellm_up(state)
-            if log_on_change(state, LAST_PC, "litellm", f"LiteLLM erreichbar ({LITELLM_MODEL}): suche Arbeit."):
+            if log_on_change(state, LAST_PC, "litellm", f"LiteLLM erreichbar ({ACTIVE_MODEL}): suche Arbeit."):
                 state.pop(LAST_WORK, None)
         elif not WAKE_PC:
             # Zuerst der PC, dann GitHub: Ist er aus, kostet der Takt nur eine lokale Anfrage.
@@ -3875,14 +3911,17 @@ def main() -> int:
                 save_state(state)   # Budget wieder frei: die nächste Knappheit wird erneut gemeldet
             # Erst hier prüfen: ohne Arbeit kostet der Takt keine Anfrage. Vor dem Zähler, damit ein
             # gestörter Anbieter keine Versuche verbraucht.
-            primary = model_for_attempt(state.get(skey, 0))
+            # #312: Im Billig-Slot bleibt der Primaeralias fest (keine Eskalation, kein bezahlter
+            # Abo-Alias); die Kette sind die übrigen freien Aliase.
+            primary = BILLIG_MODEL if IS_BILLIG_SLOT else model_for_attempt(state.get(skey, 0))
             # #266: Gilt die Primärprobe aus einem früheren Lauf noch, entfällt die Anfrage an
             # LiteLLM. `failed` muss auch beim Treffer existieren, sonst NameError vor dem Agenten.
             model = probe_cache_hit(state, primary)
             failed: list[str] = []
             if model is None:
                 try:
-                    model, failed = choose_model(primary)
+                    model, failed = (choose_model(primary, billig_fallbacks(primary))
+                                     if IS_BILLIG_SLOT else choose_model(primary))
                 except TypeError:
                     model, failed = choose_model()
                 if model is None:

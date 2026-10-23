@@ -38,7 +38,8 @@ def _schreibe(p: Path, werte) -> None:
 
 def test_die_feste_liste_der_einstellungen():
     s = _load("agent_settings")
-    assert sorted(s.SPECS) == ["LITELLM_MODEL", "MAX_ROUNDS", "MAX_TRIES", "MISSING_CHECK_GRACE_S",
+    assert sorted(s.SPECS) == ["LITELLM_MODEL", "LITELLM_MODEL_BILLIG", "MAX_ROUNDS", "MAX_TRIES",
+                               "MISSING_CHECK_GRACE_S",
                                "REVIEW_LLM_TIMEOUT", "REVIEW_MAX_TOKENS", "REVIEW_MODEL_BIG"]
     for name, spec in s.SPECS.items():
         assert "vorgabe" in spec and "text" in spec, name
