@@ -580,17 +580,66 @@ def normalize_slot(slot: str | None) -> str:
     return m.group(0) if m else "1"
 
 
+def pid_lebt(pid: int) -> bool:
+    """os.kill(pid, 0): True, wenn der Prozess existiert (auch bei PermissionError);
+    False bei jedem anderen OSError. Wirft nie.
+
+    PermissionError heißt „Prozess lebt, gehört aber einem anderen Benutzer“ — genau der Fall,
+    um den es beim Slot-Schutz geht (#288).
+    """
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def slot_belegt_von_anderem_lauf(slot_dir: str, slot: str, eigene_pid: int,
+                                 lebt: Callable[[int], bool] | None = None) -> int | None:
+    """Fremde PID, wenn <slot_dir>/slot-<slot>.json einen laufenden anderen Prozess meldet.
+
+    None heißt „darf überschrieben werden“: Datei fehlt, ist unlesbar, kein JSON-Objekt, nicht
+    `running`, ohne ganzzahlige `pid`, mit der eigenen PID oder mit toter PID. Der Schutz ist
+    Beiwerk zur Telemetrie: ein kaputter Slot darf den Takt nie anhalten (#288).
+    """
+    lebt = lebt or pid_lebt
+    try:
+        with open(os.path.join(slot_dir, f"slot-{slot}.json"), encoding="utf-8") as fh:
+            daten = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(daten, dict) or daten.get("status") != "running":
+        return None
+    pid = daten.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid == eigene_pid:
+        return None
+    return pid if lebt(pid) else None
+
+
 def write_slot_status(status: str, *, slot: str | None = None, message: str | None = None,
                       issue: int | None = None, pr: int | None = None, title: str | None = None,
                       branch: str | None = None, model: str | None = None, agent: str | None = None,
                       started_at: str | None = None, pid: int | None = None,
-                      project: str | None = None, slot_dir: str = SLOT_DIR) -> None:
+                      project: str | None = None, slot_dir: str = SLOT_DIR,
+                      lebt: Callable[[int], bool] | None = None) -> None:
     """Slot-Status atomar nach <slot_dir>/slot-<slot>.json schreiben (.tmp + os.replace).
 
     Die Datei ist die Quelle für Home Assistant (qwen_webhook.read_slots). Das Verzeichnis legt
     der Takt selbst an (#14), damit install.sh und die Units unverändert bleiben.
+
+    Ein laufender fremder Slot wird nur von `status == "running"` übernommen; alles andere
+    (etwa das abschließende `idle` eines anderen Laufs) geht einmal ins Log und schreibt nicht
+    (#288: ein `pytest`-Lauf als root setzte den Slot 1 eines arbeitenden Agenten auf `idle`).
     """
     slot = normalize_slot(slot)
+    if status != "running":
+        fremde_pid = slot_belegt_von_anderem_lauf(slot_dir, slot, os.getpid(), lebt)
+        if fremde_pid is not None:
+            log(f"Slot {slot}: Statusschreiben '{status}' übergangen, der Slot gehört dem "
+                f"laufenden Prozess {fremde_pid}.")
+            return
     data: dict[str, object] = {"slot": slot, "status": status,
                                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
     for key, value in (("message", message), ("issue", issue), ("pr", pr), ("title", title),
