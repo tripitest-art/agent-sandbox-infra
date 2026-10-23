@@ -1,6 +1,8 @@
 # 🤖 Agent-Sandbox-Infra
 
-> **Autonome Multi-Agenten-Infrastruktur mit Proxmox LXC, isolierten parallelen Worker-Slots, automatischem Review- und Merge-Takt, LiteLLM-Budgetüberwachung, On-Demand WoL LLM-Host und autarkem Web-Dashboard mit ntfy-Push-Benachrichtigungen.**
+> **Autonome Multi-Agenten-Infrastruktur mit Proxmox LXC, isolierten parallelen Worker-Slots, austauschbarer Agentenharness (Qwen Code, OpenCode, Claude, Antigravity), automatischem Review- und Merge-Takt, LiteLLM-Budgetüberwachung über Cloud-APIs, Free-Tiers und günstige Abos sowie autarkem Web-Dashboard mit ntfy-Push-Benachrichtigungen.**
+
+> **🎯 Strategischer Fokus (Stand 23.10.2026):** Das lokale LLM-Host-Konzept (eigener Gaming-PC mit Ollama, On-Demand Wake-on-LAN, GPU-Tuning) wird wegen Ineffizienz **nicht mehr weiterverfolgt** — Anschaffung, Stromverbrauch und Wartung eines eigenen GPU-Hosts stehen in keinem Verhältnis zum Nutzen gegenüber Cloud-Angeboten. Der Fokus liegt stattdessen auf **Cloud-Agenten über Free-Tiers und günstigen Abos** (z. B. OpenCode statt teurer Pay-per-Token-APIs), dem **weiteren Ausbau und der Optimierung der Pipeline** selbst (Scheduling, Kollisionsschutz, Kosten- und Fehlertransparenz) und der **Agentenharness** — der austauschbaren Anbindung verschiedener Werkzeuge (Qwen Code, OpenCode, Claude Code, Antigravity) an den Worker-Takt, die bestimmt, welche Modelle und Abo-/Budgetrahmen sich überhaupt nutzen lassen. `hardware/` und die lokale-Host-Zweige im Architekturdiagramm bleiben als Referenz bestehen, werden aber nicht mehr aktiv ausgebaut.
 
 ---
 
@@ -26,10 +28,8 @@ flowchart TD
         end
     end
 
-    subgraph LLM_Host["Lokaler Gaming-PC (Optionaler LLM Host)"]
-        WOL_PROXY["WoL-Proxy (:11434)<br>• Auto-Sleep nach 5 min Idle<br>• On-Demand Wake-on-LAN"]
-        OLLAMA["Ollama (:11434)<br>• qwen3-coder-64k (30B MoE, Q4_K_M)<br>• AMD RX 6800 XT (LACT, 2100 MHz, -90 mV)"]
-        WOL_PROXY --> OLLAMA
+    subgraph Harness["Agentenharness (austauschbar je Slot)"]
+        HARNESS["Qwen Code · OpenCode · Claude Code · Antigravity<br>• Cloud-APIs, Free-Tiers, günstige Abos<br>• Lokaler LLM-Host (Gaming-PC/Ollama) nicht mehr verfolgt"]
     end
 
     subgraph Notifications["Push-Benachrichtigungen (ntfy)"]
@@ -42,7 +42,7 @@ flowchart TD
 
     W1 & W2 -->|1. Holt Aufgaben & setzt um| REPO
     W1 & W2 -->|2. Code-Generierung via LiteLLM| LLM_PROXY
-    W1 & W2 -.->|Alternativ: Lokales Backend| WOL_PROXY
+    W1 & W2 -.->|Je Slot konfigurierbares Werkzeug| HARNESS
     W1 & W2 -->|3. Erstellt PRs mit Akzeptanztests| REPO
 
     REV -->|4. Prüft PRs, urteilt unabhängig| REPO
@@ -69,6 +69,7 @@ Details und Verträge: [`ROADMAP.md`](ROADMAP.md).
 | **3** | **Continuous Deployment (Pull-Timer auf CT 112)** | ✅ **Live** ([#15](https://github.com/tripitest-art/agent-sandbox-infra/issues/15)) | `autodeploy.py` prüft alle 15 Minuten `origin/main`, testet einen neuen Stand mit pytest, rollt ihn per `install.sh` aus und setzt bei Fehlern automatisch auf den letzten laufenden Stand zurück. Wartet, solange Worker oder Review arbeiten. Aus, bis `AUTODEPLOY=1` gesetzt ist; Betrieb: [`docs/autodeploy.md`](docs/autodeploy.md). |
 | **4** | **Prime-Time & Kosten-intelligentes Scheduling** | ⏳ **Geplant** ([#16](https://github.com/tripitest-art/agent-sandbox-infra/issues/16)) | Dynamisches Umschalten von LiteLLM-Modellen anhand von DeepSeek Prime-Time Tarifen (Peak 1,20 $/1M vs. Off-Peak 0,60 $/1M), automatische Drosselung bei Budgetannäherung. |
 | **5** | **Planer-Beschleunigung (AI Issue Pre-Flight)** | ⏳ **Geplant** ([#17](https://github.com/tripitest-art/agent-sandbox-infra/issues/17)) | Automatisierte Akzeptanztest-Validierung (Rot-Prüfung vor Issue-Freigabe), automatische Hotspot- und Abhängigkeitserkennung für den Planer. |
+| **6** | **Agentenharness & Pipeline-Optimierung (laufend)** | 🔁 **Laufend** | Austauschbare Anbindung mehrerer Werkzeuge (Qwen Code, OpenCode, Claude, Antigravity) über Cloud-APIs, Free-Tiers und günstige Abos statt eines eigenen LLM-Hosts (OpenCode-Stream #271, Modell-Reihenfolge Go/DeepSeek/OpenRouter #293, Konfiguration dauerhaft gemerkt #270); weiterer Ausbau von Scheduling, Fehlertoleranz und Kostentransparenz der Pipeline selbst. |
 
 ---
 
@@ -88,7 +89,7 @@ Details und Verträge: [`ROADMAP.md`](ROADMAP.md).
 | [`.github/`](.github/) | CI (`tests`, `acceptance-guard`), Issue- und PR-Vorlagen. Änderungen hier braucht Stephans Freigabe (`freigabe-geschützt`). |
 | [`sandbox/`](sandbox/) | Steuerungslogik: Setup (`install.sh`, `install-lib.sh`), Worker-Takt (`worker_tick.py`, Rahmen für Branch, Akzeptanztest und PR-Text in `worker_frame.py`), Review-Takt (`review_tick.py`), Einstellungsdatei (`agent_settings.py`), Multi-Projektverwaltung (`projects.py`), Auto-Deploy (`autodeploy.py`, Timer `agent-sandbox-deploy` über `AUTODEPLOY=1`), Web-Dashboard (`dashboard.py`, Push-Meldungen in `dashboard_notify.py`, Review-Statistik in `dashboard_stats.py`, nur lesend, nur LAN, Dienst `agent-dashboard` über `DASHBOARD=1`), Wake-Listener (`wake_listener.py`, Dienst `agent-wake`), Changelog-Assembler (`assemble_changelog.py`), Housekeeping (`gc.py`, räumt über `agent-gc.timer` verwaiste Worktrees, gemergte Branches und alte Belegungen auf), eigenständige Schnittstellen-Module (`sandbox/core/gh_client.py` für die GitHub-CLI, `sandbox/core/litellm_client.py` für den LiteLLM-Proxy, `sandbox/core/claims.py` für die Auftrags-Belegung, `sandbox/core/git_ops.py` für Git-Operationen) und systemd-Units (`sandbox/systemd/`). |
 | [`proxmox/`](proxmox/) | Host-Skripte zur Erstellung des unprivilegierten Debian 12 LXC-Containers auf Proxmox VE (`host-create.sh`). |
-| [`hardware/`](hardware/) | AMD RDNA2 GPU-Tuning für den lokalen LLM-Host (LACT, 2100 MHz, −90 mV, 255 W) mit Benchmarks und Ollama-Overrides. |
+| [`hardware/`](hardware/) | AMD RDNA2 GPU-Tuning für den lokalen LLM-Host (LACT, 2100 MHz, −90 mV, 255 W) mit Benchmarks und Ollama-Overrides. **Nicht mehr aktiv verfolgt:** Das lokale Workstation-Konzept ist wegen Ineffizienz zugunsten von Cloud-Agenten, Free-Tiers und günstigen Abos pausiert; der Ordner bleibt nur als Referenz bestehen. |
 | [`tests/`](tests/) | Testsuite für Worker-, Review- und Dashboard-Logik, Multi-Projekte und `acceptance_guard.py` (ohne Netzwerk mit Mocks). |
 
 ---

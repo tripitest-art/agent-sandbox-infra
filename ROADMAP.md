@@ -4,6 +4,30 @@ Dieses Dokument beschreibt die Gesamtarchitektur und Entwicklungs-Roadmap für d
 
 ---
 
+## 0. Strategischer Kurswechsel (23.10.2026)
+
+Das ursprünglich mitgeplante lokale LLM-Host-Konzept (eigener Gaming-PC mit Ollama, On-Demand
+Wake-on-LAN-Proxy, GPU-Tuning in [`hardware/`](hardware/)) wird **wegen Ineffizienz nicht mehr
+weiterverfolgt**: Anschaffung, Stromverbrauch und Wartung eines eigenen GPU-Hosts stehen in keinem
+Verhältnis zum Nutzen gegenüber Cloud-Angeboten. Der Ordner `hardware/` bleibt als Referenz stehen,
+wird aber nicht mehr ausgebaut; das Architekturdiagramm in [`README.md`](README.md) zeigt an dessen
+Stelle die Agentenharness.
+
+Der Fokus der Weiterentwicklung liegt jetzt auf drei Säulen:
+
+1. **Cloud-Agenten statt eigener Hardware:** Modelle laufen über LiteLLM-Proxy (DeepSeek, OpenRouter
+   u. a.) oder direkt über **Free-Tiers und günstige Abos** (z. B. OpenCode statt Pay-per-Token-APIs).
+   Die Modell-Reihenfolge bevorzugt bereits kostenfreie/günstige Optionen vor bezahlten (#293).
+2. **Agentenharness-Flexibilität:** Die austauschbare Anbindung verschiedener Werkzeuge (Qwen Code,
+   OpenCode, Claude Code, Antigravity) an den Worker-Takt ist die zentrale Stellschraube, da sie
+   bestimmt, welche Modelle, Abo- und Budgetrahmen sich überhaupt nutzen lassen — siehe Stufe 6 unten.
+3. **Weiterer Ausbau und Optimierung der Pipeline selbst:** Scheduling (Fair-Share über Projekte,
+   Priorisierung, Anti-Starvation), Fehlertoleranz (Stillstands- und Ausfallerkennung, automatische
+   Freigabe verwaister Claims) und Kosten-/Fehlertransparenz (Audit-Log, Dashboard-Statistiken) werden
+   laufend verfeinert statt in großen Sprüngen — siehe Abschnitt 3 und Backlog unten.
+
+---
+
 ## 1. Übersicht der Wertschöpfungskette
 
 ```mermaid
@@ -134,6 +158,38 @@ Die meiste manuelle Vorbereitungszeit fließt in das Ausformulieren präziser Sc
 
 ---
 
+### 🔁 Stufe 6: Agentenharness & Pipeline-Optimierung (laufend)
+
+Seit dem Kurswechsel in Abschnitt 0 ist diese Stufe kein einmaliges Projekt mit festem Enddatum,
+sondern eine fortlaufende Optimierungsarbeit an zwei eng verzahnten Themen.
+
+#### Agentenharness (austauschbares Werkzeug je Worker-Slot):
+1. **OpenCode als Alternative zu Qwen Code** (#270, #271, #282): `AGENT=opencode` lässt einen Slot
+   `opencode run --format json` statt Qwen Code starten; die JSONL-Events werden in dieselben
+   lesbaren Logzeilen übersetzt (Fließtext, Werkzeugaufrufe, Kosten, Anbieterfehler), Worker-Prompts
+   sind auf Englisch umgestellt (weniger Tokens, zuverlässigere Befolgung bei allen Werkzeugen).
+2. **Modell-Reihenfolge nach Kosten** (#293): Primär OpenCode Go (`coder-go`, günstig/kostenfrei),
+   dann DeepSeek-API (`coder`), zuletzt OpenRouter (`coder-or`); ein Ausweichen auf ein bezahltes
+   Modell wird im Log explizit mit Modell, Anbieter und Guthabenverbrauch sichtbar gemacht.
+3. **Dauerhafte Konfiguration** (#270): `AGENT` und `CONTEXT_MODE` werden in `/etc/agent-sandbox.conf`
+   gemerkt, damit ein Wechsel des Werkzeugs auch den Auto-Deploy übersteht.
+4. **Offen:** weitere Werkzeuge (Antigravity im Worker-Takt, nicht nur in der Planer-Umgebung),
+   Harness-übergreifende Kostenvergleiche im Dashboard, automatische Auswahl des günstigsten
+   verfügbaren Werkzeugs je Auftrag statt fester Konfiguration pro Slot.
+
+#### Pipeline-Ausbau & -Optimierung:
+1. **Scheduling:** Prioritäts-Score mit Anti-Starvation (#240), Fair-Share-Rotation über mehrere
+   Projekte (`_last_project`), Regel-8-Kollisionsschutz mit Dauerkollisions-Alarm (#206).
+2. **Fehlertoleranz:** Stillstandswächter mit Ursachenangabe (#218, #274), Reviewer-Ausweichen bei
+   Modellausfall (#273, #275), automatische Freigabe verwaister Claims (#183, #206, #207).
+3. **Kosten- und Fehlertransparenz:** Audit-Log mit Lifecycle-Ereignissen und Kosten je Lauf (#178,
+   #181, #222), Dashboard-Statistiken zu Reviews, Merges und Übergaben an Stephan (#115, #286).
+4. **Offen:** Budget-Dashboards je Agentenharness/Abo statt nur je LiteLLM-Key, automatische
+   Nutzung von Free-Tier-Kontingenten mehrerer Anbieter im Wechsel, feinere Kostenprognose vor
+   Auftragsvergabe.
+
+---
+
 ## 3. Priorisierungs- und Umsetzungsstatus
 
 | Stufe | Feature | Nutzen | Status |
@@ -143,8 +199,10 @@ Die meiste manuelle Vorbereitungszeit fließt in das Ausformulieren präziser Sc
 | **Stufe 3** | Continuous Deployment (`autodeploy.py`, Pull-Timer auf CT 112) | ⭐⭐⭐⭐ | ✅ **Gemergt (#15)** |
 | **Stufe 4** | Prime-Time- & Budget-Scheduling | ⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🟡 **In Umsetzung (#17)** |
-| **Baustein** | Web-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | ✅ **Gemergt (#104, #105, #114)**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |
+| **Stufe 6** | Agentenharness & Pipeline-Optimierung (laufend, kein Enddatum) | ⭐⭐⭐⭐⭐ | 🔁 **Laufend (#270, #271, #282, #293)** |
+| **Baustein** | Web-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | ✅ **Gemergt (#104, #105, #114, #286)**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |
 | **Baustein** | Mehrere Projekte (Projektliste, Infra-Repo als zweites Projekt) | ⭐⭐⭐⭐ | ✅ **Gemergt (#18, #19, #20)**; Inbetriebnahme auf dem Server: siehe [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) |
+| **Eingestellt** | Lokaler LLM-Host (Gaming-PC, Ollama, WoL-Proxy, GPU-Tuning) | – | ⛔ **Nicht mehr verfolgt** (Ineffizienz; siehe Abschnitt 0). `hardware/` bleibt als Referenz. |
 
 ---
 
@@ -154,3 +212,8 @@ Das Backlog sind Issues mit Label `idee` (ohne Akzeptanztest, ohne `bereit`), ke
 nur eine Quelle, die nicht auseinanderläuft. Offene Ideen: `gh issue list --label idee`. Der Planer
 macht daraus ein Issue mit Vertrag (`docs/planer-ablauf.md`). Hier stehen nur die Stufen oben; ändert
 sich ein Stand, wird diese Datei im selben PR angepasst.
+
+Aktuelle Schwerpunkte für neue Ideen (Stand 23.10.2026, siehe Abschnitt 0 und Stufe 6): weitere
+Agentenharness-Werkzeuge und harness-übergreifende Kostenvergleiche, Ausnutzung mehrerer
+Free-Tier-Kontingente im Wechsel, sowie laufende Pipeline-Optimierung (Scheduling, Fehlertoleranz,
+Kostentransparenz). Ideen rund um einen eigenen lokalen LLM-Host werden nicht mehr aufgenommen.
