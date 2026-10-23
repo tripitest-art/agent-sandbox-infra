@@ -2879,6 +2879,26 @@ def bezahltes_ausweichen(primary: str, model: str) -> str | None:
     return f"Ausweichmodell {model} ({BEZAHLTE_MODELLE[model]}) verbraucht Guthaben statt {primary}"
 
 
+def retarget_task(task: str, old_worker: str, new_worker: str) -> str:
+    """Auftragstext mit neuem Worker-Namen, ohne den Auftrag neu zu suchen.
+
+    Ersetzt genau die beiden Formen, die issue_job/rework_job/text_fix_job selbst schreiben:
+      f"Du bist Worker: {old_worker}."  ->  f"Du bist Worker: {new_worker}."
+      f"„Worker: {old_worker}“"         ->  f"„Worker: {new_worker}“"
+    (jeweils alle Vorkommen). Andere Stellen, etwa ein „Worker: …“ im wörtlich zitierten Issue- oder
+    Review-Text, bleiben unverändert. old_worker == new_worker oder old_worker leer: task unverändert.
+    Reine Funktion.
+
+    #324: Nach dem Ausweichen auf ein anderes Modell durfte dafür nicht mehr find_job() laufen —
+    die ganze Suche (PR-Liste, Issue-Abfragen, Regel-8-Lage, `gh run list`) kostete bei einem
+    gestörten Anbieter zusätzliche Sekunden und GraphQL-Kontingent.
+    """
+    if not old_worker or old_worker == new_worker:
+        return task
+    return task.replace(f"Du bist Worker: {old_worker}.", f"Du bist Worker: {new_worker}.").replace(
+        f"„Worker: {old_worker}“", f"„Worker: {new_worker}“")
+
+
 def use_model(model: str) -> None:
     """Modell für diesen Lauf; die Worker-Zeile nennt bei einem Ausweichmodell dieses."""
     global ACTIVE_MODEL, WORKER
@@ -4023,13 +4043,12 @@ def main() -> int:
             else:
                 log(f"{skey} Modellprobe übersprungen (Cache-Treffer).")
             if model != ACTIVE_MODEL:
+                alt = WORKER
                 use_model(model)
-                # Die Aufträge enthalten „Worker: …“; mit dem neuen Namen neu bauen.
-                job = find_job(state)   # Projekt steht schon fest; nicht noch einmal durch die Liste
-                if not job:
-                    return 0
-                key, task, pr_no, before = job
-                skey = PREFIX + key
+                # #324: Nur den Namen im schon gebauten Auftrag ersetzen. Ein zweites find_job()
+                # wiederholte die ganze Suche (PR-Liste, Issue-Abfragen, Regel-8-Lage, `gh run list`)
+                # und kostete bei einem gestörten Anbieter zusätzliche Sekunden und Kontingent.
+                task = retarget_task(task, alt, WORKER)
         if not claim_job(skey):
             # #59: Der andere Slot hält den Auftrag. Eine Zeile je Wechsel, kein Versuch verbraucht.
             log_on_change(state, LAST_WORK, f"{skey} belegt",
