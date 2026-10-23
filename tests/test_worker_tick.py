@@ -616,11 +616,23 @@ def test_text_fix_job_loggt_autofix_rueckfall(monkeypatch, capsys):
     assert "PR #112: Autofix fehlgeschlagen, Agentenauftrag als Rückfall." in capsys.readouterr().out
 
 
-def test_tasks_embed_template(monkeypatch):
+def test_issue_task_does_not_embed_template(monkeypatch):
+    # issue_job() schreibt nie einen PR-Text; open_pr() baut ihn deterministisch (#296).
     monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()]))
     _, task, _, _ = w.issue_job()
+    assert "----- PR-Vorlage" not in task and "Tick a box [x] only if it is true" not in task
+
+
+def test_rework_und_textfix_tasks_embed_template(monkeypatch):
+    # Nacharbeit und Text-Auftrag schreiben weiterhin selbst den PR-Text (#296: nur issue_job ändert sich).
+    monkeypatch.setattr(w, "gh", FakeGH(prs=[_pr()]))
+    _, task, _, _ = w.rework_job()
     assert "----- PR-Vorlage" in task and "## Wie getestet" in task
-    assert "Tick a box [x] only if it is true" in task
+
+    pr = _pr(number=112, branch="feature/issue-102", review_at=None)
+    monkeypatch.setattr(w, "gh", FakeGH(prs=[pr]))
+    _, task, _, _ = w.text_fix_job()
+    assert "----- PR-Vorlage" in task and "## Wie getestet" in task
 
 
 def test_nacharbeit_und_textauftrag_sind_englisch(monkeypatch):
