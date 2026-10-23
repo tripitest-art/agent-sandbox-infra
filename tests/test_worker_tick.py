@@ -3761,3 +3761,24 @@ def test_issue_auftrag_ohne_pytest_nennt_den_befehl_einmal(monkeypatch):
     assert "3. `make test`. If a test is red:" in task
     assert "tests/acceptance/test_issue_102.py -x" not in task
     assert task.count("`make test`") == 1
+
+
+def test_rework_job_mit_ausweichmodell_ersetzt_beide_worker_stellen(monkeypatch):
+    """#324: Nach dem Ausweichen auf ein anderes Modell ersetzt der Takt den Worker-Namen im schon
+    gebauten Auftrag — Startzeile und die Zeile im PR-Text-Schritt — und lässt die PR-Vorlage stehen."""
+    alt, neu = w.worker_name("coder"), w.worker_name("coder-free")
+    monkeypatch.setattr(w, "WORKER", alt)
+    monkeypatch.setattr(w, "gh", FakeGH(prs=[_pr()]))
+    _, task, _, _ = w.rework_job()
+    vorlage = w.template_rules()
+    assert f"Du bist Worker: {alt}." in task and f"„Worker: {alt}“" in task
+    assert vorlage in task                  # das Review spricht den PR-Text an (#323)
+
+    umgestellt = w.retarget_task(task, alt, neu)
+
+    assert f"Du bist Worker: {neu}." in umgestellt
+    assert f"„Worker: {neu}“" in umgestellt
+    assert f"Du bist Worker: {alt}." not in umgestellt
+    assert f"„Worker: {alt}“" not in umgestellt
+    assert vorlage in umgestellt            # Vorlage unverändert, kein zweiter Aufbau der Suche
+    assert REVIEW_CHANGES in umgestellt
