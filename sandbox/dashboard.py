@@ -51,6 +51,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # Module liegen nebenan
+import agent_conf  # noqa: E402
 import agent_settings  # noqa: E402
 import dashboard_notify  # noqa: E402
 import dashboard_stats  # noqa: E402
@@ -676,6 +677,7 @@ class Dashboard:
                             parse_uebersprungen(self.logbuf.texts()))
         state["schreiben"] = self.writer.enabled   # zeigt den „Limit ändern“-Knopf
         state["wecken"] = self.waker.enabled       # zeigt den Knopf „Takt starten“
+        state["agent_konfiguration"] = agent_conf.lese_agent_konfiguration()
         state["einstellungen"] = {
             "schreiben": self.settings_writer.enabled,
             "werte": agent_settings.aktuelle_werte(),
