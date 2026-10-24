@@ -667,11 +667,14 @@ def build_messages(issue: dict | None, pr: dict, files: list[dict], diff: str, c
 
 def llm_payload(model: str, messages: list[dict]) -> dict:
     """Der JSON-Body für POST {LITELLM}/v1/chat/completions:
-    {"model": model, "messages": messages, "max_tokens": MAX_TOKENS}.
+    {"model": model, "messages": messages, "max_tokens": MAX_TOKENS, "disable_fallbacks": True}.
     Enthält bewusst weder "tools" noch "tool_choice": der Reviewer bekommt keine Werkzeuge und
     hat keinen Schreibweg (Issue-, PR- und Diff-Text sind fremder Input). Eigene Funktion, damit
-    call_llm() seinen Body nur hierüber baut und der Body ohne Netz prüfbar ist."""
-    return {"model": model, "messages": messages, "max_tokens": MAX_TOKENS}
+    call_llm() seinen Body nur hierüber baut und der Body ohne Netz prüfbar ist.
+    disable_fallbacks: LiteLLM darf nicht still auf ein anderes Modell umleiten; sonst stimmt die
+    Familienprüfung (Regel 6) nicht mehr mit dem antwortenden Modell überein. Ausgewichen wird nur
+    über fallback_model() im Skript."""
+    return {"model": model, "messages": messages, "max_tokens": MAX_TOKENS, "disable_fallbacks": True}
 
 
 def call_llm(model: str, messages: list[dict]) -> tuple[str, dict]:
