@@ -477,6 +477,7 @@ def _run_rework(monkeypatch, tmp_path, after: dict) -> list:
             return {**_pr(), **after}
         return real_call(*args)
 
+    monkeypatch.setattr(w, "_TEMPLATE_CACHE", "")   # sonst ruft pr_template() das gefakte subprocess.run auf (#373)
     monkeypatch.setattr(w, "gh", gh)
     monkeypatch.setattr(w, "ollama_free", lambda *a, **k: True)
     monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: None)  # git-Vorbereitung
