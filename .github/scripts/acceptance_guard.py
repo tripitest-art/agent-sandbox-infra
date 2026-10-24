@@ -25,6 +25,13 @@ korrigiert, entscheidet das dort, und der Worker darf das Label nicht am PR nach
 Regel 2 und 6 kennen keine Ausnahme: Stimmt der Test nicht, wird das Issue korrigiert,
 fehlt etwas im PR-Text, wird der Text ergänzt.
 
+Das PR-Label zählt nur, wenn es von einem Konto aus `GUARD_TRUSTED_ACTORS` (Komma-Liste)
+gesetzt wurde. Ohne diese Prüfung könnte der Worker das Label selbst an seinen PR hängen
+und sich die Ausnahme für Regel 4 (`.github/`) selbst geben — die Regel wäre dann nur
+eine Bitte. Die Prüfung sitzt in `main()`, nicht in `evaluate()`: `evaluate()` bleibt eine
+reine Funktion über bereits geprüfte Labels, und der eingefrorene Akzeptanztest aus
+Issue #342 (`evaluate(labels={OVERRIDE_LABEL})`) bleibt gültig.
+
 Läuft als pull_request_target mit dem Stand aus `main` und liest den PR nur über die
 GitHub-API. Nur Standardbibliothek, damit der Job ohne pip auskommt.
 """
@@ -46,6 +53,7 @@ from typing import Callable
 OVERRIDE_LABEL = "freigabe-geschützt"
 CLAIM_LABEL = "in-arbeit"
 ACCEPTANCE_DIR = "tests/acceptance/"
+TRUSTED_ACTORS_ENV = "GUARD_TRUSTED_ACTORS"
 
 # Dateien, über die sich Tests oder CI still aushebeln lassen.
 PROTECTED_NAMES = {"conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"}
@@ -162,6 +170,16 @@ def is_protected_infra(path: str) -> bool:
         return True
     name = PurePosixPath(path).name
     return name in PROTECTED_NAMES or (name == "__init__.py" and "tests/" in path)
+
+
+def trusted_actors() -> set[str]:
+    """Konten, deren `freigabe-geschütz`-Label als Ausnahme zählt (Login, kleingeschrieben).
+
+    Quelle ist `GUARD_TRUSTED_ACTORS` (Komma-Liste), gesetzt im Workflow. Leer oder fehlend
+    heißt **niemand**: Dann ist die Ausnahme abgeschaltet, statt für jeden zu gelten. Ein
+    Tippfehler in der Variable macht den Guard strenger, nie durchlässiger.
+    """
+    return {p.strip().lower() for p in os.environ.get(TRUSTED_ACTORS_ENV, "").split(",") if p.strip()}
 
 
 def _instant(ts: str) -> datetime:
@@ -300,6 +318,19 @@ query($owner: String!, $name: String!, $number: Int!) {
 """
 
 
+_PR_LABEL_ACTORS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      timelineItems(itemTypes: [LABELED_EVENT], last: 100) {
+        nodes { ... on LabeledEvent { createdAt actor { login } label { name } } }
+      }
+    }
+  }
+}
+"""
+
+
 class GitHub:
     def __init__(self, repo: str, token: str, api: str = "https://api.github.com",
                  graphql_url: str = "https://api.github.com/graphql"):
@@ -385,6 +416,46 @@ class GitHub:
         claimed = min(claims, key=_instant) if claims else None
         return issue.get("lastEditedAt"), claimed
 
+    def label_actor(self, number: int, label: str) -> str | None:
+        """Login, der `label` am PR zuletzt gesetzt hat — None, wenn er nie gesetzt wurde.
+
+        Das **letzte** Ereignis zählt: Entfernen und erneutes Setzen durch ein anderes Konto
+        entwertet eine frühere Freigabe. Fehler werden bewusst nicht abgefangen; `main()`
+        behandelt sie als „Herkunft unbekannt“ und lässt die Ausnahme dann nicht gelten.
+        """
+        owner, name = self.repo.split("/", 1)
+        pr = self._graphql(_PR_LABEL_ACTORS_QUERY,
+                           {"owner": owner, "name": name, "number": number})["repository"]["pullRequest"]
+        hits = [
+            (n["createdAt"], (n.get("actor") or {}).get("login"))
+            for n in pr["timelineItems"]["nodes"]
+            if n and (n.get("label") or {}).get("name") == label
+        ]
+        if not hits:
+            return None
+        newest = max(hits, key=lambda h: _instant(h[0]))[1]
+        return newest.lower() if newest else None
+
+
+def verified_labels(gh: "GitHub", pr: dict) -> tuple[set[str], str | None]:
+    """(Label-Namen für `evaluate()`, Hinweis oder None).
+
+    `freigabe-geschützt` wird nur durchgereicht, wenn das letzte Label-Ereignis von einem
+    Konto aus `GUARD_TRUSTED_ACTORS` stammt. Sonst fällt es weg und die betroffenen Regeln
+    bleiben Verstöße. Damit kann der Worker die Ausnahme nicht selbst setzen.
+    """
+    labels = {lab["name"] for lab in pr.get("labels", [])}
+    if OVERRIDE_LABEL not in labels:
+        return labels, None
+    trusted = trusted_actors()
+    actor = gh.label_actor(pr["number"], OVERRIDE_LABEL)
+    if actor is not None and actor in trusted:
+        return labels, f"Label `{OVERRIDE_LABEL}` von `{actor}` gesetzt; Ausnahme gilt."
+    labels.discard(OVERRIDE_LABEL)
+    erlaubt = ", ".join(f"`{a}`" for a in sorted(trusted)) or "niemand"
+    return labels, (f"Label `{OVERRIDE_LABEL}` von `{actor or 'unbekannt'}` gesetzt; als Ausnahme gilt "
+                    f"es nur von {erlaubt} (`{TRUSTED_ACTORS_ENV}`). Zählt hier nicht.")
+
 
 def report(res: Result) -> str:
     lines = ["## acceptance-guard", ""]
@@ -414,14 +485,17 @@ def main() -> int:
             issue_meta[n] = gh.issue_times(n)
             issue_labels[n] = gh.issue_labels(n)
 
+    labels, provenance = verified_labels(gh, pr)
     res = evaluate(
         files=gh.pr_files(pr["number"]),
-        labels={lab["name"] for lab in pr.get("labels", [])},
+        labels=labels,
         issues=issues,
         read_head_file=lambda p: gh.file_at(p, pr["head"]["sha"]),
         issue_meta=issue_meta,
         issue_labels=issue_labels,
     )
+    if provenance:
+        res.notes.insert(0, provenance)
     if not issues:
         res.notes.append("PR verlinkt kein Issue („Closes #N“); Akzeptanz-Abgleich entfällt.")
     # 6. Ohne Ausnahme per Label: Ein unausgefüllter PR-Text wird korrigiert, nicht erlaubt.

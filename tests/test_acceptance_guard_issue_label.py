@@ -96,6 +96,8 @@ class _FakeGitHub:
     """Ersetzt die GitHub-Anbindung in `main()`; sammelt die Issue-Nummern."""
 
     instances = []
+    actor = "worker-agent"   # Herkunft des PR-Labels, sofern der Test nichts anderes setzt
+    files: list[dict] = []
 
     def __init__(self, repo, token, api="", graphql_url=""):
         self.label_calls = []
@@ -114,20 +116,23 @@ class _FakeGitHub:
             raise RuntimeError("GitHub nicht erreichbar")
         return {LABEL}
 
+    def label_actor(self, number, label):
+        return self.actor
+
     def pr_files(self, number):
-        return []
+        return self.files
 
     def file_at(self, path, ref):
         return ACCEPT
 
 
 def _main(monkeypatch, tmp_path, gh_cls=_FakeGitHub,
-          body="Closes #7\n\nWorker: DeepSeek Test"):
+          body="Closes #7\n\nWorker: DeepSeek Test", labels=None):
     event = {
         "pull_request": {
             "number": 12,
             "body": body,
-            "labels": [],
+            "labels": [{"name": n} for n in (labels or [])],
             "head": {"sha": "abc", "ref": "feature/issue-7"},
         }
     }
@@ -168,3 +173,74 @@ def test_main_wird_rot_wenn_issue_labels_scheitert(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="GitHub nicht erreichbar"):
         _main(monkeypatch, tmp_path, gh_cls=Kaputt)
+
+
+# ---------------- Herkunft des PR-Labels ----------------
+def test_label_von_fremdem_konto_gilt_nicht_als_ausnahme(monkeypatch):
+    monkeypatch.setenv("GUARD_TRUSTED_ACTORS", "tripitest-art")
+
+    class Fremd:
+        def label_actor(self, number, label):
+            return "worker-agent"
+
+    labels, note = g.verified_labels(Fremd(), {"number": 12, "labels": [{"name": LABEL}]})
+    assert LABEL not in labels
+    assert "worker-agent" in note and "tripitest-art" in note
+
+
+def test_label_von_vertrauenswuerdigem_konto_gilt(monkeypatch):
+    monkeypatch.setenv("GUARD_TRUSTED_ACTORS", "tripitest-art")
+
+    class Eigen:
+        def label_actor(self, number, label):
+            return "tripitest-art"
+
+    labels, note = g.verified_labels(Eigen(), {"number": 12, "labels": [{"name": LABEL}]})
+    assert LABEL in labels
+    assert "Ausnahme gilt" in note
+
+
+def test_ohne_trusted_actors_gilt_kein_label(monkeypatch):
+    # Leere Variable heißt: niemand. Sonst wäre ein Tippfehler im Workflow eine offene Tür.
+    monkeypatch.delenv("GUARD_TRUSTED_ACTORS", raising=False)
+
+    class Eigen:
+        def label_actor(self, number, label):
+            return "tripitest-art"
+
+    labels, note = g.verified_labels(Eigen(), {"number": 12, "labels": [{"name": LABEL}]})
+    assert LABEL not in labels
+    assert "niemand" in note
+
+
+def test_ohne_label_kein_zusaetzlicher_api_aufruf():
+    class NieGefragt:
+        def label_actor(self, number, label):
+            raise AssertionError("label_actor darf ohne Label nicht aufgerufen werden")
+
+    labels, note = g.verified_labels(NieGefragt(), {"number": 12, "labels": []})
+    assert note is None
+    assert labels == set()
+
+
+def test_main_verwirft_das_label_eines_fremden_kontos(monkeypatch, tmp_path):
+    """Ohne Herkunftsprüfung käme ein Worker mit selbst gesetztem Label an Regel 4 vorbei."""
+    monkeypatch.setenv("GUARD_TRUSTED_ACTORS", "tripitest-art")
+
+    class FremdMitInfra(_FakeGitHub):
+        instances = []
+        actor = "worker-agent"
+        files = [{"filename": ".github/workflows/tests.yml", "status": "modified", "patch": "+x"}]
+
+    assert _main(monkeypatch, tmp_path, gh_cls=FremdMitInfra, labels=[LABEL]) == 1
+
+
+def test_main_erlaubt_das_label_von_stephan(monkeypatch, tmp_path):
+    monkeypatch.setenv("GUARD_TRUSTED_ACTORS", "tripitest-art")
+
+    class EigenMitInfra(_FakeGitHub):
+        instances = []
+        actor = "tripitest-art"
+        files = [{"filename": ".github/workflows/tests.yml", "status": "modified", "patch": "+x"}]
+
+    assert _main(monkeypatch, tmp_path, gh_cls=EigenMitInfra, labels=[LABEL]) == 0

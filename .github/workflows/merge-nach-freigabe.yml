@@ -1,0 +1,50 @@
+name: merge-nach-freigabe
+
+# Warum ein eigener Workflow und nicht der acceptance-guard: Der Guard bleibt read-only
+# (`contents: read`) und prüft nur. Mergen darf ausschließlich dieser Lauf, und nur unter
+# den Bedingungen, die .github/scripts/merge_nach_freigabe.py selbst nachliest.
+#
+# pull_request_target: Workflow und Skript stammen immer aus `main`, nie aus dem PR.
+# Ausgelöst wird über das Label, das der Review-Takt (`sandbox/review_tick.py`) nach einer
+# Freigabe setzt. Ein von Hand gesetztes Label genügt nicht: Der Lauf verlangt zusätzlich
+# eine APPROVED-Review der Reviewer-App auf dem aktuellen Head-SHA.
+#
+# PR-Texte niemals per ${{ }} in run:-Zeilen einsetzen (Shell-Injection).
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: write      # Merge-Commit und Löschen des Feature-Branches
+  pull-requests: write # Merge-API
+  checks: read
+  statuses: read
+
+concurrency:
+  group: merge-nach-freigabe-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  # Der Jobname muss dem Wert von SELF_CHECK im Skript entsprechen: der eigene, noch
+  # laufende Check darf bei der Prüfung „alle Checks grün“ nicht mitzählen.
+  merge-nach-freigabe:
+    if: github.event.label.name == 'review-freigabe'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Freigabe prüfen und mergen
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REVIEWER_BOT: sandbox-agent-reviewer-app[bot]
+          GUARD_TRUSTED_ACTORS: tripitest-art
+        run: python .github/scripts/merge_nach_freigabe.py
