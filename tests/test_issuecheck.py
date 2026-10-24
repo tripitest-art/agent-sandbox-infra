@@ -372,3 +372,61 @@ def test_validate_verzichtet_auf_zweiten_lauf_bei_ausfuehrungsfehler(repo, monke
     monkeypatch.setattr(ic, "check_rollen", lambda *a, **k: pytest.fail("kein zweiter Lauf erwartet"))
     findings, _ = ic.validate(_issue(), repo)
     assert _codes(findings) == ["timeout"]
+
+
+# ---------------- Rollenlauf im Akzeptanzordner (#349) ----------------
+def _merke_mkdtemp(monkeypatch) -> list[Path]:
+    """Alle von check_rollen angelegten Verzeichnisse mitschreiben (danach wieder entfernt)."""
+    erzeugt: list[Path] = []
+    echt = ic.tempfile.mkdtemp
+
+    def merke(*args, **kwargs):
+        pfad = echt(*args, **kwargs)
+        erzeugt.append(Path(pfad))
+        return pfad
+
+    monkeypatch.setattr(ic.tempfile, "mkdtemp", merke)
+    return erzeugt
+
+
+def test_check_rollen_fallback_ohne_akzeptanzordner(uid_repo, monkeypatch):
+    """Ohne tests/acceptance/ bleibt der Block im Plugin-Verzeichnis, kein Ordner wird angelegt."""
+    monkeypatch.setattr(ic.os, "getuid", lambda: 1000)
+    erzeugt = _merke_mkdtemp(monkeypatch)
+    gesehen: list[Path] = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        gesehen.append(Path(cmd[-1]))
+        assert gesehen[-1].is_file()
+        return FakeProc()
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    findings, _ = ic.check_rollen(_issue(block=KONSTANT_BLOCK), uid_repo)
+    plugin_dir = next(p for p in erzeugt
+                      if p.name.startswith("issuecheck-root-")
+                      and not p.name.startswith("issuecheck-root-basetemp-"))
+    assert gesehen == [plugin_dir / "test_issue_preflight.py"]
+    assert not (uid_repo / "tests" / "acceptance").exists()
+    assert findings == []
+
+
+def test_check_rollen_raeumt_repo_testdatei_bei_timeout_auf(tmp_path, monkeypatch):
+    """Bricht der zweite Lauf ab, verschwindet die Datei im Akzeptanzordner trotzdem."""
+    monkeypatch.setattr(ic.os, "getuid", lambda: 1000)
+    r = tmp_path / "repo"
+    (r / "sandbox").mkdir(parents=True)
+    (r / "tests" / "acceptance").mkdir(parents=True)
+
+    def fake_run(cmd, **kwargs):
+        assert list((r / "tests" / "acceptance").glob("test_issue_preflight*"))
+        raise ic.subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 1))
+
+    monkeypatch.setattr(ic.subprocess, "run", fake_run)
+    findings, _ = ic.check_rollen(_issue(block=KONSTANT_BLOCK), r, timeout=1)
+    assert _codes(findings) == ["root-lauf-nicht-ausfuehrbar"]
+    assert not list((r / "tests" / "acceptance").glob("test_issue_preflight*"))
