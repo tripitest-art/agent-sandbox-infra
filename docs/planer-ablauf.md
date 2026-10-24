@@ -71,7 +71,25 @@ The Planner writes issues, never code: no branches, no commits, no PRs, no merge
    Keep `test_issue_<N>` in the text; the worker replaces `<N>` with the actual issue number.
 
 Planners may only modify an issue as long as it does not carry label `in-arbeit`. Once in progress, communicate via comments.
-If an acceptance test must be corrected: update the issue; the subsequent PR will require `freigabe-geschützt` (`AGENTS.md`, Worker 5).
+If an acceptance test must be corrected, follow „Korrektur nach der Übernahme“ below; the subsequent PR will require `freigabe-geschützt` (`AGENTS.md`, Worker 5).
+
+## Korrektur nach der Übernahme
+
+Wird ein Issue korrigiert, nachdem ein Worker es übernommen hat (Label `in-arbeit`), meldet `acceptance-guard` am PR Regel 5
+(„Text von Issue #N wurde nach der Übernahme geändert“). Das ist gewollt. Der Ablauf ist seit dem Vorfall #317/#331
+(23.10.2026) festgelegt: dort meldete der Worker denselben Befund in drei Review-Runden, weil unklar war, wo das Label
+`freigabe-geschützt` hingehört und wer es setzt.
+
+- **Wann korrigieren (Planer):** nur wenn der Akzeptanztest nachweislich falsch oder unerfüllbar ist — belegt durch eine
+  Logzeile oder einen konkreten Befund im PR. Sonst genügt ein Kommentar am Issue; der Text bleibt unverändert.
+- **Was der Planer tut:** Issue korrigieren, `freigabe-geschützt` am **Issue** setzen und einen Kommentar mit der
+  Überschrift `Korrektur nach Übernahme` schreiben — was geändert wurde, warum, und der Hinweis
+  „PR braucht `freigabe-geschützt`“.
+- **Was der Reviewer prüft:** Kommentar vorhanden, Begründung stichhaltig, Test im PR entspricht dem neuen Issue-Text
+  (Guard-Zeile „entspricht Issue“). Erst dann lautet das Verdikt „Freigegeben“ für die Sache; das Label am PR bleibt
+  Stephans Entscheidung (Regel 4, 6).
+- **Wer das Label am PR setzt:** Stephan, nach dem Review (`gh pr edit <PR> --add-label "freigabe-geschützt"`).
+  Der Worker setzt es nie und wiederholt den Befund nicht häufiger, als der Guard-Text es hergibt.
 
 ## Agenten-Labels (Agent Labels)
 
