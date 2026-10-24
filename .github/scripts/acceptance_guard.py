@@ -19,7 +19,9 @@ machen, indem er sie abschwächt. Dieser Check ist der unabhängige Schiedsricht
    Sonst prüft Regel 2 nichts, der Check wäre trotzdem grün, und kein Reviewer kann die
    Modellfamilie abgleichen.
 
-Verstöße gegen 1, 3, 4 und 5 kann Stephan bewusst mit dem Label `freigabe-geschützt` erlauben.
+Verstöße gegen 1, 3 und 4 kann Stephan bewusst mit dem Label `freigabe-geschützt` am PR
+erlauben. Bei Regel 5 genügt dasselbe Label am verlinkten Issue: Wer den Issue-Text
+korrigiert, entscheidet das dort, und der Worker darf das Label nicht am PR nachtragen.
 Regel 2 und 6 kennen keine Ausnahme: Stimmt der Test nicht, wird das Issue korrigiert,
 fehlt etwas im PR-Text, wird der Text ergänzt.
 
@@ -194,13 +196,16 @@ def evaluate(
     issues: dict[int, str | None],
     read_head_file: Callable[[str], str | None],
     issue_meta: dict[int, tuple[str | None, str | None]] | None = None,
+    issue_labels: dict[int, set[str]] | None = None,
 ) -> Result:
     """Reine Logik, damit sie ohne GitHub testbar ist.
 
     files: Einträge aus GET /pulls/{n}/files (filename, status, previous_filename, patch)
+    labels: Label-Namen des PRs
     issues: verlinkte Issues -> Body (nur echte Issues, keine PRs)
     read_head_file: liest eine Datei im Stand des PR-Heads, None wenn sie fehlt
     issue_meta: Issue -> (last_edited_at, claimed_at); None = Regel 5 nicht prüfen
+    issue_labels: Issue -> Label-Namen; None = nur das PR-Label zählt (wie bisher)
     """
     res = Result()
     override = OVERRIDE_LABEL in labels
@@ -208,6 +213,16 @@ def evaluate(
     def protected(msg: str) -> None:
         if override:
             res.notes.append(f"Erlaubt durch Label `{OVERRIDE_LABEL}`: {msg}")
+        else:
+            res.violations.append(msg)
+
+    def protected_issue_edit(number: int, msg: str) -> None:
+        """Regel 5: Das Label am Issue entschärft nur den geänderten Issue-Text."""
+        if override:
+            res.notes.append(f"Erlaubt durch Label `{OVERRIDE_LABEL}`: {msg}")
+        elif OVERRIDE_LABEL in (issue_labels or {}).get(number, set()):
+            res.notes.append(
+                f"Erlaubt durch Label `{OVERRIDE_LABEL}` am Issue #{number}: {msg}")
         else:
             res.violations.append(msg)
 
@@ -247,7 +262,7 @@ def evaluate(
         if issue_meta is not None and number in issue_meta:
             edit = issue_edit_violation(number, *issue_meta[number])
             if edit:
-                protected(edit)
+                protected_issue_edit(number, edit)
         actual = read_head_file(path)
         if actual is None:
             res.violations.append(f"`{path}` fehlt. Akzeptanztests aus Issue #{number} 1:1 übernehmen.")
@@ -327,6 +342,15 @@ class GitHub:
             return False, None
         return True, d.get("body")
 
+    def issue_labels(self, number: int) -> set[str]:
+        """Label-Namen des Issues; fehlt das Issue, eine leere Menge.
+
+        Fehler werden bewusst nicht abgefangen: der Check soll dann rot werden, nicht
+        still grün. `freigabe-geschützt` am Issue entschärft nur Regel 5.
+        """
+        d = self._get(f"/issues/{number}")
+        return {lab["name"] for lab in (d or {}).get("labels", [])}
+
     def file_at(self, path: str, ref: str) -> str | None:
         return self._get(f"/contents/{path}?ref={ref}", raw=True)
 
@@ -382,11 +406,13 @@ def main() -> int:
 
     issues: dict[int, str | None] = {}
     issue_meta: dict[int, tuple[str | None, str | None]] = {}
+    issue_labels: dict[int, set[str]] = {}
     for n in linked_issues(pr.get("body")):
         real, body = gh.issue_body(n)
         if real:
             issues[n] = body
             issue_meta[n] = gh.issue_times(n)
+            issue_labels[n] = gh.issue_labels(n)
 
     res = evaluate(
         files=gh.pr_files(pr["number"]),
@@ -394,6 +420,7 @@ def main() -> int:
         issues=issues,
         read_head_file=lambda p: gh.file_at(p, pr["head"]["sha"]),
         issue_meta=issue_meta,
+        issue_labels=issue_labels,
     )
     if not issues:
         res.notes.append("PR verlinkt kein Issue („Closes #N“); Akzeptanz-Abgleich entfällt.")
