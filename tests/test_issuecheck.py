@@ -283,12 +283,6 @@ UID_BLOCK = (
 
 KONSTANT_BLOCK = "def test_konstant():\n    assert 42 == 42\n"
 
-# Node-ID eines Laufs aus einem anderen Temp-Ordner: der Pfad unterscheidet sich, nicht der Test.
-FREMDE_AUSGABE = (
-    "FAILED ../../issuecheck-abc/test_issue_preflight.py::test_nicht_root - AssertionError\n"
-    "1 failed in 0.10s\n"
-)
-
 
 @pytest.fixture
 def uid_repo(tmp_path):
@@ -329,13 +323,12 @@ def test_check_rollen_meldet_als_root_zusaetzlich_roten_test(uid_repo, monkeypat
     assert "test_nicht_root" in findings[0].text
 
 
-def test_check_rollen_prueft_als_root_die_unprivilegierte_rolle(uid_repo, monkeypatch):
-    # Preflight selbst als root (pre-push-Hook): der normale Lauf ist die root-Rolle,
-    # die zweite Runde muss die unprivilegierte Rolle prüfen und deshalb grün sein.
+def test_check_rollen_als_root_ueberspringt_zweiten_lauf(uid_repo, monkeypatch):
+    # Der pre-push-Hook fährt TEST_CMD selbst als root; ein zweiter Lauf könnte dort keine
+    # zusätzliche Rolle prüfen und würde die eingefrorenen Akzeptanztests nur erneut starten.
     monkeypatch.setattr(ic.os, "getuid", lambda: 0)
-    findings, _ = ic.check_rollen(_issue(block=UID_BLOCK), uid_repo, normal_ausgabe=FREMDE_AUSGABE)
-    assert _codes(findings) == ["laufnutzerabhaengig"]
-    assert "test_nicht_root" in findings[0].text
+    monkeypatch.setattr(ic.subprocess, "run", lambda *a, **k: pytest.fail("kein zweiter Lauf erwartet"))
+    assert ic.check_rollen(_issue(block=UID_BLOCK), uid_repo) == ([], "")
 
 
 def test_check_rollen_kein_befund_wenn_der_block_in_beiden_laeufen_rot_ist(repo, monkeypatch):

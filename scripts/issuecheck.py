@@ -409,19 +409,6 @@ _ROOT_PLUGIN = (
 _LAUF_GESCHEITERT = frozenset({"timeout", "pytest-start", "pytest-usage", "sammlungsfehler", "kein-test"})
 
 
-def _nutzer_plugin(uid: int) -> str:
-    """Plugin für die Gegenrichtung: ist der normale Lauf schon der root-Lauf (Preflight
-    selbst als root, etwa im pre-push-Hook), simuliert die zweite Runde einen unprivilegierten
-    Nutzer. Ohne sie wäre die Laufnutzer-Abhängigkeit genau dort unsichtbar, wo sie den Push
-    blockiert (#327)."""
-    return (
-        "# vom Preflight erzeugt: simuliert einen Lauf als unprivilegierter Nutzer.\n"
-        "import os\n"
-        f"os.getuid = lambda: {uid}\n"
-        f"os.getgid = lambda: {uid}\n"
-    )
-
-
 def _failed_ids(pytest_ausgabe: str) -> set[str]:
     """Node-IDs aller Zeilen, die mit „FAILED “ beginnen (`FAILED tests/x.py::test_y - …`
     → `tests/x.py::test_y`). Leeres Set, wenn keine solche Zeile vorkommt."""
@@ -446,33 +433,29 @@ def check_rollen(issue_md: str, repo: Path, normal_ausgabe: str = "", timeout: f
     """Führt den Akzeptanzblock zusätzlich als root aus und meldet laufnutzerabhängige Tests.
 
     Ablauf: Block über `extract_acceptance_block()` holen (sonst `([], "")`). Fehlt `getuid`
-    (Windows), ist keine Rollentrennung möglich → `([], "")`. Sonst den Block in ein
-    Verzeichnis unter `tempfile.mkdtemp(prefix="issuecheck-root-")` schreiben (Plugin
-    daneben), mit eigenem `--basetemp` und `PYTHONPATH` = Plugin-Verzeichnis + Repo +
-    `sandbox/` ausführen (`cwd=repo`) und beide Ausgaben über `_failed_ids()` vergleichen.
-    Ein Test, der nur in der root-Rolle rot ist, ergibt den Befund `laufnutzerabhaengig`.
-    Temp-Verzeichnisse werden im `finally` entfernt; ein nicht startbarer zweiter Lauf
-    ergibt nur eine Warnung, damit ein kaputter Preflight den Planer nicht blockiert.
+    (Windows) oder liefert er 0, ist der normale Lauf bereits der Hook-Lauf → `([], "")`
+    ohne zweiten Lauf. Sonst den Block in ein Verzeichnis unter
+    `tempfile.mkdtemp(prefix="issuecheck-root-")` schreiben (Plugin daneben), mit eigenem
+    `--basetemp` und `PYTHONPATH` = Plugin-Verzeichnis + Repo + `sandbox/` ausführen
+    (`cwd=repo`) und beide Ausgaben über `_failed_ids()` vergleichen. Ein Test, der nur in
+    der root-Rolle rot ist, ergibt den Befund `laufnutzerabhaengig`. Temp-Verzeichnisse
+    werden im `finally` entfernt; ein nicht startbarer zweiter Lauf ergibt nur eine Warnung,
+    damit ein kaputter Preflight den Planer nicht blockiert.
     """
     block = extract_acceptance_block(issue_md)
     if block is None:
         return [], ""
     getuid = getattr(os, "getuid", None)
-    if getuid is None:
+    if getuid is None or getuid() == 0:
         return [], ""
-    # Ist der Preflight selbst root und liegt die Ausgabe des normalen Laufs vor, war dieser
-    # der Hook-Lauf; dann prüft die zweite Runde die unprivilegierte Rolle. Ohne Ausgabe
-    # (direkter Aufruf) übernimmt sie die root-Rolle — sonst bliebe die Abhängigkeit genau
-    # dort unsichtbar, wo sie den Push blockiert (#327).
-    normale_rolle_root = getuid() == 0 and bool(normal_ausgabe.strip())
 
     repo = Path(repo).resolve()
     plugin_dir = Path(tempfile.mkdtemp(prefix="issuecheck-root-"))
     basetemp: Path | None = None
     try:
         basetemp = Path(tempfile.mkdtemp(prefix="issuecheck-root-basetemp-"))
-        plugin = "issuecheck_nutzer_plugin" if normale_rolle_root else "issuecheck_root_plugin"
-        plugin_text = _nutzer_plugin(1000) if normale_rolle_root else _ROOT_PLUGIN
+        plugin = "issuecheck_root_plugin"
+        plugin_text = _ROOT_PLUGIN
         (plugin_dir / f"{plugin}.py").write_text(plugin_text, encoding="utf-8")
         testfile = plugin_dir / "test_issue_preflight.py"
         testfile.write_text(block + "\n", encoding="utf-8")
@@ -511,12 +494,8 @@ def check_rollen(issue_md: str, repo: Path, normal_ausgabe: str = "", timeout: f
                          f"Der zweite Lauf endete mit einem pytest-Aufruffehler:\n{zweite_ausgabe.strip()}")],
                 zweite_ausgabe)
 
-    if normale_rolle_root:
-        root_ids = _test_namen(_failed_ids(normal_ausgabe))
-        andere_ids = _test_namen(_failed_ids(zweite_ausgabe))
-    else:
-        root_ids = _test_namen(_failed_ids(zweite_ausgabe))
-        andere_ids = _test_namen(_failed_ids(normal_ausgabe))
+    root_ids = _test_namen(_failed_ids(zweite_ausgabe))
+    andere_ids = _test_namen(_failed_ids(normal_ausgabe))
     mehr = root_ids - andere_ids
     if not mehr:
         return [], zweite_ausgabe
