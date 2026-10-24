@@ -1650,6 +1650,30 @@ def sync_issue_branch_with_main(n: int) -> bool:
     return False
 
 
+def rote_tests_aus_push_ausgabe(ausgabe: str, limit: int = 3) -> list[str]:
+    """Node-IDs der roten Tests aus der Ausgabe des Push-Befehls, sonst [].
+
+    Je Zeile, die mit `FAILED ` beginnt: der Teil davor/danach wird auf die Node-ID gekürzt
+    (alles ab ` - ` fällt weg, der Rest wird getrimmt). Höchstens `limit` Einträge, je
+    höchstens 120 Zeichen (härtere Kürzung auf 120), Duplikate entfernt, Reihenfolge wie in
+    der Ausgabe. Alles übrige der Ausgabe wird verworfen — die Funktion gibt nie mehr als
+    Testnamen zurück (Regel 5: keine Befehlsausgabe ins Log). Leere Eingabe oder Ausgabe
+    ohne `FAILED `-Zeile: `[]`. `limit <= 0`: `[]`."""
+    if limit <= 0:
+        return []
+    rote: list[str] = []
+    for zeile in (ausgabe or "").splitlines():
+        if not zeile.startswith("FAILED "):
+            continue
+        name = zeile[len("FAILED "):].split(" - ", 1)[0].strip()
+        if not name or name in rote:
+            continue
+        rote.append(name[:120])
+        if len(rote) >= limit:
+            break
+    return rote
+
+
 def open_pr(n: int) -> bool:
     """Legt nach dem Agentenlauf den PR zu Issue n an. True, wenn es danach einen offenen PR von
     issue_branch(n) gibt, sonst False.
@@ -1662,8 +1686,10 @@ def open_pr(n: int) -> bool:
     2. ["git", "rev-list", "--count", "origin/main..HEAD"] (cwd=WORKDIR, env=ENV, check=True): Zahl <= 1
        (nur der Akzeptanztest-Commit oder weniger) -> False, nichts weiter; Logzeile
        f"issue{n}: keine Änderungen über den Akzeptanztest hinaus, kein PR."
-    3. ["git", "push", "-u", "origin", branch] (cwd=WORKDIR, env=ENV, check=False): Exit != 0 -> False,
-       keine weitere Aktion, Zeile alarm(f"issue{n}", "Push abgelehnt (Tests rot oder GitHub-Fehler)").
+    3. ["git", "push", "-u", "origin", branch] (cwd=WORKDIR, env=ENV, check=False): Exit != 0 -> False;
+       davor genau eine Logzeile mit den roten Tests aus `rote_tests_aus_push_ausgabe()` (nur
+       Node-IDs, sonst der Hinweis, dass keine FAILED-Zeile vorliegt), dann unverändert
+       alarm(f"issue{n}", "Push abgelehnt (Tests rot oder GitHub-Fehler)").
        Der Ausgabetext des Befehls kommt nie ins Log (Regel 5).
     4. ["git", "log", "--reverse", "--format=%B%x00", "origin/main..HEAD"] (cwd=WORKDIR, env=ENV,
        check=True): stdout an NUL trennen, die erste Nachricht (Akzeptanztest-Commit) weglassen, leere
@@ -1711,6 +1737,11 @@ def open_pr(n: int) -> bool:
         text=True,
     )
     if res_push.returncode != 0:
+        rote = rote_tests_aus_push_ausgabe(f"{res_push.stdout or ''}\n{res_push.stderr or ''}")
+        if rote:
+            log(f"issue{n}: Push abgelehnt, rote Tests: {', '.join(rote)}")
+        else:
+            log(f"issue{n}: Push abgelehnt, keine FAILED-Zeile in der Push-Ausgabe.")
         alarm(f"issue{n}", "Push abgelehnt (Tests rot oder GitHub-Fehler)")
         return False
 
