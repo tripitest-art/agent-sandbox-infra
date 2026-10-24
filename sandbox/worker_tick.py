@@ -74,6 +74,9 @@ SLOT_TAG = f"w{WORKER_SLOT}" if WORKER_SLOT else ""
 # Verzeichnis der Slot-Telemetrie (/run/worker-slots/slot-<n>.json). Legt der Takt selbst an;
 # install.sh und die systemd-Units bleiben unangetastet (#14). qwen_webhook.py liest es.
 SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
+# #317: Obergrenze der Datei-Stichprobe im Sandbox-Check. Der Baum hat tausende Dateien; eine
+# Handvoll genügt, um einen root-eigenen Fehlgriff (#280) vor dem Claim zu erkennen.
+HEALTH_CHECK_MAX_FILES = 20
 OLLAMA = os.environ.get("OLLAMA", "http://192.168.0.210:11434")
 MODEL = os.environ.get("MODEL", "qwen3-coder-64k")
 LABEL = "agent-qwen"
@@ -2371,6 +2374,27 @@ def _rechte_ok(pfad: Path, uid: int, gids: list[int], schreiben: bool) -> bool:
     return not schreiben or bool(bits & 0o2)
 
 
+def _datei_schreibbar(datei: Path, uid: int, gids: list[int]) -> bool:
+    """Hat `uid` (mit Zusatzgruppen `gids`) auf `datei` Schreibrecht, wie der Kernel es beim
+    Schreiben prüft: erst Eigentümer-, dann Gruppen-, sonst Sonstige-Bits; nur das w-Bit zählt
+    (kein x — das für Ordner gilt und `_rechte_ok` fordert; die Ordner auf dem Weg zum Prüfling
+    sind bereits geprüft). `uid == 0` umgeht die Bits (CAP_DAC_OVERRIDE) und liefert True.
+    OSError beim stat: False."""
+    try:
+        st = datei.stat()
+    except OSError:
+        return False
+    if uid == 0:
+        return True
+    if st.st_uid == uid:
+        bits = (st.st_mode >> 6) & 0o7
+    elif st.st_gid in gids:
+        bits = (st.st_mode >> 3) & 0o7
+    else:
+        bits = st.st_mode & 0o7
+    return bool(bits & 0o2)
+
+
 def sandbox_health_check(workdir: str | Path, user: str | None = None) -> bool:
     """Kann `user` (sonst dieser Prozess) in `workdir` arbeiten? (#243)
 
@@ -2415,6 +2439,38 @@ def sandbox_health_check(workdir: str | Path, user: str | None = None) -> bool:
             art = "schreibbar" if ordner == pfad else "durchquerbar"
             log(f"⚠ Stephan: Sandbox-Check: {ordner} ist für Nutzer {user} nicht {art}.")
             return False
+    # #317: Datei-Stichprobe. Der Ordner-Check sieht nur Verzeichnisse; ein root-eigenes
+    # `sandbox/worker_tick.py` im Slot-Worktree (#280) blieb unsichtbar, der Claim wurde gesetzt
+    # und der Agent lief 30 Minuten bis zum `EACCES`. Bewusst `_datei_schreibbar` statt
+    # `_rechte_ok`: die fordert für `schreiben=True` auch das x-Bit, das Quelltextdateien nicht
+    # tragen. Im Slot-Worktree ist `.git` eine Datei und wird als solche geprüft; in ein
+    # `.git`-Verzeichnis des Klons wird nicht abgestiegen.
+    admin = Path(os.path.join(BASE_WORKDIR, ".git", "worktrees",
+                              os.path.basename(os.path.normpath(pfad))))
+    geprueft = 0
+    for wurzel in (pfad, admin):
+        try:
+            if not wurzel.is_dir():
+                continue
+        except OSError:
+            # Nicht prüfbar (z. B. `/root` im CI-Läufer): überspringen, statt den Check mit
+            # einer Ausnahme abzubrechen. Der Arbeitsordner selbst ist oben schon geprüft.
+            continue
+        for ordner, unterordner, dateien in os.walk(wurzel, followlinks=False):
+            unterordner[:] = sorted(u for u in unterordner if u != ".git")
+            for name in sorted(dateien):
+                datei = Path(ordner) / name
+                try:
+                    if not datei.is_file():
+                        continue
+                except OSError:
+                    continue
+                if not _datei_schreibbar(datei, uid, gids):
+                    log(f"⚠ Stephan: Sandbox-Check: {datei} ist für Nutzer {user} nicht schreibbar.")
+                    return False
+                geprueft += 1
+                if geprueft >= HEALTH_CHECK_MAX_FILES:
+                    return True
     return True
 
 
