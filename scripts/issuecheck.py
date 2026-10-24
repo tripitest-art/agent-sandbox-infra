@@ -453,6 +453,14 @@ def check_rollen(issue_md: str, repo: Path, normal_ausgabe: str = "", timeout: f
     Ein Test, der nur in der root-Rolle rot ist, ergibt den Befund `laufnutzerabhaengig`.
     Temp-Verzeichnisse werden im `finally` entfernt; ein nicht startbarer zweiter Lauf
     ergibt nur eine Warnung, damit ein kaputter Preflight den Planer nicht blockiert.
+
+    Wie `check_red()` (#175) liegt die Testdatei im Akzeptanzordner des Repos, wenn es
+    `tests/acceptance/` gibt: echte Akzeptanztests finden das Repo über
+    `Path(__file__).parents[2]`, aus einem Temp-Ordner zeigt das ins Leere (#349). Eine
+    solche Datei im Repo wird im `finally` entfernt; ohne Akzeptanzordner bleibt es beim
+    `plugin_dir` und es wird nie ein Ordner angelegt. Eine Ausgabe mit einer Zeile, die mit
+    „ERROR “ beginnt (Sammel-/Setup-Fehler), ergibt die Warnung
+    `root-lauf-nicht-ausfuehrbar` statt eines stillen Ergebnisses ohne Befund.
     """
     block = extract_acceptance_block(issue_md)
     if block is None:
@@ -467,6 +475,8 @@ def check_rollen(issue_md: str, repo: Path, normal_ausgabe: str = "", timeout: f
     normale_rolle_root = getuid() == 0 and bool(normal_ausgabe.strip())
 
     repo = Path(repo).resolve()
+    acceptance_dir = repo / "tests" / "acceptance"
+    repo_testfile: Path | None = None
     plugin_dir = Path(tempfile.mkdtemp(prefix="issuecheck-root-"))
     basetemp: Path | None = None
     try:
@@ -474,7 +484,13 @@ def check_rollen(issue_md: str, repo: Path, normal_ausgabe: str = "", timeout: f
         plugin = "issuecheck_nutzer_plugin" if normale_rolle_root else "issuecheck_root_plugin"
         plugin_text = _nutzer_plugin(1000) if normale_rolle_root else _ROOT_PLUGIN
         (plugin_dir / f"{plugin}.py").write_text(plugin_text, encoding="utf-8")
-        testfile = plugin_dir / "test_issue_preflight.py"
+        if acceptance_dir.is_dir():
+            # Wie check_red (#175): der Block lädt sein Modul über Path(__file__).parents[2].
+            # Aus dem Plugin-Ordner zeigt das auf /, der zweite Lauf scheiterte beim Sammeln (#349).
+            repo_testfile = acceptance_dir / f"test_issue_preflight_rolle_{os.getpid()}.py"
+            testfile = repo_testfile
+        else:
+            testfile = plugin_dir / "test_issue_preflight.py"
         testfile.write_text(block + "\n", encoding="utf-8")
 
         env = dict(os.environ)
@@ -502,6 +518,11 @@ def check_rollen(issue_md: str, repo: Path, normal_ausgabe: str = "", timeout: f
                              "Laufnutzer-Abhängigkeit bleibt ungeprüft.")], "")
         zweite_ausgabe = f"{proc.stdout}\n{proc.stderr}"
     finally:
+        if repo_testfile is not None:
+            try:
+                repo_testfile.unlink(missing_ok=True)
+            except OSError:
+                pass
         shutil.rmtree(plugin_dir, ignore_errors=True)
         if basetemp is not None:
             shutil.rmtree(basetemp, ignore_errors=True)
@@ -509,6 +530,15 @@ def check_rollen(issue_md: str, repo: Path, normal_ausgabe: str = "", timeout: f
     if proc.returncode == 4:
         return ([Finding("warnung", "root-lauf-nicht-ausfuehrbar",
                          f"Der zweite Lauf endete mit einem pytest-Aufruffehler:\n{zweite_ausgabe.strip()}")],
+                zweite_ausgabe)
+
+    sammelfehler = next((line.strip() for line in zweite_ausgabe.splitlines()
+                         if line.startswith("ERROR ")), None)
+    if sammelfehler:
+        return ([Finding("warnung", "root-lauf-nicht-ausfuehrbar",
+                         "Der zweite Lauf konnte den Akzeptanztest nicht ausführen "
+                         f"(Sammel-/Setup-Fehler: {sammelfehler}); "
+                         "Laufnutzer-Abhängigkeit bleibt ungeprüft.")],
                 zweite_ausgabe)
 
     if normale_rolle_root:
