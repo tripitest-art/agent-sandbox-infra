@@ -42,3 +42,20 @@ os.environ["AUDIT_LOG"] = os.path.join(_lauf, "audit.jsonl")
 os.environ["STATE"] = os.path.join(_lauf, "worker-state.json")
 os.environ["REVIEW_STATE"] = os.path.join(_lauf, "review-state.json")
 os.environ["REVIEW_DRAFTS"] = os.path.join(_lauf, "reviews")
+
+# Ersatz für `gh` (Goldene Regel 3: Tests laufen offline, ohne `gh`). Ohne ihn rufen die `main()`-Tests, die `w.gh`
+# nicht durchgehend faken, das echte `gh` auf: Auf einem Rechner mit angemeldetem `gh` setzt `claim_issue()` dann
+# wirklich Labels an GitHub (sc-digger #7 und #42, 23.10.2026), und jeder Lauf wartet auf das Netz (71 s statt 31 s).
+# Der Ersatz verhält sich wie ein nicht angemeldetes `gh` in GitHub Actions; `worker_tick.gh()` liefert dafür None.
+# Muss vor dem Import der Takt-Skripte stehen: Sie bauen `ENV` mit dem PATH von hier.
+_gh_bin = tempfile.mkdtemp(prefix="sandbox-bin-")
+_gh_meldung = "gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable."
+_gh_pfad = os.path.join(_gh_bin, "gh")
+with open(_gh_pfad, "w", encoding="utf-8") as _fh:
+    _fh.write(f'#!/bin/sh\necho "{_gh_meldung}" >&2\nexit 4\n')
+os.chmod(_gh_pfad, 0o755)
+if os.name == "nt":
+    with open(_gh_pfad + ".cmd", "w", encoding="utf-8") as _fh:
+        _fh.write(f"@echo {_gh_meldung} 1>&2\r\n@exit /b 4\r\n")
+os.environ["SANDBOX_TEST_BIN"] = _gh_bin
+os.environ["PATH"] = _gh_bin + os.pathsep + os.environ.get("PATH", "")
