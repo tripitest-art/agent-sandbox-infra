@@ -35,3 +35,16 @@ jobs:
             echo "::error::Möglicher Schlüssel im Repo gefunden (siehe oben)."
             exit 1
           fi
+
+  tests-als-root:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Python-Pakete
+        run: pip install pytest
+      - name: Tests als root (Umgebung des pre-push-Hooks)
+        run: sudo -E "$(command -v python)" -m pytest -q
