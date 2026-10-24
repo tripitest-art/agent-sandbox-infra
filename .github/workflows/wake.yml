@@ -4,6 +4,8 @@ name: wake
 # Nachricht an einen ntfy-Strom. Der Dienst agent-wake (sandbox/wake_listener.py) hört dort ausgehend
 # mit und startet daraufhin die Takt-Units sofort. Die Timer laufen unverändert weiter: Geht ein
 # Weckruf verloren, holt der nächste Takt die Arbeit nach.
+# Ein abgegebenes Review (`pull_request_review`, submitted) weckt ebenfalls: Nach „Änderungen nötig“ wartet die
+# Nacharbeit sonst bis zum nächsten Timer-Takt (#347).
 #
 # Sicherheit: Die Nachricht ist immer das Wort "wake". Aus dem Ereignis (Titel, Texte, Nummern,
 # Autor) landet nichts darin, und der Listener liest den Inhalt ohnehin nie (Regel 9). Es gibt kein
@@ -15,6 +17,8 @@ on:
     types: [labeled]
   pull_request:
     types: [opened, synchronize, reopened, labeled, closed]
+  pull_request_review:
+    types: [submitted]
   workflow_run:
     workflows: [tests, acceptance-guard]
     types: [completed]
