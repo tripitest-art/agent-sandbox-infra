@@ -52,9 +52,10 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py und worker_tick.py liegen daneben
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py, worker_frame.py und worker_tick.py liegen daneben
 import agent_settings  # noqa: E402
 import projects  # noqa: E402
+import worker_frame  # noqa: E402   # Akzeptanztest-Block aus dem Issue (für den gekürzten Diff)
 import worker_tick  # noqa: E402   # nur lesen: WORKER_NAMES für die Familienprüfung
 
 PROJECTS = projects.load_projects()   # ohne /etc/agent-projects.json: sc-digger allein
@@ -94,6 +95,8 @@ REVIEW_OUTAGE_FAILS = 3      # aufeinanderfolgende Fehlschläge je Modellalias b
 REVIEW_OUTAGE_MINUTEN = 30   # oder Minuten seit dem ersten Fehlschlag der Serie
 BIG_DIFF_CHARS = 90_000     # darüber: REVIEW_MODEL_BIG
 MAX_DIFF_CHARS = 400_000    # darüber: nicht prüfen, an Stephan melden
+ACCEPTANCE_OMITTED = ("(tests/acceptance/test_issue_{n}.py ausgelassen: wörtlich der Block unter "
+                      "„Akzeptanztests“ im Issue oben, von acceptance-guard geprüft)")
 PR_LIST_LIMIT = 10          # GraphQL-Kontingent schonen: max. 10 offene PRs je Takt
 BLOCKED_ISSUES_LIMIT = 20   # max. 20 blockierte Issues zur Entblock-Prüfung
 def _max_tokens() -> int:
@@ -1017,6 +1020,40 @@ def unblock_dependent_issues() -> list[int]:
     return unblocked
 
 
+def drop_acceptance_from_diff(diff: str, issue_no: int | None, issue_body: str | None) -> str:
+    """Diff ohne die zweite Kopie des Akzeptanztests.
+
+    Der Block steht schon unter „### Akzeptanztests“ im Issue; die neue Datei im Diff ist laut
+    Vertrag seine wörtliche Kopie (von acceptance-guard geprüft) und bringt dem Reviewer nichts.
+    Ersetzt wird nur der Abschnitt der neuen Datei ``tests/acceptance/test_issue_<n>.py``, dessen
+    hinzugefügte Zeilen dem Block entsprechen; sonst bleibt der Diff unverändert. Reine Funktion.
+    """
+    if issue_no is None or not diff:
+        return diff
+    block = worker_frame.extract_acceptance_block(issue_body)
+    if block is None:
+        return diff
+    target = f"tests/acceptance/test_issue_{issue_no}.py"
+    sections = re.split(r"(?m)^(?=diff --git )", diff)
+    for i, section in enumerate(sections):
+        m = re.match(r"diff --git a/(.+) b/(.+)\n", section)
+        if not m or m.group(1) != target or m.group(2) != target:
+            continue
+        lines = section.split("\n")
+        if not any(line.startswith("new file mode ") for line in lines):
+            continue
+        added = "\n".join(line[1:] for line in lines
+                          if line.startswith("+") and not line.startswith("+++ "))
+        # Wie worker_frame._normalize_code: Zeilenenden vereinheitlichen, Leerraum am Zeilenende weg.
+        normalized = "\n".join(z.rstrip() for z in
+                               added.replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip("\n")
+        if normalized != block:
+            continue
+        sections[i] = ACCEPTANCE_OMITTED.format(n=issue_no) + "\n"
+        return "".join(sections)
+    return diff
+
+
 def _run_pr_review() -> int:
     state = load_state()
     prs = gh_json("pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT), "--json",
@@ -1118,6 +1155,7 @@ def _run_pr_review() -> int:
             except subprocess.CalledProcessError as exc:
                 log(f"PR #{n}: GitHub-Abfrage scheitert ({safe_snippet(exc.stderr, 120)}), nächster Takt.")
                 return 0
+            diff = drop_acceptance_from_diff(diff, pr["issue_no"], issue["body"] if issue else None)
             if len(diff) > MAX_DIFF_CHARS:
                 log(f"PR #{n}: Diff zu groß ({len(diff)} Zeichen), bitte von Hand prüfen.")
                 state.setdefault("erledigt", []).append(key); save_state(state)

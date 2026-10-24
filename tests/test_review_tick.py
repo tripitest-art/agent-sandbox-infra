@@ -1753,3 +1753,41 @@ def test_call_llm_schickt_disable_fallbacks_fuer_den_aufgerufenen_alias(monkeypa
     r.call_llm("reviewer-go", [{"role": "user", "content": "u"}])
     assert seen["data"] == {"model": "reviewer-go", "messages": [{"role": "user", "content": "u"}],
                             "max_tokens": r.MAX_TOKENS, "disable_fallbacks": True}
+
+
+# --- Akzeptanztest nicht zweimal in den Review-Prompt (Issue #345) ---
+
+_AKZ_CODE = "def test_x():\n    assert 1 + 1 == 2\n"
+_AKZ_ISSUE = "### Ziel\n\nX.\n\n### Akzeptanztests\n\n```python\n" + _AKZ_CODE + "```\n"
+
+
+def _akz_datei(n, code=_AKZ_CODE):
+    kopf = (f"diff --git a/tests/acceptance/test_issue_{n}.py b/tests/acceptance/test_issue_{n}.py\n"
+            "new file mode 100644\nindex 0000000..1111111\n--- /dev/null\n"
+            f"+++ b/tests/acceptance/test_issue_{n}.py\n")
+    zeilen = code.rstrip("\n").split("\n")
+    return kopf + f"@@ -0,0 +1,{len(zeilen)} @@\n" + "".join(f"+{z}\n" for z in zeilen)
+
+
+def test_akzeptanztest_mit_crlf_im_issue_wird_ersetzt():
+    body = _AKZ_ISSUE.replace("\n", "\r\n")
+    diff = "diff --git a/a.py b/a.py\n+x\n" + _akz_datei(12)
+    out = r.drop_acceptance_from_diff(diff, 12, body)
+    assert r.ACCEPTANCE_OMITTED.format(n=12) in out
+    assert "assert 1 + 1 == 2" not in out
+
+
+def test_leerraum_am_zeilenende_verhindert_das_ersetzen_nicht():
+    diff = "diff --git a/a.py b/a.py\n+x\n" + _akz_datei(
+        12, code="def test_x():   \n    assert 1 + 1 == 2\t\n")
+    out = r.drop_acceptance_from_diff(diff, 12, _AKZ_ISSUE)
+    assert r.ACCEPTANCE_OMITTED.format(n=12) in out
+    assert "assert 1 + 1 == 2" not in out
+
+
+def test_zwei_dateien_im_diff_nur_der_akzeptanztest_faellt_weg():
+    vorher = "diff --git a/sandbox/a.py b/sandbox/a.py\n@@ -1 +1 @@\n-alt\n+neu\n"
+    nachher = "diff --git a/changelog.d/12.md b/changelog.d/12.md\nnew file mode 100644\n+x\n"
+    diff = vorher + _akz_datei(12) + nachher
+    assert r.drop_acceptance_from_diff(diff, 12, _AKZ_ISSUE) == (
+        vorher + r.ACCEPTANCE_OMITTED.format(n=12) + "\n" + nachher)
