@@ -125,3 +125,52 @@ def test_qwen_result_belegt_weiterhin_die_usage():
                                         "cache_read_input_tokens": 0, "cost": 0.5}})
     assert w.LAST_AGENT_USAGE == {"input_tokens": 11, "output_tokens": 2,
                                   "cache_read_input_tokens": 0, "cost": 0.5}
+
+
+# --- #367: Summe aller `step_finish`, `input_tokens` inklusive Cache ---
+
+
+def _schritt(reason: str, tokens: dict, cost: float | None = None) -> None:
+    part: dict = {"reason": reason, "tokens": tokens}
+    if cost is not None:
+        part["cost"] = cost
+    _stream({"type": "step_finish", "part": part})
+
+
+def test_summe_zaehlt_alle_schritte_und_cache_in_der_eingabe(monkeypatch):
+    monkeypatch.setattr(w, "OPENCODE_SUMME", None)
+    _schritt("tool-calls", {"input": 1000, "output": 50, "cache": {"read": 0, "write": 0}}, 0.01)
+    _schritt("tool-calls", {"input": 200, "output": 40, "cache": {"read": 900, "write": 0}}, 0.02)
+    _schritt("stop", {"input": 100, "output": 300, "cache": {"read": 1100, "write": 50}}, 0.03)
+    assert w.agent_usage() == {"input_tokens": 1000 + 200 + 900 + 100 + 1100 + 50,
+                               "output_tokens": 50 + 40 + 300,
+                               "cache_read_input_tokens": 0 + 900 + 1100,
+                               "cost": pytest.approx(0.06)}
+
+
+def test_zwei_laeufe_nacheinander_ohne_uebertrag(monkeypatch):
+    monkeypatch.setattr(w, "OPENCODE_SUMME", None)
+    _schritt("stop", {"input": 10, "output": 1}, 0.1)
+    erster = w.agent_usage()
+    # main() setzt das Global vor dem nächsten Lauf zurück; der zweite Lauf beginnt bei null.
+    monkeypatch.setattr(w, "OPENCODE_SUMME", None)
+    _schritt("stop", {"input": 5, "output": 2}, 0.2)
+    assert erster["input_tokens"] == 10
+    assert w.agent_usage() == {"input_tokens": 5, "output_tokens": 2,
+                               "cache_read_input_tokens": None, "cost": pytest.approx(0.2)}
+
+
+def test_schritt_ohne_cache_zaehlt_nur_input(monkeypatch):
+    monkeypatch.setattr(w, "OPENCODE_SUMME", None)
+    _schritt("stop", {"input": 7, "output": 3})
+    assert w.agent_usage() == {"input_tokens": 7, "output_tokens": 3,
+                               "cache_read_input_tokens": None, "cost": 0.0}
+
+
+def test_schritt_ohne_tokens_aendert_die_summe_nicht(monkeypatch):
+    monkeypatch.setattr(w, "OPENCODE_SUMME", None)
+    _schritt("stop", {"input": 4, "output": 2}, 0.5)
+    _stream({"type": "step_finish", "part": {"reason": "tool-calls"}})
+    assert w.agent_usage() == {"input_tokens": 4, "output_tokens": 2,
+                               "cache_read_input_tokens": None, "cost": pytest.approx(0.5)}
+
