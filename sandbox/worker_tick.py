@@ -237,6 +237,17 @@ REFERENZ_VERMERK = "Referenzumsetzung: Akzeptanztests grün"
 # (Stephan entscheidet). 40 Minuten: länger als ein Lauf (`timeout -k 30 1860`).
 VERWAIST_S = 2400
 VERWAIST = "_verwaist:"      # Vorsatz der Schlüssel im Zustand: f"_verwaist:{nummer}"
+# #346: Notiz vom gescheiterten Versuch. Sie steht je Auftrag unter f"_notiz:{skey}", geht beim
+# nächsten Versuch als eigener Block vor RUN_RULES in den Auftrag und als Kommentar ans Issue,
+# damit die nächste Agentenfamilie nicht denselben Fehler wiederholt.
+NOTIZ = "_notiz:"            # Vorsatz im Zustand: f"_notiz:{skey}"
+NOTIZ_ZEILEN = 15            # so viele Zeilen der letzten Testausgabe höchstens merken
+_FEHLERZEILE_RE = re.compile(r"^(FAILED |ERROR |E {3}|\w[\w.]*(Error|Exception): )")
+# Letzte Werkzeugausgabe mit Fehlerzeilen in diesem Lauf; merke_fehlerzeilen() ersetzt sie.
+AGENT_FEHLERZEILEN: list[str] = []
+# True, wenn watchdog_pruefen() den Agenten in diesem Lauf beendet hat. Nötig, weil `timeout`
+# das SIGTERM weitergibt und der Lauf dann ebenfalls mit 124 endet.
+WAECHTER_BEENDET: bool = False
 # Verzeichnisse, für die claim_job schon eine „⚠ Stephan:“-Zeile geschrieben hat. Eigener Merker,
 # weil claim_job keinen Zustand bekommt; der Takt ist ein kurzer Prozess je Auftrag.
 _CLAIM_WARNED: set[str] = set()
@@ -395,6 +406,64 @@ def redact(text: str, secrets: Iterable[str] | None = None) -> str:
         if value and len(value) >= 6:
             text = text.replace(value, "***")
     return text
+
+
+def fehlerzeilen(text: str, limit: int = NOTIZ_ZEILEN) -> list[str]:
+    """Die letzten `limit` Zeilen von `text`, die _FEHLERZEILE_RE treffen (#346).
+
+    Je Zeile höchstens 200 Zeichen und durch redact() geschickt (Regel 5), damit weder Zustand
+    noch Prompt oder Issue-Kommentar einen Schlüssel aus der Werkzeugausgabe tragen. Keine
+    Treffer: []. Wirft nie: die Notiz ist Beiwerk, sie darf den Takt nicht abbrechen."""
+    try:
+        treffer = [zeile.rstrip() for zeile in text.splitlines()
+                   if _FEHLERZEILE_RE.match(zeile.rstrip())]
+        return [redact(zeile[:200]) for zeile in treffer[-limit:]]
+    except Exception:
+        return []
+
+
+def merke_fehlerzeilen(text: str) -> None:
+    """Merkt sich `text` als letzte Werkzeugausgabe mit Fehlerzeilen (#346).
+
+    Ist fehlerzeilen(text) nicht leer, ersetzt es AGENT_FEHLERZEILEN vollständig (die letzte
+    Ausgabe mit Fehlern gewinnt); sonst bleibt der Merker unverändert. Wirft nie."""
+    global AGENT_FEHLERZEILEN
+    try:
+        zeilen = fehlerzeilen(text)
+        if zeilen:
+            AGENT_FEHLERZEILEN = zeilen
+    except Exception:
+        pass
+
+
+def versuch_notiz(rc: int, pr_offen: bool, zeilen: list[str],
+                  waechter: bool) -> str | None:
+    """Notiz für den nächsten Versuch, None bei einem gelungenen Lauf (#346).
+
+    Gelungen heißt: rc == 0, ein PR ist offen und nicht der Wächter hat beendet. Sonst nennt
+    die Notiz genau einen Grund in fester Rangfolge (Wächter, Zeitlimit, Exit-Code, kein PR)
+    und, falls vorhanden, die gemerkten Testfehler. Reine Funktion."""
+    if rc == 0 and pr_offen and not waechter:
+        return None
+    if waechter:
+        grund = (f"stopped by the watchdog (no file change for {NO_PROGRESS_MINUTEN} minutes). "
+                 "Start changing files earlier.")
+    elif rc == 124:
+        grund = f"time limit of {RUN_TIMEOUT // 60} minutes reached."
+    elif rc != 0:
+        grund = f"agent exited with code {rc}."
+    else:
+        grund = ("the run ended without a pull request (no commit beyond the acceptance test, "
+                 "or the push was rejected).")
+    notiz = "Previous attempt failed: " + grund
+    if zeilen:
+        notiz += "\nLast test errors:\n" + "\n".join(zeilen)
+    return notiz
+
+
+def notiz_block(notiz: str) -> str:
+    """Feste Markierungen um die Notiz im Auftrag (#346, Regel 9: die Notiz ist Daten)."""
+    return f"----- Previous attempt -----\n{notiz}\n----- End previous attempt -----"
 
 
 def log(msg: str) -> None:
@@ -2283,6 +2352,7 @@ def log_stream_line(line: str) -> None:
                 out = part.get("content")
                 out = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
                 mark = "✗ Fehler:\n" if part.get("is_error") else ""
+                merke_fehlerzeilen(out)   # #346: voller Text, nicht die gekürzte Logzeile
                 say(mark + _clip(out))
     elif kind == "result":
         err = event.get("error")
@@ -2318,6 +2388,7 @@ def log_stream_line(line: str) -> None:
         if isinstance(ausgabe, str) and ausgabe:
             metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
             fehler = state.get("status") == "error" or metadata.get("exit") not in (None, 0)
+            merke_fehlerzeilen(ausgabe)   # #346: voller Text, nicht die gekürzte Logzeile
             say(("✗ Fehler:\n" if fehler else "") + _clip(ausgabe))
     elif kind == "step_finish" and isinstance(part, dict):
         if part.get("reason") == "stop":
@@ -2593,6 +2664,7 @@ def watchdog_pruefen(proc, vorher: str | None, seit: float, cwd: str,
     `seit` ist der Start des Agenten in Sekunden, `jetzt` standardmäßig `jetzt_s()`. Genau eine
     WARNUNG-Zeile, dann `proc.terminate()` und True; sonst nichts und False. Wirft nie, damit
     ein Fehler im Wächter den Agentenlauf nicht abbricht."""
+    global WAECHTER_BEENDET
     try:
         if jetzt is None:
             jetzt = jetzt_s()
@@ -2600,6 +2672,7 @@ def watchdog_pruefen(proc, vorher: str | None, seit: float, cwd: str,
             return False
         log(f"WARNUNG: Agent hat seit {int((jetzt - seit) // 60)} Minuten nichts geändert, "
             "beende ihn.")
+        WAECHTER_BEENDET = True   # #346: unterscheidet den Wächter vom reinen Zeitlimit
         proc.terminate()
         return True
     except Exception:
@@ -4065,6 +4138,7 @@ def prepare_issue_frame(issue_no: int) -> Path | None:
 def main() -> int:
     global LAST_AGENT_ERROR, LAST_OPENED_PR
     global AGENT_INFRA_FEHLER
+    global AGENT_FEHLERZEILEN, WAECHTER_BEENDET
     skey = "-"          # Regel 7: vor der Auftragswahl meldet der Takt „-“
     gh_fehler = False   # True: der Lauf endete in der Ausnahmebehandlung, _gherr bleibt gemerkt
     try:
@@ -4249,7 +4323,13 @@ def main() -> int:
             # würde sonst wegen längst behobener Tests jeden Push ablehnen.
             sync_issue_branch_with_main(n)
 
-        prompt = f"{task}\n\n{RUN_RULES}"
+        # #346: Die Notiz des letzten gescheiterten Versuchs steht als eigener Block vor den
+        # Laufregeln. Nur bei Issue-Aufträgen; Nacharbeit und PR-Text bleiben unverändert.
+        alte_notiz = state.get(NOTIZ + skey) if n is not None else None
+        if isinstance(alte_notiz, str) and alte_notiz:
+            prompt = f"{task}\n\n{notiz_block(alte_notiz)}\n\n{RUN_RULES}"
+        else:
+            prompt = f"{task}\n\n{RUN_RULES}"
         name = "OpenCode" if AGENT == "opencode" else "Qwen Code"
         if BACKEND == "litellm":
             name += f" mit {ACTIVE_MODEL}"
@@ -4272,6 +4352,8 @@ def main() -> int:
         audit("run_started", key=skey, spend_vorher=spend_vorher)
         LAST_AGENT_ERROR = None   # log_stream_line setzt ihn nur bei einem Anbieterfehler
         AGENT_INFRA_FEHLER = None  # #243: nur die Ausgabe dieses Laufs zählt
+        AGENT_FEHLERZEILEN = []   # #346: nur die Ausgabe dieses Laufs zählt
+        WAECHTER_BEENDET = False  # #346: watchdog_pruefen() setzt es bei Stillstand
         rc = run_agent(prompt)
         usage = LAST_AGENT_USAGE   # run_agent() liefert nur den Exit-Code; Usage darüber (#222)
         lauf_ende, dauer = datetime.now(timezone.utc), round(time.monotonic() - begonnen, 1)
@@ -4324,6 +4406,22 @@ def main() -> int:
             # pr_opened Event nur bei neu erstelltem PR (#222)
             if opened and LAST_OPENED_PR is not None:
                 audit("pr_opened", issue=n, pr=LAST_OPENED_PR, branch=issue_branch(n))
+            # #346: Notiz für den nächsten Versuch im Zustand und als Kommentar am Issue, damit
+            # Stephan und bei einer Eskalation die nächste Agentenfamilie sie sehen. Ein
+            # gelungener Lauf löscht eine alte Notiz. Der Kommentar ist Beiwerk: scheitert gh,
+            # steht das im Log und der Lauf endet trotzdem normal.
+            notiz = versuch_notiz(rc, opened, list(AGENT_FEHLERZEILEN), WAECHTER_BEENDET)
+            if notiz is None:
+                if state.pop(NOTIZ + skey, None) is not None:
+                    save_state(state)
+            else:
+                state[NOTIZ + skey] = notiz
+                save_state(state)
+                try:
+                    gh("issue", "comment", str(n), "--body",
+                       f"Versuch {state[skey]} gescheitert ({ACTIVE_MODEL}), Notiz für den nächsten Versuch:\n\n```text\n{notiz}\n```")
+                except Exception as e:
+                    log(f"issue{n}: Notiz nicht als Kommentar gepostet ({type(e).__name__}).")
         # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
         if key.startswith("issue"):
             check_issue_result(key)
