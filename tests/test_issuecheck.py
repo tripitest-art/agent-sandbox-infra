@@ -272,3 +272,103 @@ def test_main_exitcode_eins_bei_statischem_fehler(tmp_path, capsys):
     ret = ic.main([str(p), "--format-only"])
     assert ret == 1
     assert "Nicht einstellen: 1 Fehler" in capsys.readouterr().out
+
+
+# ---------------- Rollen-Prüfung: worker und root (#327) ----------------
+UID_BLOCK = (
+    "from sandbox.nutzer import laufnutzer\n\n\n"
+    "def test_nicht_root():\n"
+    "    assert laufnutzer() != 0\n"
+)
+
+KONSTANT_BLOCK = "def test_konstant():\n    assert 42 == 42\n"
+
+# Node-ID eines Laufs aus einem anderen Temp-Ordner: der Pfad unterscheidet sich, nicht der Test.
+FREMDE_AUSGABE = (
+    "FAILED ../../issuecheck-abc/test_issue_preflight.py::test_nicht_root - AssertionError\n"
+    "1 failed in 0.10s\n"
+)
+
+
+@pytest.fixture
+def uid_repo(tmp_path):
+    """Repo, dessen sandbox/nutzer.py die echte Laufnutzer-uid zurückgibt."""
+    r = tmp_path / "uidrepo"
+    (r / "sandbox").mkdir(parents=True)
+    (r / "tests").mkdir()
+    (r / "sandbox" / "nutzer.py").write_text(
+        "import os\n\n\ndef laufnutzer() -> int:\n    return os.getuid()\n", encoding="utf-8"
+    )
+    return r
+
+
+def test_failed_ids_liest_node_id_ohne_fehlertext():
+    ausgabe = (
+        "FAILED tests/test_a.py::test_b - AssertionError: nein\n"
+        "2 failed, 1 passed in 0.10s\n"
+        "FAILED tests/test_c.py::test_d\n"
+    )
+    assert ic._failed_ids(ausgabe) == {"tests/test_a.py::test_b", "tests/test_c.py::test_d"}
+
+
+def test_failed_ids_ohne_failed_zeilen_ist_leer():
+    assert ic._failed_ids("3 passed in 0.01s\nERROR tests/test_x.py - ImportError\n") == set()
+
+
+def test_check_rollen_ohne_getuid_ueberspringt_zweiten_lauf(uid_repo, monkeypatch):
+    monkeypatch.setattr(ic.os, "getuid", None)
+    monkeypatch.setattr(ic.subprocess, "run", lambda *a, **k: pytest.fail("kein zweiter Lauf erwartet"))
+    assert ic.check_rollen(_issue(block=UID_BLOCK), uid_repo) == ([], "")
+
+
+def test_check_rollen_meldet_als_root_zusaetzlich_roten_test(uid_repo, monkeypatch):
+    # Preflight als worker: der normale Lauf ist grün, der root-Lauf fällt um.
+    monkeypatch.setattr(ic.os, "getuid", lambda: 1000)
+    findings, _ = ic.check_rollen(_issue(block=UID_BLOCK), uid_repo)
+    assert _codes(findings) == ["laufnutzerabhaengig"]
+    assert "test_nicht_root" in findings[0].text
+
+
+def test_check_rollen_prueft_als_root_die_unprivilegierte_rolle(uid_repo, monkeypatch):
+    # Preflight selbst als root (pre-push-Hook): der normale Lauf ist die root-Rolle,
+    # die zweite Runde muss die unprivilegierte Rolle prüfen und deshalb grün sein.
+    monkeypatch.setattr(ic.os, "getuid", lambda: 0)
+    findings, _ = ic.check_rollen(_issue(block=UID_BLOCK), uid_repo, normal_ausgabe=FREMDE_AUSGABE)
+    assert _codes(findings) == ["laufnutzerabhaengig"]
+    assert "test_nicht_root" in findings[0].text
+
+
+def test_check_rollen_kein_befund_wenn_der_block_in_beiden_laeufen_rot_ist(repo, monkeypatch):
+    # Regression: die Node-IDs der Läufe liegen in verschiedenen Temp-Ordnern. Ohne
+    # Normalisierung auf den Testnamen gälte jeder normale rote Block als laufnutzerabhängig.
+    monkeypatch.setattr(ic.os, "getuid", lambda: 1000)
+    block = "def test_immer_rot():\n    assert 1 == 2\n"
+    _, normal_ausgabe = ic.check_red(_issue(block=block), repo=repo)
+    assert "FAILED" in normal_ausgabe  # sonst prüft der Test die eigene Annahme
+    findings, _ = ic.check_rollen(_issue(block=block), repo=repo, normal_ausgabe=normal_ausgabe)
+    assert "laufnutzerabhaengig" not in _codes(findings)
+
+
+def test_check_rollen_raeumt_temp_verzeichnisse_auf(repo, monkeypatch):
+    monkeypatch.setattr(ic.os, "getuid", lambda: 1000)
+    erzeugt: list[Path] = []
+    echt = ic.tempfile.mkdtemp
+
+    def merke(*args, **kwargs):
+        pfad = echt(*args, **kwargs)
+        erzeugt.append(Path(pfad))
+        return pfad
+
+    monkeypatch.setattr(ic.tempfile, "mkdtemp", merke)
+    findings, _ = ic.check_rollen(_issue(block=KONSTANT_BLOCK), repo)
+    eigene = [p for p in erzeugt if p.name.startswith("issuecheck-root-")]
+    assert len(eigene) == 2
+    assert not [p for p in eigene if p.exists()]
+    assert "laufnutzerabhaengig" not in _codes(findings)
+
+
+def test_validate_verzichtet_auf_zweiten_lauf_bei_ausfuehrungsfehler(repo, monkeypatch):
+    monkeypatch.setattr(ic, "check_red", lambda *a, **k: ([ic.Finding("fehler", "timeout", "zu lang")], ""))
+    monkeypatch.setattr(ic, "check_rollen", lambda *a, **k: pytest.fail("kein zweiter Lauf erwartet"))
+    findings, _ = ic.validate(_issue(), repo)
+    assert _codes(findings) == ["timeout"]
