@@ -1410,9 +1410,9 @@ def test_choose_model_primary_ok_asks_only_once(monkeypatch):
 
 def test_model_for_attempt():
     assert w.model_for_attempt(0, "coder-go") == "coder-go"
-    assert w.model_for_attempt(1, "coder-go") == "coder-pro-go"
-    assert w.model_for_attempt(2, "coder-go") == "coder-kimi-go"
-    assert w.model_for_attempt(5, "coder-go") == "coder-kimi-go"
+    assert w.model_for_attempt(1, "coder-go") == "coder-kimi-go"
+    assert w.model_for_attempt(2, "coder-go") == "coder-pro-go"
+    assert w.model_for_attempt(5, "coder-go") == "coder-pro-go"
     assert w.model_for_attempt(1, "coder") == "coder"
     assert w.model_for_attempt(1, "coder-qwen-go") == "coder-qwen-go"
 
@@ -1434,8 +1434,8 @@ def test_main_litellm_escalates_on_second_attempt(monkeypatch, tmp_path, capsys)
     monkeypatch.setattr(w, "run_agent", lambda prompt: runs.append((prompt, w.agent_cmd(prompt))) or 0)
     assert w.main() == 0
     prompt, cmd = runs[0]
-    assert "Worker: DeepSeek V4 Pro (LiteLLM coder-pro-go, OpenCode Go)" in prompt
-    assert cmd[cmd.index("-m") + 1] in ("coder-pro-go", "litellm/coder-pro-go")
+    assert "Worker: Kimi K2.7 Code (LiteLLM coder-kimi-go, OpenCode Go)" in prompt
+    assert cmd[cmd.index("-m") + 1] in ("coder-kimi-go", "litellm/coder-kimi-go")
 
 
 def test_main_litellm_falls_back_and_names_model(monkeypatch, tmp_path, capsys):
