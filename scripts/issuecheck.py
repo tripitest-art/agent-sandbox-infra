@@ -14,6 +14,7 @@ import argparse
 import ast
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -394,14 +395,138 @@ def check_red(issue_md: str, repo: Path, timeout: float = 300, keep_tmp: bool = 
     return findings, output
 
 
+# Der pre-push-Hook führt TEST_CMD als root aus, dort umgeht CAP_DAC_OVERRIDE alle Modusbits.
+_ROOT_PLUGIN = (
+    "# vom Preflight erzeugt: simuliert den pre-push-Hook, dort läuft TEST_CMD als root.\n"
+    "import os\n"
+    "os.getuid = lambda: 0\n"
+    "os.getgid = lambda: 0\n"
+)
+
+# Befunde, die den Lauf selbst betreffen: ein zweiter Durchgang brächte nichts und würde nur
+# einen weiteren kaputten Lauf starten. „schon-gruen“ und „teilweise-gruen“ sind dagegen
+# Ergebnisse des Blocks und dürfen die Rollenprüfung nicht verhindern.
+_LAUF_GESCHEITERT = frozenset({"timeout", "pytest-start", "pytest-usage", "sammlungsfehler", "kein-test"})
+
+
+def _failed_ids(pytest_ausgabe: str) -> set[str]:
+    """Node-IDs aller Zeilen, die mit „FAILED “ beginnen (`FAILED tests/x.py::test_y - …`
+    → `tests/x.py::test_y`). Leeres Set, wenn keine solche Zeile vorkommt."""
+    ids: set[str] = set()
+    for line in pytest_ausgabe.splitlines():
+        if not line.startswith("FAILED "):
+            continue
+        node = line[len("FAILED "):].split(" - ", 1)[0].strip()
+        if node:
+            ids.add(node)
+    return ids
+
+
+def _test_namen(node_ids: set[str]) -> set[str]:
+    """Vergleichsschlüssel ohne Pfad: beide Läufe schreiben den Block in ein eigenes
+    Temp-Verzeichnis, die Node-ID unterscheidet sich daher im Pfad, nicht im Testnamen."""
+    return {node.split("::", 1)[-1] for node in node_ids}
+
+
+def check_rollen(issue_md: str, repo: Path, normal_ausgabe: str = "", timeout: float = 300,
+                 verbose: bool = False) -> tuple[list[Finding], str]:
+    """Führt den Akzeptanzblock zusätzlich als root aus und meldet laufnutzerabhängige Tests.
+
+    Ablauf: Block über `extract_acceptance_block()` holen (sonst `([], "")`). Fehlt `getuid`
+    (Windows) oder liefert er 0, ist der normale Lauf bereits der Hook-Lauf → `([], "")`
+    ohne zweiten Lauf. Sonst den Block in ein Verzeichnis unter
+    `tempfile.mkdtemp(prefix="issuecheck-root-")` schreiben (Plugin daneben), mit eigenem
+    `--basetemp` und `PYTHONPATH` = Plugin-Verzeichnis + Repo + `sandbox/` ausführen
+    (`cwd=repo`) und beide Ausgaben über `_failed_ids()` vergleichen. Ein Test, der nur in
+    der root-Rolle rot ist, ergibt den Befund `laufnutzerabhaengig`. Temp-Verzeichnisse
+    werden im `finally` entfernt; ein nicht startbarer zweiter Lauf ergibt nur eine Warnung,
+    damit ein kaputter Preflight den Planer nicht blockiert.
+    """
+    block = extract_acceptance_block(issue_md)
+    if block is None:
+        return [], ""
+    getuid = getattr(os, "getuid", None)
+    if getuid is None or getuid() == 0:
+        return [], ""
+
+    repo = Path(repo).resolve()
+    plugin_dir = Path(tempfile.mkdtemp(prefix="issuecheck-root-"))
+    basetemp: Path | None = None
+    try:
+        basetemp = Path(tempfile.mkdtemp(prefix="issuecheck-root-basetemp-"))
+        plugin = "issuecheck_root_plugin"
+        plugin_text = _ROOT_PLUGIN
+        (plugin_dir / f"{plugin}.py").write_text(plugin_text, encoding="utf-8")
+        testfile = plugin_dir / "test_issue_preflight.py"
+        testfile.write_text(block + "\n", encoding="utf-8")
+
+        env = dict(os.environ)
+        pythonpaths = [str(plugin_dir), str(repo)]
+        sandbox_dir = repo / "sandbox"
+        if sandbox_dir.is_dir():
+            pythonpaths.append(str(sandbox_dir))
+        if env.get("PYTHONPATH"):
+            pythonpaths.append(env["PYTHONPATH"])
+        env["PYTHONPATH"] = os.pathsep.join(pythonpaths)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider",
+               "-p", plugin, "--basetemp", str(basetemp), str(testfile)]
+        try:
+            proc = subprocess.run(cmd, cwd=str(repo), env=env, capture_output=True, text=True,
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return ([Finding("warnung", "root-lauf-nicht-ausfuehrbar",
+                             f"Der zweite Lauf lief länger als {timeout:g}s und wurde abgebrochen; "
+                             "Laufnutzer-Abhängigkeit bleibt ungeprüft.")], "")
+        except OSError as exc:
+            return ([Finding("warnung", "root-lauf-nicht-ausfuehrbar",
+                             f"Der zweite Lauf ließ sich nicht starten: {exc}; "
+                             "Laufnutzer-Abhängigkeit bleibt ungeprüft.")], "")
+        zweite_ausgabe = f"{proc.stdout}\n{proc.stderr}"
+    finally:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        if basetemp is not None:
+            shutil.rmtree(basetemp, ignore_errors=True)
+
+    if proc.returncode == 4:
+        return ([Finding("warnung", "root-lauf-nicht-ausfuehrbar",
+                         f"Der zweite Lauf endete mit einem pytest-Aufruffehler:\n{zweite_ausgabe.strip()}")],
+                zweite_ausgabe)
+
+    root_ids = _test_namen(_failed_ids(zweite_ausgabe))
+    andere_ids = _test_namen(_failed_ids(normal_ausgabe))
+    mehr = root_ids - andere_ids
+    if not mehr:
+        return [], zweite_ausgabe
+
+    return (
+        [Finding("fehler", "laufnutzerabhaengig",
+                 "Akzeptanztest hängt vom Laufnutzer ab: als root (pre-push-Hook) zusätzlich rot: "
+                 f"{', '.join(sorted(mehr)[:3])}. Zielnutzer fremd faken (uid != 0, Dateieigentümer ungleich) "
+                 "und über die Sonstige-Bits entscheiden; Elternordner nur mit x für Fremde "
+                 "(`| 0o011`) freigeben.")],
+        zweite_ausgabe,
+    )
+
+
 def validate(issue_md: str, repo: Path, run_tests: bool = True, keep_tmp: bool = False, verbose: bool = False) -> tuple[list[Finding], str]:
-    """check_static; bei Fehlern oder run_tests=False nur das. Sonst zusätzlich check_red."""
+    """check_static; bei Fehlern oder run_tests=False nur das. Sonst zusätzlich check_red und
+    check_rollen (zweiter Lauf in der root-Rolle). Die Ausgaben beider Läufe werden verkettet."""
     findings = check_static(issue_md)
     output = ""
     if not run_tests or any(f.level == "fehler" for f in findings):
         return findings, output
     red_findings, output = check_red(issue_md, Path(repo), keep_tmp=keep_tmp, verbose=verbose)
-    return findings + red_findings, output
+    findings += red_findings
+    if any(f.code in _LAUF_GESCHEITERT for f in red_findings):
+        return findings, output
+    rollen_findings, rollen_ausgabe = check_rollen(issue_md, Path(repo), normal_ausgabe=output,
+                                                   verbose=verbose)
+    findings += rollen_findings
+    if rollen_ausgabe:
+        output = f"{output}\n{rollen_ausgabe}"
+    return findings, output
 
 
 # ---------------- Bericht und CLI ----------------

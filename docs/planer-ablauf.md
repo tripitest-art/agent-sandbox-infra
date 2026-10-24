@@ -47,7 +47,10 @@ The Planner writes issues, never code: no branches, no commits, no PRs, no merge
 6. **Verify acceptance tests (with shell):** Save draft locally (e.g. `entwuerfe/issue-<topic>.md`) and run
    `python scripts/issuecheck.py <file>`. The script validates required headings, merge mode, AST constraints (no network,
    no time/randomness calls, no `skip`/`xfail`, no hardcoded `/root` paths, no accidental `Wartet auf:` lines), and executes
-   the acceptance test in isolation with pytest. The test MUST be **red** (failing) prior to implementation.
+   the acceptance test in isolation with pytest. The test MUST be **red** (failing) prior to implementation,
+   and it MUST stay green when the suite runs as root (the `pre-push` hook does): `issuecheck.py`
+   runs the block in a second role and reports tests that are additionally red there as
+   `laufnutzerabhaengig`.
    The skill `skills/agent-sandbox-planner/SKILL.md` guides this workflow. Record the pre-flight result under context.
    **Without shell access:** Apply label `entwurf` instead of `bereit` and state in context:
    „Akzeptanztests noch nicht ausgeführt (Planer ohne Shell)“. Stephan or an agent with shell runs `issuecheck.py` and
