@@ -1,0 +1,30 @@
+{
+  "providers": [
+    {
+      "name": "coder-glm",
+      "art": "litellm-alias",
+      "alias": "coder-glm"
+    },
+    {
+      "name": "groq",
+      "art": "openai-kompatibel",
+      "base_url": "https://api.groq.com/openai/v1",
+      "modell": "MODELL-EINTRAGEN",
+      "api_key_umgebung": "GROQ_API_KEY"
+    },
+    {
+      "name": "cerebras",
+      "art": "openai-kompatibel",
+      "base_url": "https://api.cerebras.ai/v1",
+      "modell": "MODELL-EINTRAGEN",
+      "api_key_umgebung": "CEREBRAS_API_KEY"
+    },
+    {
+      "name": "google-ai-studio",
+      "art": "openai-kompatibel",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "modell": "MODELL-EINTRAGEN",
+      "api_key_umgebung": "GOOGLE_AI_STUDIO_API_KEY"
+    }
+  ]
+}

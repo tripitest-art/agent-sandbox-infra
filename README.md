@@ -87,7 +87,7 @@ Details und Verträge: [`ROADMAP.md`](ROADMAP.md).
 | [`skills/`](skills/) | Agenten-Skills für dieses Projekt (`agent-sandbox-review`). |
 | [`scripts/`](scripts/) | Planer-Werkzeuge ohne Takt: `issuecheck.py` (Preflight für Issue-Texte) und `ws.py` (Worktrees je Werkzeug auf CT 106, auch der feste Planungs-Worktree `ws.py plan`; Tests in `tests/test_ws.py`). |
 | [`.github/`](.github/) | CI (`tests`, `acceptance-guard`), Issue- und PR-Vorlagen. Änderungen hier braucht Stephans Freigabe (`freigabe-geschützt`). |
-| [`sandbox/`](sandbox/) | Steuerungslogik: Setup (`install.sh`, `install-lib.sh`), Worker-Takt (`worker_tick.py`, Rahmen für Branch, Akzeptanztest und PR-Text in `worker_frame.py`, Symbol-Map der betroffenen Dateien in `repomap.py`), Review-Takt (`review_tick.py`), Einstellungsdatei (`agent_settings.py`), Server-Konfiguration lesen (`agent_conf.py`), Multi-Projektverwaltung (`projects.py`), Auto-Deploy (`autodeploy.py`, Timer `agent-sandbox-deploy` über `AUTODEPLOY=1`), Web-Dashboard (`dashboard.py`, Push-Meldungen in `dashboard_notify.py`, Review-Statistik in `dashboard_stats.py`, nur lesend, nur LAN, Dienst `agent-dashboard` über `DASHBOARD=1`), Wake-Listener (`wake_listener.py`, Dienst `agent-wake`), Changelog-Assembler (`assemble_changelog.py`), Housekeeping (`gc.py`, räumt über `agent-gc.timer` verwaiste Worktrees, gemergte Branches und alte Belegungen auf), eigenständige Schnittstellen-Module (`sandbox/core/gh_client.py` für die GitHub-CLI, `sandbox/core/litellm_client.py` für den LiteLLM-Proxy, `sandbox/core/claims.py` für die Auftrags-Belegung, `sandbox/core/git_ops.py` für Git-Operationen) und systemd-Units (`sandbox/systemd/`). |
+| [`sandbox/`](sandbox/) | Steuerungslogik: Setup (`install.sh`, `install-lib.sh`), Worker-Takt (`worker_tick.py`, Rahmen für Branch, Akzeptanztest und PR-Text in `worker_frame.py`, Symbol-Map der betroffenen Dateien in `repomap.py`), Review-Takt (`review_tick.py`), Einstellungsdatei (`agent_settings.py`), Server-Konfiguration lesen (`agent_conf.py`), Multi-Projektverwaltung (`projects.py`), Auto-Deploy (`autodeploy.py`, Timer `agent-sandbox-deploy` über `AUTODEPLOY=1`), Web-Dashboard (`dashboard.py`, Push-Meldungen in `dashboard_notify.py`, Review-Statistik in `dashboard_stats.py`, nur lesend, nur LAN, Dienst `agent-dashboard` über `DASHBOARD=1`), Wake-Listener (`wake_listener.py`, Dienst `agent-wake`), Changelog-Assembler (`assemble_changelog.py`), Housekeeping (`gc.py`, räumt über `agent-gc.timer` verwaiste Worktrees, gemergte Branches und alte Belegungen auf), Benchmark (`benchmark.py`, Vorlage `benchmark_providers.example.json`), eigenständige Schnittstellen-Module (`sandbox/core/gh_client.py` für die GitHub-CLI, `sandbox/core/litellm_client.py` für den LiteLLM-Proxy, `sandbox/core/claims.py` für die Auftrags-Belegung, `sandbox/core/git_ops.py` für Git-Operationen) und systemd-Units (`sandbox/systemd/`). |
 | [`proxmox/`](proxmox/) | Host-Skripte zur Erstellung des unprivilegierten Debian 12 LXC-Containers auf Proxmox VE (`host-create.sh`). |
 | [`hardware/`](hardware/) | AMD RDNA2 GPU-Tuning für den lokalen LLM-Host (LACT, 2100 MHz, −90 mV, 255 W) mit Benchmarks und Ollama-Overrides. **Nicht mehr aktiv verfolgt:** Das lokale Workstation-Konzept ist wegen Ineffizienz zugunsten von Cloud-Agenten, Free-Tiers und günstigen Abos pausiert; der Ordner bleibt nur als Referenz bestehen. |
 | [`tests/`](tests/) | Testsuite für Worker-, Review- und Dashboard-Logik, Multi-Projekte und `acceptance_guard.py` (ohne Netzwerk mit Mocks). |
@@ -147,6 +147,66 @@ Die Sandbox betreut mehrere Repositories parallel. In `/etc/agent-projects.json`
 
 ### 4. Wartung & Housekeeping
 Der Timer `agent-gc.timer` startet alle 6 Stunden `sandbox/gc.py` (installiert als `/root/gc.py`). Ein Durchlauf räumt drei Dinge auf: administrative Reste verwaister Git-Worktrees (`prune_worktrees` ruft `git worktree prune` im Klon jedes Projekts aus der Projektliste auf), lokale Branches, die bereits in `main` eingegangen sind (`cleanup_merged_branches` filtert `main`, `master` und den aktiven Branch heraus und löscht nur mit `git branch -d`; ungemergte Branches bleiben stehen, `-D` gibt es nicht), und Belegungsdateien in `/var/lib/worker-claims`, deren `.done`- oder `.claim`-Marke älter als 7 Tage ist (`prune_claims`; junge Dateien und fremde Endungen bleiben). Ein fehlender Klon oder ein Git-Fehler eines Repositories bricht den Durchlauf nicht ab; die Statistikzeile `gc: N Belegungen, M Branches, K Repositories aufgeräumt.` steht in `/root/worker.log`. Manuell prüfen: `python3 /root/gc.py`.
+
+### 5. Benchmark: welches Modell lohnt sich (`sandbox/benchmark.py`)
+`sandbox/benchmark.py` schickt alle aktiven Anbieter nacheinander durch den Aufgabenkatalog und
+bewertet die Antworten ohne Richtermodell. Der Benchmark **berät nur**: Er ändert keine
+Einstellung (`LITELLM_MODEL`, `REVIEW_MODEL`), schreibt weder ins Worker-Log noch ins Audit-Log
+und läuft nie parallel. Aufruf von Hand im Repository:
+
+```bash
+python sandbox/benchmark.py
+```
+
+Optionen:
+
+| Option | Bedeutung |
+|---|---|
+| `--providers PFAD` | Providerliste (JSON) im Format von `sandbox/core/benchmark_providers.py`; Vorgabe `AGENT_BENCHMARK_PROVIDERS`, sonst `/etc/agent-benchmark-providers.json` |
+| `--out PFAD` | Ergebnisdatei; Vorgabe `BENCHMARK_ERGEBNISSE`, sonst `/root/benchmark-ergebnisse.jsonl` |
+| `--wiederholungen N` | Versuche je Aufgabe, 1 bis 10 (Vorgabe 3) |
+| `--nur NAME` | nur diese Anbieter messen, wiederholbar |
+| `--ohne-aktuelle` | die aktuell eingestellten Worker-/Review-Aliase nicht mitmessen |
+| `--nur-aktuelle` | nur die aktuellen Aliase messen, keine Providerliste lesen |
+
+Die aktuell konfigurierten Aliase (`LITELLM_MODEL`, `REVIEW_MODEL`, `REVIEW_MODEL_BIG`) werden
+automatisch mitgemessen, damit die Frage „ist unsere Einstellung noch gut“ ohne Pflege der Liste
+beantwortet wird; bei gleichem Namen gewinnt der Eintrag der Liste. Fehlt der Schlüssel eines
+Anbieters, wird er übersprungen (`übersprungen: <name> (<grund>)`). Nach dem Lauf druckt das
+Skript je Anbieter `name: code B/G review B/G ratenbegrenzt K` (B bestanden, G gewertet, K
+ratenbegrenzte Versuche beider Arten) und `Ergebnisse: <pfad> (<n> Zeilen)`.
+
+Die Ergebnisdatei ist JSONL: eine Zeile je Versuch mit genau den Schlüsseln `lauf`, `zeit`,
+`anbieter`, `rolle`, `aufgabe`, `art` (`code` oder `review`), `versuch`, `bestanden`, `grund`,
+`ratenbegrenzt`, `dauer_s` und `kosten`. Ein Schlüssel steht nie in einer Zeile oder Ausgabe.
+
+Umgebungsvariablen: `LITELLM` (Basis-Adresse des Proxy) und `LITELLM_BENCHMARK_KEY` (eigenes
+Budget in LiteLLM, nur für die gemessenen Aliase) für die Alias-Anbieter,
+`AGENT_BENCHMARK_PROVIDERS` für den Listenpfad, `BENCHMARK_ERGEBNISSE` für die Ergebnisdatei
+sowie je Anbieter eine Variable mit seinem Schlüssel (`api_key_umgebung`, z. B. `GROQ_API_KEY`).
+Die Vorlage [`sandbox/benchmark_providers.example.json`](sandbox/benchmark_providers.example.json)
+enthält je einen Eintrag der Art `litellm-alias` und `openai-kompatibel`, ohne Schlüssel; die
+Beispiel-Adressen der Free-Anbieter sind vor der Inbetriebnahme zu prüfen.
+
+`ratenbegrenzt` heißt: Der Anbieter hat mit HTTP 429 abgelehnt, auch nach einer Pause von 20
+Sekunden und einem zweiten Aufruf. Solche Versuche zählen nur unter `ratenbegrenzt`, nicht als
+nicht gelöst und nicht in die Quote — ein abgelehnter Aufruf sagt nichts über das Modell.
+`quote` ist `bestanden / gewertet` und `None`, solange nichts gewertet wurde.
+
+Sicherheitshinweis zur Code-Ausführung: Die Code-Aufgaben führen Modellcode auf dieser Box aus.
+`sandbox/core/benchmark_code.py` erzwingt ein frisches temporäres Arbeitsverzeichnis mit
+`PATH=/usr/bin:/bin`, ein Zeitlimit mit `SIGKILL` auf die Prozessgruppe, Ressourcengrenzen
+(512 MiB Adressraum, CPU-Zeit, 1 MiB Dateigröße) und eine Socket-Sperre im Prüfskript. **Nicht**
+erzwungen sind Dateisystem-Schutz außerhalb des Arbeitsverzeichnisses (als root bleibt `/etc`
+lesbar), echte Netz-Isolierung (Unterprozesse und `ctypes` umgehen die Sperre) und Schutz gegen
+absichtliches Täuschen. Rechtehärtung (unprivilegierter Nutzer, `unshare`) ist eine
+Betriebsentscheidung für Phase 2.
+
+Der Abschnitt fasst die vier Module aus den vorangehenden Issues zusammen:
+`sandbox/core/openai_compat_client.py` (Chat-Aufruf je Anbieter),
+`sandbox/core/benchmark_providers.py` (Providerliste und aktuelle Aliase),
+`sandbox/core/benchmark_code.py` (Code-Aufgaben und abgesicherte Prüfung) und
+`sandbox/core/benchmark_review.py` (Review-Aufgaben und deterministische Bewertung).
 
 ---
 
