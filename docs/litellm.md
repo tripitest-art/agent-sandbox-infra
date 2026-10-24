@@ -238,6 +238,11 @@ router_settings:
       DefaultRetries: 0
 ```
 
+Der Review-Takt schickt bei jedem Modellaufruf `"disable_fallbacks": true` (#343), damit LiteLLM
+nicht still auf ein anderes Modell umleitet: Die Familienprüfung (Regel 6) prüft den Alias, also muss
+auch das antwortende Modell zu dieser Familie gehören; ausgewichen wird nur über `fallback_model()`
+im Skript.
+
 ---
 
 ## Hinweise zu OpenCode Go

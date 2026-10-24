@@ -1303,7 +1303,8 @@ def test_safe_snippet_makes_foreign_text_ready_for_a_log_line():
 def test_llm_payload_is_the_whole_request_body_without_tools():
     messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
     payload = r.llm_payload("coder-glm", messages)
-    assert payload == {"model": "coder-glm", "messages": messages, "max_tokens": r.MAX_TOKENS}
+    assert payload == {"model": "coder-glm", "messages": messages, "max_tokens": r.MAX_TOKENS,
+                       "disable_fallbacks": True}
     assert "tools" not in payload and "tool_choice" not in payload
 
 
@@ -1726,3 +1727,29 @@ def test_erfolgreicher_aufruf_loescht_den_ausfall_zaehler(monkeypatch, tmp_path)
     assert r.run_once() == 0
     assert calls["llm"] == 1
     assert "coder-glm" not in r.load_state().get("ausfall", {})
+
+
+# --- LiteLLM-Fallbacks im Review-Aufruf abschalten (Issue #343) ---
+
+def test_llm_payload_disables_litellm_fallbacks():
+    """#343: Der Alias, dessen Familie geprüft wird, muss auch der Antwortende sein; LiteLLM darf
+    nicht still auf coder-glm oder Gemini umleiten."""
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+    payload = r.llm_payload("reviewer-go", messages)
+    assert payload["disable_fallbacks"] is True
+    assert set(payload) == {"model", "messages", "max_tokens", "disable_fallbacks"}
+
+
+def test_call_llm_schickt_disable_fallbacks_fuer_den_aufgerufenen_alias(monkeypatch):
+    seen = {}
+
+    def urlopen(req, timeout=None):
+        seen["data"] = json.loads(req.data)
+        answer = {"choices": [{"message": {"content": "**Freigegeben**"}, "finish_reason": "stop"}],
+                  "usage": {"completion_tokens": 5}}
+        return io.BytesIO(json.dumps(answer).encode())
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", urlopen)
+    r.call_llm("reviewer-go", [{"role": "user", "content": "u"}])
+    assert seen["data"] == {"model": "reviewer-go", "messages": [{"role": "user", "content": "u"}],
+                            "max_tokens": r.MAX_TOKENS, "disable_fallbacks": True}
