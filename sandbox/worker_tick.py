@@ -179,6 +179,12 @@ AGENT = os.environ.get("AGENT", "qwen-code")   # oder "opencode"
 # Damit kann das Modell über Shell-Aufrufe weder /etc/*.env (600 root) noch /root/.config/gh
 # oder fremde Worktrees lesen. Den Nutzer legt sandbox/install.sh an.
 AGENT_USER = os.environ.get("AGENT_USER", "worker")
+# #318: Schreibende git-Befehle des Takts laufen als dieser Nutzer, damit ihre Dateien und Reflogs
+# sofort dem Agenten gehören (#280: `EACCES` auf `sandbox/worker_tick.py`, `git commit` scheitert
+# am Reflog in `<Klon>/.git/worktrees/<slot>`). install.sh schreibt `AGENT_USER` in die Worker-Unit;
+# leer = aus, dann bleibt jeder Aufruf wie bisher (Dev, CI, alle bestehenden Tests). Lesende
+# Befehle, der Push und `gh` bleiben root.
+GIT_USER: str = os.environ.get("GIT_USER", "")
 PR_TEMPLATE = ".github/pull_request_template.md"
 TOOL_OUTPUT_LINES = 15      # so viele Zeilen je Werkzeugausgabe ins Log
 # Obergrenzen der Listenabfragen (#200): Ohne --limit fordert gh bis zu 30 Einträge an, bei
@@ -1633,12 +1639,13 @@ def sync_issue_branch_with_main(n: int) -> bool:
         return True
 
     gemergt = subprocess.run(["git", "merge", "--no-edit", "origin/main"],
-                             cwd=WORKDIR, env=ENV, check=False)
+                             cwd=WORKDIR, env=ENV, check=False, **agent_run_kwargs())
     if gemergt.returncode == 0:
         return True
 
     # Nichts automatisch auflösen: der Agent entscheidet im Lauf, der Branch bleibt unverändert.
-    subprocess.run(["git", "merge", "--abort"], cwd=WORKDIR, env=ENV, check=False)
+    subprocess.run(["git", "merge", "--abort"], cwd=WORKDIR, env=ENV, check=False,
+                   **agent_run_kwargs())
     log(f"Warnung: issue{n}: origin/main lässt sich nicht in den Branch mergen (Konflikt).")
     return False
 
@@ -3899,13 +3906,34 @@ def ensure_pre_push_hook() -> str | None:
     return install_pre_push_hook(git_hooks_dir(WORKDIR), TEST_CMD)
 
 
+def agent_run_kwargs() -> dict[str, str]:
+    """{"user": GIT_USER, "group": GIT_USER} für schreibende git-Befehle, sonst {}.
+
+    Das Opt-in kommt aus GIT_USER (#318). Nur als root lässt sich der Subprozess auf einen anderen
+    Nutzer umstellen; unter Windows gibt es diesen Rechte-Drop nicht, und ein Nicht-root-Takt kann
+    ihn nicht ausüben. Prüfreihenfolge bewusst so: Der FakeOs aus Issue #40 hat weder `name` noch
+    `geteuid`, ein direkter Zugriff bräche test_issue_40. Ohne Opt-in ändert sich kein Aufruf."""
+    if not GIT_USER:
+        return {}
+    if getattr(os, "name", None) == "nt":
+        return {}
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None or geteuid() != 0:
+        return {}
+    return {"user": GIT_USER, "group": GIT_USER}
+
+
 def prepare_workdir() -> None:
-    """Bereitet das Arbeitsverzeichnis für einen neuen Lauf vor (main oder worktree)."""
+    """Bereitet das Arbeitsverzeichnis für einen neuen Lauf vor (main oder worktree).
+
+    Die schreibenden Befehle (worktree add, checkout, reset, clean) laufen mit
+    `agent_run_kwargs()` als Agentennutzer; beide Fetches bleiben root."""
     base = BASE_WORKDIR if os.path.exists(BASE_WORKDIR) else WORKDIR
     if WORKDIR == base:
-        for cmd in (["git", "fetch", "-q", "origin"], ["git", "checkout", "-qf", "main"],
+        subprocess.run(["git", "fetch", "-q", "origin"], cwd=WORKDIR, check=True, env=ENV)
+        for cmd in (["git", "checkout", "-qf", "main"],
                     ["git", "reset", "-q", "--hard", "origin/main"], ["git", "clean", "-qfd"]):
-            subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
+            subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV, **agent_run_kwargs())
         return
 
     # Worktree-Modus: Basis-Repo fetchen (mit Lock gegen parallele Fetches)
@@ -3929,12 +3957,12 @@ def prepare_workdir() -> None:
     if not os.path.exists(WORKDIR):
         os.makedirs(os.path.dirname(WORKDIR), exist_ok=True)
         subprocess.run(["git", "worktree", "add", "--force", "--detach", WORKDIR, "origin/main"],
-                       cwd=base, check=True, env=ENV)
+                       cwd=base, check=True, env=ENV, **agent_run_kwargs())
     else:
         for cmd in (["git", "checkout", "-qf", "--detach", "origin/main"],
                     ["git", "reset", "-q", "--hard", "origin/main"],
                     ["git", "clean", "-qfd"]):
-            subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV)
+            subprocess.run(cmd, cwd=WORKDIR, check=True, env=ENV, **agent_run_kwargs())
 
 
 _ECHTE_PREPARE_WORKDIR = prepare_workdir
@@ -3961,7 +3989,8 @@ def prepare_issue_frame(issue_no: int) -> Path | None:
     body = data.get("body") if isinstance(data, dict) else None
 
     def run(cmd: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(cmd, cwd=WORKDIR, env=ENV, check=True)
+        # #318: checkout -B, add und commit (#234) legen ihre Dateien im Eigentum des Agenten an.
+        return subprocess.run(cmd, cwd=WORKDIR, env=ENV, check=True, **agent_run_kwargs())
 
     path = worker_frame.setup_issue_branch(WORKDIR, issue_no, body, run)
     if path is not None:

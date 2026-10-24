@@ -330,6 +330,8 @@ Environment=AGENT=$AGENT
 Environment=WAKE_PC=$WAKE_PC
 Environment=LANG=C.UTF-8
 Environment=QWEN_CODE_SUPPRESS_YOLO_WARNING=1
+# #318: Schreibende git-Befehle des Takts laufen als Agentennutzer (AGENT_USER, oben gesetzt).
+Environment=GIT_USER=$AGENT_USER
 Environment=WORKER_SLOT=%i
 $(slot_limit_lines)
 ExecStart=/usr/bin/flock -n /run/qwen-worker-w%i.lock /usr/bin/python3 /root/worker_tick.py
