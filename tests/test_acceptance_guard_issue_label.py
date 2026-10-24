@@ -56,8 +56,10 @@ def test_bericht_zeigt_die_entschaerfung_mit_issue_nummer():
 
 
 def test_issue_label_entschaerft_kein_neues_skip():
-    files = [{"filename": "tests/test_neu.py", "status": "modified",
-              "patch": "+@pytest.mark.skip(reason='kaputt')"}]
+    # Marker zusammensetzen: stünde er wörtlich in einer Zeile dieser Datei, meldete der
+    # Guard das Testdatum selbst als neues skip in seinem eigenen Diff.
+    marker = "+@" + "pytest.mark." + "skip(reason='kaputt')"
+    files = [{"filename": "tests/test_neu.py", "status": "modified", "patch": marker}]
     res = _run(set(), {7: {LABEL}}, files=files)
     assert not res.ok
     assert any("skip/xfail" in v for v in res.violations)
