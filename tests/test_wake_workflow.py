@@ -39,3 +39,8 @@ def test_ereignisse_passen_zu_den_takten():
     for needle in ("issues:", "pull_request:", "workflow_run:", "workflows: [tests, acceptance-guard]",
                    "'bereit'", "'review-anfordern'"):
         assert needle in CODE
+
+
+def test_abgegebenes_review_weckt_die_takte():
+    # Der Review-Takt postet sein Urteil per `gh pr review`; die Nacharbeit wartet darauf (#347).
+    assert re.search(r"^  pull_request_review:\n    types: \[submitted\]\s*$", CODE, re.M)
