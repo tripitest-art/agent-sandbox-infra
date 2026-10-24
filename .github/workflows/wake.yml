@@ -15,6 +15,8 @@ on:
     types: [labeled]
   pull_request:
     types: [opened, synchronize, reopened, labeled, closed]
+  pull_request_review:
+    types: [submitted]
   workflow_run:
     workflows: [tests, acceptance-guard]
     types: [completed]
@@ -29,7 +31,8 @@ concurrency:
 jobs:
   wake:
     # Nur Ereignisse, auf die ein Takt wartet: Issue wird `bereit`, PR kommt oder ändert sich,
-    # Label `review-anfordern`, PR geschlossen (Merge gibt blockierte Issues frei), Checks fertig.
+    # Label `review-anfordern`, PR geschlossen (Merge gibt blockierte Issues frei), Review abgegeben
+    # (die Nacharbeit wartet darauf), Checks fertig.
     if: >-
       github.event_name != 'issues' && github.event_name != 'pull_request' ||
       github.event_name == 'issues' && github.event.label.name == 'bereit' ||
