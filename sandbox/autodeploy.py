@@ -28,6 +28,10 @@ LOCK_DIR: str = os.environ.get("LOCK_DIR", "/run")
 INFRA_DIR: str = os.environ.get("INFRA_DIR", "/root/agent-sandbox-infra")
 # Ein Lauf darf lange dauern (install.sh macht apt-get); danach gilt er als hängend.
 COMMAND_TIMEOUT: int = 3600
+# #353: Vorrang-Marke. Ist der Takt beschäftigt und liegt ein neuer Stand auf origin/main, hält
+# sie den Worker-Takt von neuen Issue-Aufträgen ab, bis der Deploy gelaufen ist.
+PENDING_FILE: str = os.environ.get("DEPLOY_PENDING_FILE", "/run/agent-deploy-pending")
+BUSY_DETAIL: str = "Worker oder Review aktiv, Deploy wartet"   # derselbe Text wie in deploy_once()
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess]
 
@@ -159,6 +163,53 @@ def save_state(repo: Path, state: dict) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _remove_pending(path: str) -> None:
+    """Entfernt die Vorrang-Marke; eine fehlende Marke ist kein Fehler."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def mark_pending(repo: Path, run: Runner, result: DeployResult,
+                 pending_file: str | None = None) -> str | None:
+    """Legt die Vorrang-Marke an oder entfernt sie; Rückgabe: der Ziel-Commit in der Marke.
+
+    Nur ein wegen beschäftigtem Takt übersprungener Lauf kann eine Marke setzen: Dann wird
+    `origin/main` geholt und mit `HEAD` verglichen. Gibt es einen neuen, nicht als fehlerhaft
+    vermerkten Stand, steht er atomar in der Marke. In jedem anderen Fall (Deploy lief, kein
+    neuer Stand, bekannter Fehlerstand) wird die Marke entfernt; ein `git fetch`-Fehler lässt
+    sie unverändert. Ein OSError beim Schreiben/Löschen ergibt None, statt den Deploy-Lauf zu
+    stören (Regel 7).
+    """
+    path = PENDING_FILE if pending_file is None else pending_file
+    if result.status != "uebersprungen" or result.detail != BUSY_DETAIL:
+        _remove_pending(path)
+        return None
+
+    fetch = run(["git", "fetch", "--quiet", "origin", "main"])
+    if fetch.returncode != 0:
+        return None
+    old_p = run(["git", "rev-parse", "--short", "HEAD"])
+    new_p = run(["git", "rev-parse", "--short", "origin/main"])
+    old, new = _out(old_p), _out(new_p)
+    if old_p.returncode != 0 or new_p.returncode != 0 or not old or not new:
+        return None
+    if old == new or new == load_state(Path(repo)).get("bad"):
+        _remove_pending(path)
+        return None
+
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(new + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        _remove_pending(tmp)
+        return None
+    return new
 
 
 def _out(proc: subprocess.CompletedProcess) -> str:
@@ -311,6 +362,7 @@ def main(
     python = venv_python if os.path.exists(venv_python) else sys.executable
     test_cmd, isoliert = choose_test_cmd(python, repo, runner)
     result = deploy_once(repo, runner, logger, test_cmd=test_cmd)
+    mark_pending(repo, runner, result)
     if not isoliert and result.status in ("ausgerollt", "zurueckgerollt"):
         logger("Pre-Flight lief ohne Isolation (systemd-run nicht nutzbar)")
     if result.status != "unveraendert":

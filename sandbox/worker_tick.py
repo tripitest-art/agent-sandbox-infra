@@ -74,6 +74,12 @@ SLOT_TAG = f"w{WORKER_SLOT}" if WORKER_SLOT else ""
 # Verzeichnis der Slot-Telemetrie (/run/worker-slots/slot-<n>.json). Legt der Takt selbst an;
 # install.sh und die systemd-Units bleiben unangetastet (#14). qwen_webhook.py liest es.
 SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
+# #353: Vorrang des Auto-Deploys. Liegt ein neuer Stand auf origin/main und ist der Takt
+# beschäftigt, legt autodeploy.py diese Marke an; solange sie jung ist, nimmt der Takt keine
+# neuen Issue-Aufträge an, damit sich die Slots leeren. Älter als das Limit -> wieder Arbeit
+# und eine „⚠ Stephan:“-Meldung, statt die Worker endlos zu sperren (Regel 7).
+DEPLOY_PENDING_FILE: str = os.environ.get("DEPLOY_PENDING_FILE", "/run/agent-deploy-pending")
+DEPLOY_PENDING_MAX_AGE_S: int = 3600
 # #317: Obergrenze der Datei-Stichprobe im Sandbox-Check. Der Baum hat tausende Dateien; eine
 # Handvoll genügt, um einen root-eigenen Fehlgriff (#280) vor dem Claim zu erkennen.
 HEALTH_CHECK_MAX_FILES = 20
@@ -3804,6 +3810,36 @@ def main_is_red_local(state: dict) -> bool:
     return False
 
 
+def deploy_steht_an(state: dict, path: str | None = None, now: float | None = None) -> bool:
+    """True, solange der Auto-Deploy auf einen freien Takt wartet (#353).
+
+    Die Marke (`DEPLOY_PENDING_FILE`, Inhalt: Ziel-Commit) legt autodeploy.py an, wenn ein neuer
+    Stand auf `origin/main` liegt und der Takt beschäftigt ist. Junge Marke -> keine neuen
+    Issue-Aufträge, damit sich die Slots leeren. Älter als `DEPLOY_PENDING_MAX_AGE_S` -> wieder
+    Arbeit und eine laute „⚠ Stephan:“-Meldung, statt die Worker endlos zu sperren (Regel 7).
+    Fehlt oder klemmt die Marke, wird ein gemerkter Zustandsschlüssel entfernt, damit eine
+    spätere Marke erneut meldet.
+    """
+    path = DEPLOY_PENDING_FILE if path is None else path
+    try:
+        sha = Path(path).read_text(encoding="utf-8").strip() or "unbekannt"
+        mtime = os.path.getmtime(path)
+    except OSError:
+        if state.pop("_deploypending", None) is not None:
+            save_state(state)
+        return False
+    if now is None:
+        now = time.time()
+    if now - mtime <= DEPLOY_PENDING_MAX_AGE_S:
+        log_on_change(state, "_deploypending", sha,
+                      f"Deploy von {sha} steht an, keine neuen Issue-Aufträge.")
+        return True
+    log_on_change(state, "_deploypending", "alt:" + sha,
+                  f"⚠ Stephan: Deploy von {sha} steht seit über 60 Minuten an; "
+                  "neue Issue-Aufträge laufen wieder.")
+    return False
+
+
 def find_job(state: dict):
     """Erster Auftrag, dessen Schlüssel weder geparkt noch von einem anderen Slot belegt oder
     erledigt ist, oder None.
@@ -3831,7 +3867,7 @@ def find_job(state: dict):
     except (ValueError, TypeError):
         takes_state = True
     job = issue_job(skip, state=state) if takes_state else issue_job(skip)
-    if job and (main_is_red(state) or main_is_red_local(state)):
+    if job and (main_is_red(state) or main_is_red_local(state) or deploy_steht_an(state)):
         return None
     return job
 
