@@ -2264,6 +2264,10 @@ LAST_AGENT_ERROR: str | None = None
 # Wird von log_stream_line() für beide Agenten befüllt: Qwen aus dem `result`-Event, OpenCode
 # aus `step_finish` mit reason "stop" (#316).
 LAST_AGENT_USAGE: dict | None = None
+# Summe aller `step_finish` des laufenden OpenCode-Laufs, sonst None (#367). Jeder Werkzeugaufruf
+# ist ein eigener Modellaufruf mit eigenem `step_finish`; nur der letzte Schritt (reason "stop")
+# wäre 10- bis 90-fach zu klein. `main()` setzt sie vor jedem Lauf auf None.
+OPENCODE_SUMME: dict | None = None
 # Nummer des PRs, den open_pr() in diesem Lauf neu angelegt hat, sonst None (#222).
 LAST_OPENED_PR: int | None = None
 
@@ -2284,6 +2288,66 @@ def _tokenzahl(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return None
+
+
+def opencode_schritt_summieren(part: object) -> None:
+    """Addiert ein `step_finish`-part (beliebiger reason) auf OPENCODE_SUMME. Wirft nie (#367).
+
+    OpenCode liefert je Modellaufruf ein eigenes `step_finish` (Werkzeugaufrufe mit reason
+    "tool-calls"), das Ergebnis des ganzen Laufs ist also die Summe über alle Schritte.
+    `tokens.input` enthält die Cache-Treffer nicht; sie zählen hier wie bei Qwen Code zur
+    Eingabe (`cache.write` ebenfalls, aber nicht zum Cache-Lesen). Als Zahl gilt nur ein
+    `int` (kein `bool`) >= 0; ein Feld bleibt None, solange kein Schritt einen Wert liefert."""
+    global OPENCODE_SUMME
+    try:
+        if not isinstance(part, dict):
+            return
+
+        def zahl(wert: object) -> int | None:
+            if isinstance(wert, int) and not isinstance(wert, bool) and wert >= 0:
+                return wert
+            return None
+
+        tokens = part.get("tokens")
+        if not isinstance(tokens, dict):
+            tokens = {}
+        cache = tokens.get("cache")
+        if not isinstance(cache, dict):
+            cache = {}
+        eingabe = [v for v in (zahl(tokens.get("input")), zahl(cache.get("read")),
+                               zahl(cache.get("write"))) if v is not None]
+        ausgabe = zahl(tokens.get("output"))
+        cache_lesen = zahl(cache.get("read"))
+        kosten = part.get("cost")
+        kosten = (float(kosten) if isinstance(kosten, (int, float))
+                  and not isinstance(kosten, bool) else 0.0)
+        if OPENCODE_SUMME is None:
+            OPENCODE_SUMME = {"input_tokens": None, "output_tokens": None,
+                              "cache_read_input_tokens": None, "cost": 0.0}
+        summe = OPENCODE_SUMME
+        if eingabe:
+            summe["input_tokens"] = (summe["input_tokens"] or 0) + sum(eingabe)
+        if ausgabe is not None:
+            summe["output_tokens"] = (summe["output_tokens"] or 0) + ausgabe
+        if cache_lesen is not None:
+            summe["cache_read_input_tokens"] = (summe["cache_read_input_tokens"] or 0) + cache_lesen
+        summe["cost"] = summe["cost"] + kosten
+    except Exception:
+        # Wie format_opencode_step(): der Logpfad darf an keinem Inhalt scheitern.
+        return
+
+
+def agent_usage() -> dict | None:
+    """Usage des letzten Laufs für `agent_run_finished`: OpenCode-Summe oder Qwen-Usage (#367).
+
+    Gibt eine Kopie von OPENCODE_SUMME zurück, damit der Aufrufer das Modulglobal nicht
+    versehentlich verändert; ohne OpenCode-Schritte bleibt LAST_AGENT_USAGE (Qwen Code)."""
+    try:
+        if OPENCODE_SUMME is not None:
+            return dict(OPENCODE_SUMME)
+        return LAST_AGENT_USAGE
+    except Exception:
+        return None
 
 
 def short_api_error(message: str) -> str:
@@ -2397,6 +2461,8 @@ def log_stream_line(line: str) -> None:
             merke_fehlerzeilen(ausgabe)   # #346: voller Text, nicht die gekürzte Logzeile
             say(("✗ Fehler:\n" if fehler else "") + _clip(ausgabe))
     elif kind == "step_finish" and isinstance(part, dict):
+        # #367: Jeder Schritt zählt in die Gesamtsumme, nicht nur der letzte.
+        opencode_schritt_summieren(part)
         if part.get("reason") == "stop":
             # Usage fuer agent_run_finished Audit-Event speichern (#222), Paritaet zum
             # Qwen-`result`-Zweig: dashboard_stats.py sieht damit beide Agenten (#316).
@@ -4175,6 +4241,7 @@ def main() -> int:
     global LAST_AGENT_ERROR, LAST_OPENED_PR
     global AGENT_INFRA_FEHLER
     global AGENT_FEHLERZEILEN, WAECHTER_BEENDET
+    global OPENCODE_SUMME
     skey = "-"          # Regel 7: vor der Auftragswahl meldet der Takt „-“
     gh_fehler = False   # True: der Lauf endete in der Ausnahmebehandlung, _gherr bleibt gemerkt
     try:
@@ -4388,10 +4455,11 @@ def main() -> int:
         audit("run_started", key=skey, spend_vorher=spend_vorher)
         LAST_AGENT_ERROR = None   # log_stream_line setzt ihn nur bei einem Anbieterfehler
         AGENT_INFRA_FEHLER = None  # #243: nur die Ausgabe dieses Laufs zählt
+        OPENCODE_SUMME = None     # #367: Summe des vorigen Laufs darf nicht mitzählen
         AGENT_FEHLERZEILEN = []   # #346: nur die Ausgabe dieses Laufs zählt
         WAECHTER_BEENDET = False  # #346: watchdog_pruefen() setzt es bei Stillstand
         rc = run_agent(prompt)
-        usage = LAST_AGENT_USAGE   # run_agent() liefert nur den Exit-Code; Usage darüber (#222)
+        usage = agent_usage()     # OpenCode-Summe oder Qwen-Usage (#367, #222)
         lauf_ende, dauer = datetime.now(timezone.utc), round(time.monotonic() - begonnen, 1)
         if rc == 124:
             log(f"{skey}: nach {RUN_TIMEOUT // 60} min abgebrochen.")
