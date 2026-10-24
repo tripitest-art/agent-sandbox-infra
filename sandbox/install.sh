@@ -195,6 +195,12 @@ for dir in $(project_workdirs); do
   for ziel in "$dir/.git" "${dir%/}-worktrees"; do
     if [ -e "$ziel" ]; then chown -R "$AGENT_USER" "$ziel"; fi
   done
+  # #280/#319: Hook-Ordner und Konfiguration des Klons gehören wieder root. Der Agent schreibt
+  # Commits, aber der Takt pusht als root; ein agenten-schreibbarer pre-push-Hook, core.sshCommand
+  # oder credential.helper in .git/config wäre eine Umgehung der Rechte-Trennung.
+  for teil in "$dir/.git/hooks" "$dir/.git"/config*; do
+    if [ -e "$teil" ]; then chown -R root:root "$teil"; fi
+  done
 done
 # /root ist 700: ohne Durchqueren käme der Agent nicht einmal in seinen Worktree. Die Gruppe
 # darf nur durch (/root selbst bleibt ohne r, ein Verzeichnis-Listing ist also nicht möglich);

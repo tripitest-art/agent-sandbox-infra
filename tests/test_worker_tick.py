@@ -2001,15 +2001,19 @@ def test_git_hooks_dir_nimmt_den_pfad_von_git(monkeypatch):
     assert w.git_hooks_dir("/work/w1") == "/shared/.git/hooks"
 
 
-def test_ensure_pre_push_hook_schreibt_in_den_hook_ordner_von_git(monkeypatch, tmp_path):
-    """#68: Der Hook landet dort, wo git ihn für den Klon des Slots sucht, und führt TEST_CMD aus."""
+def test_ensure_pre_push_hook_schreibt_in_root_eigenes_verzeichnis(monkeypatch, tmp_path):
+    """#68/#280: Der Hook liegt außerhalb von Klon und Slot-Worktrees, damit der Agent ihn
+    nicht ersetzen kann, den root beim Push ausführt."""
     workdir = tmp_path / "wd"
     workdir.mkdir()
     monkeypatch.setattr(w, "WORKDIR", str(workdir))
-    path = w.ensure_pre_push_hook()          # Fixture: git_hooks_dir -> tmp_path/git-hooks
-    assert path == str(tmp_path / "git-hooks" / "pre-push")
-    assert (tmp_path / "git-hooks" / "pre-push").read_text(encoding="utf-8") == w.pre_push_hook(w.TEST_CMD)
-    assert not list((tmp_path / "git-hooks").glob("*.tmp"))      # atomar ersetzt, nichts bleibt liegen
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    path = w.ensure_pre_push_hook()          # nie in das echte .git/hooks dieses Repos
+    hook = tmp_path / "claims" / "pre-push-hooks" / "pre-push"
+    assert path == str(hook)
+    assert hook.read_text(encoding="utf-8") == w.pre_push_hook(w.TEST_CMD)
+    assert not list(hook.parent.glob("*.tmp"))    # atomar ersetzt, nichts bleibt liegen
+    assert workdir not in hook.parents            # außerhalb des Worktrees
 
 
 def test_ensure_pre_push_hook_ohne_arbeitsverzeichnis_tut_nichts(monkeypatch, tmp_path):

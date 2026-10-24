@@ -1705,7 +1705,7 @@ def open_pr(n: int) -> bool:
     res_push = subprocess.run(
         ["git", "push", "-u", "origin", branch],
         cwd=WORKDIR,
-        env=ENV,
+        env=push_env(),
         check=False,
         capture_output=True,
         text=True,
@@ -3891,19 +3891,50 @@ def git_hooks_dir(cwd: str) -> str:
     return path if os.path.isabs(path) else os.path.join(cwd, path)
 
 
-def ensure_pre_push_hook() -> str | None:
-    """Schreibt den pre-push-Hook in den Klon des Slots und gibt seinen Pfad zurück (#68).
+def pre_push_hooks_dir() -> str:
+    """Root-eigenes Hook-Verzeichnis der Takt-Pushes: os.path.join(CLAIM_DIR, "pre-push-hooks").
 
-    main() ruft das nach prepare_workdir() und vor dem Agenten auf, bei jedem Lauf. Es gehört nicht
-    in prepare_workdir(): Dessen Aufruffolge (nur git fetch/worktree/checkout/reset/clean, kein
-    Schreibzugriff) ist durch test_issue_40 festgeschrieben. Das Hook-Verzeichnis kommt von git,
-    nicht aus einer Vermutung (siehe git_hooks_dir). Ein Fehler bricht den Lauf ab (Regel 7), statt
-    den Agenten ungeschützt starten zu lassen. Gibt es WORKDIR nicht, ist nichts zu schützen: das
+    Reine Pfadberechnung ohne Seiteneffekt (kein os.makedirs — sonst schreibt open_pr()
+    während der Tests in den echten CLAIM_DIR-Default und scheitert in CI ohne root-Rechte);
+    das Verzeichnis legt install_pre_push_hook() an. Liegt bewusst außerhalb von Klon und
+    Slot-Worktrees: der Agent hat dort kein Schreibrecht und kann den Hook nicht ersetzen,
+    den root beim Push ausführt (#280)."""
+    return os.path.join(CLAIM_DIR, "pre-push-hooks")
+
+
+def ensure_pre_push_hook() -> str | None:
+    """Wie bisher (#68): None, wenn WORKDIR kein Verzeichnis ist, sonst
+    install_pre_push_hook(pre_push_hooks_dir(), TEST_CMD) und den Pfad zurück.
+
+    Schreibt nicht mehr in git_hooks_dir(WORKDIR): Der Hook liegt seit #280 außerhalb von Klon
+    und Slot-Worktrees, in die der Agent schreiben darf. main() ruft die Funktion nach
+    prepare_workdir() und vor dem Agenten auf; ein Fehler bricht den Lauf ab (Regel 7), statt den
+    Agenten ungeschützt starten zu lassen. Gibt es WORKDIR nicht, ist nichts zu schützen: das
     kommt nach einem erfolgreichen prepare_workdir() nicht vor, nur in Tests mit gefaktem Aufruf.
     """
     if not os.path.isdir(WORKDIR):
         return None
-    return install_pre_push_hook(git_hooks_dir(WORKDIR), TEST_CMD)
+    return install_pre_push_hook(pre_push_hooks_dir(), TEST_CMD)
+
+
+def push_env() -> dict[str, str]:
+    """ENV plus GIT_CONFIG-Umgebungs-Einträgen für den Takt-Push (#280).
+
+    GIT_CONFIG_COUNT = "2", GIT_CONFIG_KEY_0 = "core.hooksPath",
+    GIT_CONFIG_VALUE_0 = pre_push_hooks_dir(), GIT_CONFIG_KEY_1 = "core.fsmonitor",
+    GIT_CONFIG_VALUE_1 = "false". Die Befehlsliste des Pushes bleibt exakt
+    ["git", "push", "-u", "origin", branch] (tests/acceptance/test_issue_172.py); die Härtung
+    läuft ausschließlich über die Umgebung, damit der Push nur noch Hooks aus dem root-eigenen
+    Verzeichnis ausführt und keinen vom Agenten schreibbaren Monitoring-Pfad aufruft.
+    """
+    return dict(
+        ENV,
+        GIT_CONFIG_COUNT="2",
+        GIT_CONFIG_KEY_0="core.hooksPath",
+        GIT_CONFIG_VALUE_0=pre_push_hooks_dir(),
+        GIT_CONFIG_KEY_1="core.fsmonitor",
+        GIT_CONFIG_VALUE_1="false",
+    )
 
 
 def agent_run_kwargs() -> dict[str, str]:
