@@ -678,3 +678,28 @@ def test_seite_zeigt_wartet_abschnitt_und_kopf_wartend():
     assert "renderWartet(s.warteschlange||[])" in d.PAGE
     assert 'id="wartet-titel"' in d.PAGE and ">Wartet<" in d.PAGE
     assert '["Wartend",s.kopf.wartend]' in d.PAGE
+
+
+# --- Token-Kennzahlen je Agentenlauf -------------------------------------------------------------
+
+def test_dashboard_meldet_nullen_ohne_audit_log(tmp_path):
+    """Fehlt das Audit-Log, zeigt das Dashboard Nullen statt eines Fehlers."""
+    log = tmp_path / "worker.log"
+    log.touch()
+    cache = d.TokenStatsCache(str(tmp_path / "fehlt.jsonl"), ttl=60)
+    dash = d.Dashboard(d.StatusCache(lambda: STATUS, ttl=60), d.LogBuffer(str(log)),
+                       slot_dir=str(tmp_path / "slots"), infra_dir=str(tmp_path),
+                       is_pid_alive=lambda pid: True, clock=lambda: NOW, token_stats=cache)
+    token = dash.state()["token"]
+    assert token["24h"]["laeufe"] == 0 and token["7d"]["ein"] == 0
+    assert token["7d"]["cache_quote"] is None and token["7d"]["modelle"] == {}
+
+
+def test_render_token_nutzt_nur_textcontent():
+    start = d.PAGE.index("function renderToken(")
+    js = d.PAGE[start:d.PAGE.index("async function setBudget(", start)]
+    assert "innerHTML" not in js and "insertAdjacentHTML" not in js
+    for kopf in ("Läufe", "mit Token", "Eingabe je Lauf", "Cache-Quote", "Eingabe", "Ausgabe"):
+        assert kopf in js
+    assert 'tk["24h"]' in js and 'tk["7d"]' in js and "tk[\"7d\"].modelle" in js
+    assert '"–"' in js and '" %"' in js
