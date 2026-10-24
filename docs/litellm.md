@@ -73,7 +73,7 @@ model_list:
       output_cost_per_token: 0
 
   # coder-pro-go – OpenCode Go Flatrate-Abo (DeepSeek V4 Pro)
-  # fuer Worker Stufe 2 / komplexe Aufgaben. Keine Token-Kosten.
+  # fuer Worker Stufe 3 / komplexe Aufgaben (nur mit MAX_TRIES >= 3). Keine Token-Kosten.
   - model_name: coder-pro-go
     litellm_params:
       model: openai/deepseek-v4-pro
@@ -91,7 +91,7 @@ model_list:
       output_cost_per_token: 0
 
   # coder-kimi-go – OpenCode Go Flatrate-Abo (Kimi K2.7 Code)
-  # fuer Worker Stufe 3 / Eskalation. Keine Token-Kosten.
+  # fuer Worker Stufe 2 / Eskalation auf eine andere Modellfamilie. Keine Token-Kosten.
   - model_name: coder-kimi-go
     litellm_params:
       model: openai/kimi-k2.7-code

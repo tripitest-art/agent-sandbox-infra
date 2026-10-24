@@ -133,17 +133,19 @@ WORKER_NAMES = {
 
 # Mehrstufige Modell-Eskalation über OpenCode Go:
 # Stufe 1 (Versuch 1): DeepSeek V4.1 Flash (schnell, 0 € Token-Kosten)
-# Stufe 2 (Versuch 2): DeepSeek V4 Pro (Reasoning / Denkmodell, 0 € Token-Kosten)
-# Stufe 3 (Versuch 3+): Kimi K2.7 Code (Modellwechsel bei hartnäckigen Aufgaben, 0 € Token-Kosten)
+# Stufe 2 (Versuch 2): Kimi K2.7 Code (andere Modellfamilie, 0 € Token-Kosten) — bei MAX_TRIES = 2
+#   ist das der letzte Versuch; ein Familienwechsel löst andere Fälle als mehr Reasoning derselben Familie.
+# Stufe 3 (Versuch 3+): DeepSeek V4 Pro (Reasoning / Denkmodell, 0 € Token-Kosten), nur mit MAX_TRIES >= 3
 ESCALATION_TIERS = {
     1: "coder-go",
-    2: "coder-pro-go",
-    3: "coder-kimi-go",
+    2: "coder-kimi-go",
+    3: "coder-pro-go",
 }
 
 
 def model_for_attempt(attempt: int, base_model: str | None = None) -> str:
-    """Wählt das Modell passend zur Eskalationsstufe über OpenCode Go (Versuch 1 -> Stufe 1, 2 -> Stufe 2, 3+ -> Stufe 3).
+    """Wählt das Modell passend zur Eskalationsstufe über OpenCode Go (Versuch 1 -> Stufe 1 coder-go,
+    2 -> Stufe 2 coder-kimi-go, 3+ -> Stufe 3 coder-pro-go).
     Ist LITELLM_MODEL nicht coder-go, bleibt das eingestellte Basismodell fest."""
     base = LITELLM_MODEL if base_model is None else base_model
     if base != "coder-go":
