@@ -21,7 +21,9 @@ os.environ["AGENT_SETTINGS"] = os.path.join(os.path.dirname(os.path.abspath(__fi
 # `/root/sc-digger`) zeigt das auf einen echten Klon; `test_issue_38/39` liefen dort in
 # `prepare_issue_branch` und der Auto-Deploy rollte `609fb8c` zurück. Darum eine eigene Liste mit
 # Klonpfaden, die es nirgends gibt.
+import atexit  # noqa: E402
 import json  # noqa: E402
+import shutil  # noqa: E402
 import tempfile  # noqa: E402
 
 _projekte = os.path.join(tempfile.mkdtemp(prefix="sandbox-tests-"), "agent-projects.json")
@@ -49,6 +51,7 @@ os.environ["REVIEW_DRAFTS"] = os.path.join(_lauf, "reviews")
 # Der Ersatz verhält sich wie ein nicht angemeldetes `gh` in GitHub Actions; `worker_tick.gh()` liefert dafür None.
 # Muss vor dem Import der Takt-Skripte stehen: Sie bauen `ENV` mit dem PATH von hier.
 _gh_bin = tempfile.mkdtemp(prefix="sandbox-bin-")
+atexit.register(shutil.rmtree, _gh_bin, ignore_errors=True)   # kein Verzeichnis je Testlauf liegen lassen
 _gh_meldung = "gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable."
 _gh_pfad = os.path.join(_gh_bin, "gh")
 with open(_gh_pfad, "w", encoding="utf-8") as _fh:

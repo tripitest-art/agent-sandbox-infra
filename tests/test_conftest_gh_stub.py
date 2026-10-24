@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+assert "SANDBOX_TEST_BIN" in os.environ, "tests/conftest.py wurde nicht geladen (pytest aus dem Repo-Wurzelordner starten)"
 ERSATZ = Path(os.environ["SANDBOX_TEST_BIN"])
 SANDBOX = Path(__file__).resolve().parents[1] / "sandbox"
 
