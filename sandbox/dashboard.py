@@ -63,9 +63,11 @@ if __name__ in sys.modules:
 LOG: str = os.environ.get("WORKER_LOG", "/root/worker.log")
 SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
 INFRA_DIR: str = os.environ.get("INFRA_DIR", "/root/agent-sandbox-infra")
+AUDIT_LOG: str = os.environ.get("AUDIT_LOG", "/root/audit.jsonl")
 BIND: str = os.environ.get("DASHBOARD_BIND", "0.0.0.0")
 PORT: int = int(os.environ.get("DASHBOARD_PORT", "8099"))
 STATUS_TTL: float = float(os.environ.get("DASHBOARD_STATUS_TTL", "90"))
+TOKEN_TTL: float = 60.0    # Sekunden, in denen die Token-Kennzahlen wiederverwendet werden
 NOTIFY_INTERVAL: float = float(os.environ.get("NOTIFY_INTERVAL", "30"))   # Sekunden zwischen zwei Push-Prüfungen
 LOG_LINES = 400            # so viele Zeilen hält der Dienst vor
 LOG_PRELOAD_BYTES = 64 * 1024
@@ -322,6 +324,34 @@ class StatusCache:
                     self.veraltet = True
                 self.loaded_at = self.clock()
             return self.value, self.veraltet
+
+
+class TokenStatsCache:
+    """Token-Kennzahlen für das Dashboard, höchstens alle `ttl` Sekunden neu berechnet.
+
+    `build_token_stats()` liest bis zu 20 MB Audit-Log, `state()` läuft aber je verbundenem
+    Browser etwa einmal pro Sekunde. Scheitert eine Berechnung, gilt `None` ebenfalls `ttl`
+    Sekunden; der nächste Versuch kommt erst danach.
+    """
+
+    def __init__(self, path: str | None = None, ttl: float = TOKEN_TTL,
+                 clock: Callable[[], float] = time.monotonic,
+                 builder: Callable[[str, datetime], dict] | None = None):
+        self.path, self.ttl, self.clock = path, ttl, clock
+        self.builder = builder or (lambda p, now: dashboard_stats.build_token_stats(p, now=now))
+        self.value: dict | None = None
+        self.loaded_at: float | None = None   # None: noch nie gerechnet
+        self._lock = threading.Lock()
+
+    def get(self, now: datetime) -> dict | None:
+        with self._lock:
+            if self.loaded_at is None or self.clock() - self.loaded_at >= self.ttl:
+                try:
+                    self.value = self.builder(self.path or AUDIT_LOG, now)
+                except Exception:   # noqa: BLE001 — Dashboard bleibt bedienbar, Fehlerart steht nirgends
+                    self.value = None
+                self.loaded_at = self.clock()
+            return self.value
 
 
 class BudgetError(Exception):
@@ -657,12 +687,14 @@ class Dashboard:
     def __init__(self, cache: StatusCache, logbuf: LogBuffer, slot_dir: str = SLOT_DIR,
                  infra_dir: str = INFRA_DIR, is_pid_alive=pid_is_active,
                  clock: Callable[[], datetime] = lambda: datetime.now(),
-                 writer: BudgetWriter | None = None, waker: WakeSender | None = None):
+                 writer: BudgetWriter | None = None, waker: WakeSender | None = None,
+                 token_stats: TokenStatsCache | None = None):
         self.cache, self.logbuf, self.slot_dir, self.infra_dir = cache, logbuf, slot_dir, infra_dir
         self.is_pid_alive, self.clock = is_pid_alive, clock
         self.writer = writer or BudgetWriter(env={})   # ohne Angabe: Ändern aus
         self.waker = waker or WakeSender(env={})       # ohne Angabe: Wecken aus
         self.settings_writer = SettingsWriter()        # ohne Token in der Umgebung: Ändern aus
+        self.token_stats = token_stats                  # ohne Angabe: keine Token-Kennzahlen
 
     def set_budget(self, alias: object, value: object) -> float:
         new = self.writer.set_budget(alias, value)
@@ -687,6 +719,7 @@ class Dashboard:
         }
         stats = self.logbuf.stats
         state["statistik"] = stats.snapshot(self.clock()) if stats is not None else None
+        state["token"] = self.token_stats.get(self.clock()) if self.token_stats is not None else None
         return state
 
     def frames(self, last_seq: int, last_state_json: str | None):
@@ -750,6 +783,7 @@ background:var(--card);color:var(--fg);cursor:pointer}
 <h2>Braucht Stephan</h2><div id="stephan"></div>
 <h2>Projekte</h2><div class="table-wrap"><table id="projekte"></table></div>
 <h2>Reviews und Merges</h2><div class="table-wrap"><table id="statistik"></table></div>
+<h2>Token je Agentenlauf</h2><div class="table-wrap"><table id="token"></table></div>
 <h2>LiteLLM-Budgets</h2><div class="grid" id="budgets"></div>
 <h2>Einstellungen <span class="mut">gilt ab dem nächsten Takt</span></h2>
 <div class="table-wrap"><table id="einstellungen"></table></div>
@@ -767,6 +801,12 @@ function renderStat(st){const t=$("statistik");t.replaceChildren();if(!st)return
  row("24 Stunden",st["24h"]);row("7 Tage",st["7d"]);
  Object.entries(st.projekte).forEach(([n,c])=>row("7 Tage · "+n,c));
  Object.entries(st.modelle).forEach(([n,c])=>row("7 Tage · Reviewer "+n,c))}
+function renderToken(tk){const t=$("token");t.replaceChildren();if(!tk)return;
+ const h=el("tr");["","Läufe","mit Token","Eingabe je Lauf","Cache-Quote","Eingabe","Ausgabe"].forEach(x=>h.append(el("th",null,x)));t.append(h);
+ const row=(name,c)=>{const r=el("tr");r.append(el("td",null,name));
+  [c.laeufe,c.mit_token,c.ein_je_lauf==null?"–":c.ein_je_lauf,c.cache_quote==null?"–":c.cache_quote+" %",c.ein,c.aus].forEach(x=>r.append(el("td",null,x)));t.append(r)};
+ row("24 Stunden",tk["24h"]);row("7 Tage",tk["7d"]);
+ Object.entries(tk["7d"].modelle).forEach(([n,c])=>row("7 Tage · "+n,c))}
 async function setBudget(alias,cur){
  const v=prompt("Neues Limit für "+alias+" in USD (jetzt "+cur+"):",cur);if(v===null)return;
  const num=Number(v.replace(",","."));if(!isFinite(num)||v.trim()===""){alert("Keine Zahl");return}
@@ -846,6 +886,7 @@ function render(s){
   else[p.issues.bereit,p.issues["in-arbeit"],p.issues.blockiert,p.issues.entwurf,p.prs.offen,p.prs.rot,p.prs.laufend].forEach(x=>r.append(el("td",null,x)));
   t.append(r)});
  renderStat(s.statistik);
+ renderToken(s.token);
  renderEinstellungen(s.einstellungen);
  $("budgets").replaceChildren(...Object.entries(s.budgets).map(([k,b])=>{const d=el("div","card");
   d.append(el("b",null,k));
@@ -1016,7 +1057,7 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
 def serve(bind: str = BIND, port: int = PORT) -> ThreadingHTTPServer:
     stats = dashboard_stats.ReviewStats()
     dash = Dashboard(StatusCache(default_builder), LogBuffer(stats=stats), writer=BudgetWriter(),
-                     waker=WakeSender())
+                     waker=WakeSender(), token_stats=TokenStatsCache())
     server = ThreadingHTTPServer((bind, port), make_handler(dash))
     server.daemon_threads = True
     notifier = dashboard_notify.Notifier()
