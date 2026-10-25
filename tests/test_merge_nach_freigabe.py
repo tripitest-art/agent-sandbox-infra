@@ -378,6 +378,29 @@ def test_der_eigene_check_zaehlt_nicht_als_offen(monkeypatch, tmp_path):
     assert klasse.instances[-1].check_abrufe == 1
 
 
+def test_der_eigene_check_zaehlt_auch_aufgerufen_nicht_als_offen(monkeypatch, tmp_path):
+    # Über workflow_call heißt der Check "<Job des Aufrufers> / merge-nach-freigabe".
+    # Zählt er dann als fremd, blockiert das Gate jeden Merge durch sich selbst.
+    eigene = _checks(runs=GUTE_RUNS + _runs((f"gate / {m.SELF_CHECK}", "in_progress", None)))
+    klasse = type("Aufgerufen", (_SequenzGitHub,), {"instances": [], "FOLGE": [eigene]})
+    geschlafen = []
+    monkeypatch.setattr(m.time, "sleep", lambda s: geschlafen.append(s))
+
+    assert _main(monkeypatch, tmp_path, gh_cls=klasse) == 0
+    assert geschlafen == []
+    assert klasse.instances[-1].check_abrufe == 1
+
+
+def test_selbst_check_normalisiert_den_aufrufer():
+    assert m.selbst_check(m.SELF_CHECK) is True
+    assert m.selbst_check(f"gate / {m.SELF_CHECK}") is True
+    assert m.selbst_check(f"  gate / {m.SELF_CHECK}  ") is True
+    assert m.selbst_check("tests") is False
+    assert m.selbst_check(m.SELF_CHECK + "-extra") is False
+    assert m.selbst_check("") is False
+    assert m.selbst_check(None) is False
+
+
 # ---------------- Doppelte Läufe: der jüngste zählt ----------------
 # Ein Label-Event löst den Guard erneut aus (cancel-in-progress). Die API listet beide Läufe;
 # GitHub bewertet den jüngsten. An PR #380 war der ältere "cancelled" und das Gate hätte
