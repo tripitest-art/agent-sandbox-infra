@@ -156,19 +156,20 @@ else
   echo "Nutzer $AGENT_USER: angelegt"
 fi
 agent_home=$(getent passwd "$AGENT_USER" | cut -d: -f6)
-# HOME des Agenten ist agent_home (worker_tick.py). Ohne die Kopien fände qwen seine Modelle
-# (settings.json samt envKey) und gh seine Anmeldung nicht mehr; die Originale unter /root
-# bleiben root und für den Agenten unlesbar. 600, weil hosts.yml den GitHub-Token enthält.
-install -d -m 700 -o "$AGENT_USER" -g "$AGENT_USER" "$agent_home/.qwen" \
-  "$agent_home/.config" "$agent_home/.config/gh"
+# HOME des Agenten ist agent_home (worker_tick.py). Ohne die Kopie fände qwen seine Modelle
+# (settings.json samt envKey) nicht; das Original unter /root bleibt root und für den Agenten
+# unlesbar. 600, weil settings.json den Modellschlüssel enthält. Ein gh-Zugang wird bewusst
+# NICHT kopiert: Der Takt führt alle Schreibzugriffe aus, lesende gh-Aufrufe gehen anonym.
+install -d -m 700 -o "$AGENT_USER" -g "$AGENT_USER" "$agent_home/.qwen" "$agent_home/.config"
 if [ -f /root/.qwen/settings.json ]; then
   install -m 600 -o "$AGENT_USER" -g "$AGENT_USER" \
     /root/.qwen/settings.json "$agent_home/.qwen/settings.json"
 fi
-for datei in /root/.config/gh/*; do
-  [ -f "$datei" ] || continue
-  install -m 600 -o "$AGENT_USER" -g "$AGENT_USER" "$datei" "$agent_home/.config/gh/"
-done
+# Kein gh-Zugang für den Agenten: Der Takt führt PR, Kommentar und Push selbst aus (Push mit
+# root-eigenem Pre-Push-Hook, den der Agent nicht ersetzen kann). Eine gh-Anmeldung im
+# Agenten-Home wäre ein Token mit Schreibrecht am Repo, das fremder Text im Issue per
+# Prompt-Injection erreichen könnte. Reste älterer Installationen werden hier entfernt.
+rm -rf "$agent_home/.config/gh"
 if [ "$AGENT" = opencode ]; then
   install -d -m 700 -o "$AGENT_USER" -g "$AGENT_USER" "$agent_home/.config/opencode"
   install -m 600 -o "$AGENT_USER" -g "$AGENT_USER" \
