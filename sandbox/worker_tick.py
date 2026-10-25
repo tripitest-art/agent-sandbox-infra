@@ -333,7 +333,8 @@ RUN_RULES = (
     "IMPORTANT RULES FOR THIS RUN:\n"
     "1. BRANCH CHECK: Verify with `git branch` that you are on the target branch before changing anything.\n"
     "2. PRECISE CHANGES: Never overwrite whole files! Use small Python scripts (e.g. with `open()`, `.replace()`) or `sed` to replace only the affected lines.\n"
-    "3. ESCALATION: Work without asking back. If you get stuck, write the problem as a comment on the issue or PR and stop.\n\n"
+    "3. COMMIT WHEN GREEN: When tests pass, you MUST stage and commit your changes with `git add -A && git commit -m '...'` before finishing.\n"
+    "4. ESCALATION: Work without asking back. If you get stuck, write the problem as a comment on the issue or PR and stop.\n\n"
     "Use gh for all GitHub steps.")
 
 
@@ -1818,6 +1819,21 @@ def open_pr(n: int) -> bool:
     if not os.path.isdir(WORKDIR):
         log(f"issue{n}: Arbeitsverzeichnis fehlt, kein PR.")
         return False
+
+    # Auto-Commit: Falls der Agent geänderte Dateien hinterlassen hat, ohne `git commit` aufzurufen,
+    # sichern wir die Änderungen automatisch vor der Zählung ab (#391).
+    res_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=WORKDIR,
+        env=ENV,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if (res_status.stdout or "").strip():
+        log(f"issue{n}: Uncommittete Änderungen des Agenten gefunden, führe automatischen Commit durch.")
+        subprocess.run(["git", "add", "-A"], cwd=WORKDIR, env=ENV, check=False)
+        subprocess.run(["git", "commit", "-m", f"Umsetzung Issue #{n}"], cwd=WORKDIR, env=ENV, check=False)
 
     res_count = subprocess.run(
         ["git", "rev-list", "--count", "origin/main..HEAD"],
