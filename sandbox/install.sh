@@ -520,9 +520,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=LANG=C.UTF-8
 Environment=DASHBOARD_PORT=$DASHBOARD_PORT
 Environment=LITELLM=$LITELLM
-# Budget-Keys (LITELLM_WORKER_KEY/LITELLM_PLANER_KEY in /etc/agent-dashboard.env bzw. /etc/ha-status.env);
+# Budget-Keys (LITELLM_WORKER_KEY/LITELLM_PLANER_KEY in /etc/agent-dashboard.env);
 # fehlt eine Datei, entfällt nur das jeweilige Budget.
-EnvironmentFile=-/etc/ha-status.env
 EnvironmentFile=-/etc/qwen-reviewer.env
 # Optional: DASHBOARD_WRITE_TOKEN (Einstellungen ändern), NTFY_URL und NTFY_TOKEN (Push).
 EnvironmentFile=-/etc/agent-dashboard.env

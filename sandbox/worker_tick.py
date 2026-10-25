@@ -72,7 +72,7 @@ WORKDIR = os.environ.get("WORKDIR", f"{projects.worktrees_dir(PROJECTS[0])}/w{WO
 STATE = os.environ.get("STATE", f"/root/worker-state-w{WORKER_SLOT}.json" if WORKER_SLOT else "/root/worker-state.json")
 SLOT_TAG = f"w{WORKER_SLOT}" if WORKER_SLOT else ""
 # Verzeichnis der Slot-Telemetrie (/run/worker-slots/slot-<n>.json). Legt der Takt selbst an;
-# install.sh und die systemd-Units bleiben unangetastet (#14). qwen_webhook.py liest es.
+# install.sh und die systemd-Units bleiben unangetastet (#14).
 SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
 # #353: Vorrang des Auto-Deploys. Liegt ein neuer Stand auf origin/main und ist der Takt
 # beschäftigt, legt autodeploy.py diese Marke an; solange sie jung ist, nimmt der Takt keine
@@ -783,7 +783,7 @@ def write_slot_status(status: str, *, slot: str | None = None, message: str | No
                       lebt: Callable[[int], bool] | None = None) -> None:
     """Slot-Status atomar nach <slot_dir>/slot-<slot>.json schreiben (.tmp + os.replace).
 
-    Die Datei ist die Quelle für Home Assistant (qwen_webhook.read_slots). Das Verzeichnis legt
+    Die Datei ist die Quelle für Home Assistant. Das Verzeichnis legt
     der Takt selbst an (#14), damit install.sh und die Units unverändert bleiben.
 
     Ein laufender fremder Slot wird nur von `status == "running"` übernommen; alles andere
