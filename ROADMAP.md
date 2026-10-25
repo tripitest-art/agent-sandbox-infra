@@ -190,6 +190,18 @@ sondern eine fortlaufende Optimierungsarbeit an zwei eng verzahnten Themen.
 
 ---
 
+### 📊 Stufe 7: Modell- & Review-Benchmark (Laufend)
+
+Empirische Bewertung der angebundenen Modelle unter realen Homelab-Bedingungen (Code-Generierung und werkzeuglose Reviews), um Kosten, Latenzen und Regressionen nach Anbieter-Updates objektiv zu überwachen.
+
+#### Die 4 Phasen:
+- **Phase A (Mess-Basis & Runner):** Standardisierte, isolierte Testaufgaben für Codierung (`benchmark_code.py`) und Review-Qualität (`benchmark_review.py`) ohne Netzabhängigkeit. CLI-Runner `sandbox/benchmark.py` mit Append-only-Ergebnisablage (`/root/benchmark-ergebnisse.jsonl`). *(✅ Gemergt in #335, #336, #337)*
+- **Phase B (Automatisierung & Kollisionsschutz):** Schalter `--wenn-frei` (prüft Worker-Slot-Locks `/run/qwen-worker-w*.lock` und überspringt leise bei aktiver Arbeit) sowie systemd-Timer für wöchentlichen Hintergrundlauf. *(🟡 In Umsetzung in #388)*
+- **Phase C (Dashboard-Integration):** Visuelle Auswertung im Web-Dashboard (`sandbox/dashboard.py`): Vergleichstabelle mit Erfolgsquote (%), Tokenverbrauch, Latenzen und Kosten je Modell/Alias. *(🔵 Geplant)*
+- **Phase D (Dynamisches Routing):** Nutzung der Benchmark-Ergebnisse zur automatischen Anpassung der Modell- und Fallback-Prioritäten in `worker_tick.py`. *(⚪ Offen)*
+
+---
+
 ## 3. Priorisierungs- und Umsetzungsstatus
 
 | Stufe | Feature | Nutzen | Status |
@@ -200,6 +212,7 @@ sondern eine fortlaufende Optimierungsarbeit an zwei eng verzahnten Themen.
 | **Stufe 4** | Prime-Time- & Budget-Scheduling | ⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🟡 **In Umsetzung (#17)** |
 | **Stufe 6** | Agentenharness & Pipeline-Optimierung (laufend, kein Enddatum) | ⭐⭐⭐⭐⭐ | 🔁 **Laufend (#270, #271, #282, #293)** |
+| **Stufe 7** | Modell- & Review-Benchmark (Phasen A–D) | ⭐⭐⭐⭐ | 🟡 **In Umsetzung (Phase A gemergt, Phase B in #388)** |
 | **Baustein** | Web-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | ✅ **Gemergt (#104, #105, #114, #286)**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |
 | **Baustein** | Mehrere Projekte (Projektliste, Infra-Repo als zweites Projekt) | ⭐⭐⭐⭐ | ✅ **Gemergt (#18, #19, #20)**; Inbetriebnahme auf dem Server: siehe [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) |
 | **Eingestellt** | Lokaler LLM-Host (Gaming-PC, Ollama, WoL-Proxy, GPU-Tuning) | – | ⛔ **Nicht mehr verfolgt** (Ineffizienz; siehe Abschnitt 0). `hardware/` bleibt als Referenz. |
