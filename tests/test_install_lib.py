@@ -165,6 +165,17 @@ def test_install_wires_lib_and_survives_red_tests():
     assert "||" in line
 
 
+def test_install_gibt_dem_agenten_keinen_github_zugang():
+    """Der Agent bekommt keine gh-Anmeldung: der Takt führt alle Schreibzugriffe aus.
+
+    Eine Kopie von /root/.config/gh ins Agenten-Home wäre für den Agenten ein Token mit
+    Schreibrecht am Repo — erreichbar über fremden Text im Issue (Regel 9).
+    """
+    text = (SANDBOX / "install.sh").read_text()
+    assert "/root/.config/gh/*" not in text
+    assert "rm -rf \"$agent_home/.config/gh\"" in text
+
+
 # ---- Basis-Klon auf main halten ----
 
 def existing_clone(tmp_path):
