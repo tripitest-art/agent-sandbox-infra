@@ -1751,6 +1751,37 @@ def rote_tests_aus_push_ausgabe(ausgabe: str, limit: int = 3) -> list[str]:
     return rote
 
 
+def frage_des_agenten_posten(n: int) -> bool:
+    """Postet die Rückfrage des Agenten als Kommentar am Issue, wenn es eine gibt.
+
+    Seit #380 hat der Agent keinen gh-Zugang mehr; die Rückfrage liegt nur noch als Datei
+    `.git/frage.md` im Arbeitsordner. Fehlt sie oder ist sie leer, passiert nichts (False, kein
+    gh-Aufruf). Ein gescheiterter Aufruf lässt die Datei liegen, damit der nächste Lauf sie
+    erneut posten kann, und bricht den Takt nie ab (Regel 7)."""
+    pfad = os.path.join(WORKDIR, ".git", "frage.md")
+    try:
+        with open(pfad, encoding="utf-8") as f:
+            inhalt = f.read()
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        log(f"issue{n}: Rückfrage nicht gelesen ({type(e).__name__}).")
+        return False
+    if not inhalt.strip():
+        return False
+    try:
+        gh("issue", "comment", str(n), "--body-file", pfad)
+    except Exception as e:
+        log(f"issue{n}: Rückfrage nicht gepostet ({type(e).__name__}).")
+        return False
+    try:
+        os.remove(pfad)
+    except OSError as e:
+        # Gepostet ist gepostet; ein zweiter Kommentar wäre schlimmer als eine liegen bleibende Datei.
+        log(f"issue{n}: Rückfrage gepostet, Datei bleibt liegen ({type(e).__name__}).")
+    return True
+
+
 def open_pr(n: int) -> bool:
     """Legt nach dem Agentenlauf den PR zu Issue n an. True, wenn es danach einen offenen PR von
     issue_branch(n) gibt, sonst False.
@@ -2122,8 +2153,8 @@ Run these steps sequentially and execute each one as a command:
    message describes what changed and why (it becomes the PR text), then stop.
    Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an.
    {PUSH_RULE}
-If you think an acceptance test is wrong: stop and write the reason to the issue with
-`gh issue comment {n} --body-file .git/frage.md`. Never make the test fit.
+If you think an acceptance test is wrong: write the reason to `.git/frage.md` and stop;
+the tick posts it. Never make the test fit.
 {ERROR_RULE.format(where=f"on issue #{n}")}
 
 ----- Issue #{n}: {selected['title']} -----
@@ -4505,6 +4536,9 @@ def main() -> int:
         if state.pop(f"_apierr:{skey}", None) is not None:
             save_state(state)   # ein früherer Anbieterfehler ist vorbei
         if n is not None:
+            # #384: Der Agent hat kein gh mehr; eine Rückfrage liegt nur als Datei vor. Vor dem
+            # PR, damit sie auch dann ankommt, wenn das Anlegen des PRs scheitert.
+            frage_des_agenten_posten(n)
             LAST_OPENED_PR = None   # setzt erst ein tatsächlich neu angelegter PR (#222)
             opened = open_pr(n)
             # pr_opened Event nur bei neu erstelltem PR (#222)

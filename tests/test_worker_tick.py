@@ -2354,6 +2354,56 @@ def test_main_ruft_open_pr_nach_agent_und_vor_check_issue_result(monkeypatch, tm
     assert schritte == ["agent", "open_pr", "check_issue_result"]
 
 
+def test_main_postet_die_rueckfrage_vor_open_pr(monkeypatch, tmp_path):
+    """#384: Der Agent hat kein gh mehr; der Takt postet die Rückfrage vor dem PR."""
+    schritte = []
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: None)
+    monkeypatch.setattr(w, "prepare_issue_frame", lambda n: True)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: (schritte.append("agent") or 0))
+    monkeypatch.setattr(w, "frage_des_agenten_posten",
+                        lambda n: (schritte.append(("frage", n)) or True))
+    monkeypatch.setattr(w, "open_pr", lambda n: (schritte.append("open_pr") or True))
+    monkeypatch.setattr(w, "check_issue_result", lambda k: schritte.append("check_issue_result"))
+
+    assert w.main() == 0
+    assert schritte == ["agent", ("frage", 7), "open_pr", "check_issue_result"]
+
+
+def test_main_postet_keine_rueckfrage_fuer_nacharbeit(monkeypatch, tmp_path):
+    """#384: Nur Issue-Aufträge haben eine Rückfrage; Nacharbeit und PR-Text rufen sie nicht."""
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "pick_job",
+                        lambda state: ("pr103@2026-09-29T21:39:23Z", "Auftrag", 103,
+                                       ("3373e35", "commit")))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: None)
+    monkeypatch.setattr(w, "gh", FakeGH(prs=[_pr()]))
+    monkeypatch.setattr(w, "pr_snapshot", lambda view: ("3373e35", "commit"))
+    monkeypatch.setattr(w, "warn_text", lambda *a: None)
+    monkeypatch.setattr(w, "run_agent", lambda prompt: 0)
+    gepostet = []
+    monkeypatch.setattr(w, "frage_des_agenten_posten", lambda n: (gepostet.append(n) or True))
+
+    assert w.main() == 0
+    assert gepostet == []
+
+
 def test_main_ruft_open_pr_nie_fuer_nacharbeit_oder_text(monkeypatch, tmp_path):
     """#172: open_pr läuft nie für Nacharbeit oder PR-Text."""
     for job_key, pr_no, before in [
@@ -3768,6 +3818,17 @@ def test_issue_auftrag_ohne_pytest_nennt_den_befehl_einmal(monkeypatch):
     assert "3. `make test`. If a test is red:" in task
     assert "tests/acceptance/test_issue_102.py -x" not in task
     assert task.count("`make test`") == 1
+
+
+def test_issue_auftrag_uebergibt_die_rueckfrage_dem_takt(monkeypatch):
+    """#384: Ohne gh beim Agenten darf der Auftrag keinen gh-Aufruf mehr verlangen."""
+    monkeypatch.setattr(w, "gh", FakeGH(issues=[_issue()]))
+
+    _, task, _, _ = w.issue_job()
+
+    assert "gh issue comment" not in task
+    assert "`.git/frage.md`" in task
+    assert "the tick posts it" in task
 
 
 def test_rework_job_mit_ausweichmodell_ersetzt_beide_worker_stellen(monkeypatch):
