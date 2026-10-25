@@ -333,8 +333,8 @@ RUN_RULES = (
     "IMPORTANT RULES FOR THIS RUN:\n"
     "1. BRANCH CHECK: Verify with `git branch` that you are on the target branch before changing anything.\n"
     "2. PRECISE CHANGES: Never overwrite whole files! Use small Python scripts (e.g. with `open()`, `.replace()`) or `sed` to replace only the affected lines.\n"
-    "3. COMMIT WHEN GREEN: When tests pass, you MUST stage and commit your changes with `git add -A && git commit -m '...'` before finishing.\n"
-    "4. ESCALATION: Work without asking back. If you get stuck, write the problem as a comment on the issue or PR and stop.\n\n"
+    "3. ESCALATION: Work without asking back. If you get stuck, write the problem as a comment on the issue or PR and stop.\n"
+    "4. COMMIT WHEN GREEN: When tests pass, you MUST stage and commit your changes with `git add -A && git commit -m '...'` before finishing.\n\n"
     "Use gh for all GitHub steps.")
 
 
