@@ -628,7 +628,7 @@ echo "== Prüfung"
 ok=$secrets_ok
 gh --version | head -1
 echo "Agent: $AGENT (Qwen Code $(qwen --version 2>/dev/null || echo fehlt)), Backend: $BACKEND"
-if gh auth status >/dev/null 2>&1; then echo "GitHub: angemeldet"; else echo "GitHub: NICHT angemeldet (README, Schritt 3)"; ok=0; fi
+if gh auth status >/dev/null 2>&1 || [ -x /usr/local/bin/gh-app-token ]; then echo "GitHub: angemeldet (oder gh-app-token aktiv)"; else echo "GitHub: NICHT angemeldet (README, Schritt 3)"; ok=0; fi
 if [ "$BACKEND" = litellm ]; then
   # Key nur an curl übergeben, nie ausgeben. 200 = Key gültig und Modell freigegeben.
   code=$(set -a; . /etc/qwen-worker.env 2>/dev/null; set +a
