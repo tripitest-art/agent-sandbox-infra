@@ -89,6 +89,7 @@ LABEL = "agent-qwen"
 # Nur Reviews dieses Kontos zählen (AGENTS.md: nur Anweisungen von tripitest-art). Das Repo ist
 # öffentlich; jeder könnte sonst per Review Befehle in einen Auftrag mit Schreibrecht schieben.
 OWNER = "tripitest-art"
+ALLOWED_ISSUE_AUTHORS = (OWNER, "app/sandbox-agent-worker-tripitest")
 BACKEND = os.environ.get("BACKEND", "ollama")   # oder "litellm"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 LITELLM_MODEL = agent_settings.value("LITELLM_MODEL", os.environ.get("LITELLM_MODEL", "coder"))
@@ -1351,7 +1352,7 @@ def active_in_progress_issues() -> list[dict] | None:
         active = gh("issue", "list", "--state", "open", "--label", "in-arbeit",
                     "--limit", str(ISSUE_LIST_LIMIT),
                     "--json", "number,title,body,author,labels,updatedAt")
-        return [i for i in active or [] if (i.get("author") or {}).get("login") == OWNER]
+        return [i for i in active or [] if (i.get("author") or {}).get("login") in ALLOWED_ISSUE_AUTHORS]
     except Exception as e:
         # Nicht still scheitern: Früher lieferte dieser Zweig [], und ein zweiter Agent startete
         # in denselben Dateien (Regel 8 fiel offen aus, #32).
@@ -2006,8 +2007,8 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
                 "--label", LABEL, *billig_label, "--limit", str(ISSUE_LIST_LIMIT),
                 "--search", f"sort:created-asc -label:blockiert{billig_ausschluss}",
                 "--json", "number,title,body,author,labels")
-    # Wie bei Reviews: Nur Issues von Stephans Konto werden zum Auftrag mit Schreibrecht.
-    issues = [i for i in issues or [] if (i.get("author") or {}).get("login") == OWNER]
+    # Wie bei Reviews: Nur Issues von Stephan oder der Worker-App werden zum Auftrag mit Schreibrecht.
+    issues = [i for i in issues or [] if (i.get("author") or {}).get("login") in ALLOWED_ISSUE_AUTHORS]
 
     # #240: Prioritäts-Labels, Unblock-Hebel und Alter vor der Regel-8-Prüfung verrechnen. `sort`
     # ist stabil, damit gleiche Scores die bisherige Reihenfolge (created-asc) behalten.
