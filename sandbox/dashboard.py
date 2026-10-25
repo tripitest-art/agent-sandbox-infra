@@ -820,6 +820,14 @@ a:hover{text-decoration:underline}
 button{font:inherit;font-size:12px;font-weight:500;padding:3px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg-subtle);color:var(--fg);cursor:pointer;transition:all .15s ease}
 button:hover{background:var(--card);border-color:var(--mut)}
 button:active{transform:translateY(1px)}
+.switch{position:relative;display:inline-block;width:38px;height:22px;vertical-align:middle}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:var(--line);border-radius:22px;transition:.2s}
+.slider:before{position:absolute;content:"";height:16px;width:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
+.switch input:checked + .slider{background:var(--blue)}
+.switch input:checked + .slider:before{transform:translateX(16px)}
+select.setting-ctrl{font:inherit;font-size:12px;padding:3px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg-subtle);color:var(--fg);cursor:pointer;outline:none}
+select.setting-ctrl:focus{border-color:var(--blue)}
 </style></head><body>
 <h1>Agenten-Sandbox <span id="conn" class="mut"></span> <span id="wake"></span></h1>
 <div id="alerts"></div><div id="veraltet"></div>
@@ -886,13 +894,58 @@ async function setSetting(name,cur,erlaubt){
  if(r.ok){try{sessionStorage.setItem("wt",tok)}catch(e){}alert("Einstellung "+j.name+" auf "+j.value+" gesetzt")}
  else{if(r.status===403){try{sessionStorage.removeItem("wt")}catch(e){}}alert(j.fehler||"Fehler "+r.status)}
 }
+async function saveSettingDirect(name,wert){
+ let tok="";try{tok=sessionStorage.getItem("wt")||""}catch(e){}
+ if(!tok){tok=prompt("Schreib-Token:")||"";if(!tok){if(lastSettings)renderEinstellungen(lastSettings);return}}
+ const r=await fetch("api/settings",{method:"POST",headers:{"Content-Type":"application/json","X-Dashboard-Token":tok},
+  body:JSON.stringify({name:name,value:wert})});
+ const j=await r.json().catch(()=>({}));
+ if(r.ok){try{sessionStorage.setItem("wt",tok)}catch(e){}}
+ else{if(r.status===403){try{sessionStorage.removeItem("wt")}catch(e){}}alert(j.fehler||"Fehler "+r.status);if(lastSettings)renderEinstellungen(lastSettings)}
+}
+let lastSettings=null;
 function renderEinstellungen(e){
+ lastSettings=e;
  const t=$("einstellungen");t.replaceChildren();
  const h=el("tr");["Name","Beschreibung","Wert","Quelle",""].forEach(x=>h.append(el("th",null,x)));t.append(h);
- Object.keys(e.werte).sort().forEach(n=>{const w=e.werte[n],sp=e.spezifikation[n]||{},r=el("tr");
-  r.append(el("td",null,n),el("td",null,sp.text||""),el("td",null,w.wert==null?"–":w.wert),el("td",null,w.quelle));
+ Object.keys(e.werte).sort().forEach(n=>{
+  const w=e.werte[n],sp=e.spezifikation[n]||{},r=el("tr");
+  r.append(el("td",null,n),el("td",null,sp.text||""));
+  const valCell=el("td");
+  let hasDirectCtrl=false;
+  if(e.schreiben){
+   if(sp.erlaubt&&Array.isArray(sp.erlaubt)){
+    hasDirectCtrl=true;
+    const sel=el("select","setting-ctrl");
+    sp.erlaubt.forEach(opt=>{
+     const o=el("option",null,opt);o.value=opt;if(opt===w.wert)o.selected=true;sel.append(o);
+    });
+    sel.onchange=()=>saveSettingDirect(n,sel.value);
+    valCell.append(sel);
+   } else if((sp.min===0&&sp.max===1)||typeof w.wert==="boolean"||(typeof w.wert==="number"&&(w.wert===0||w.wert===1)&&n.includes("AUTO"))){
+    hasDirectCtrl=true;
+    const lbl=el("label","switch");
+    const inp=el("input");inp.type="checkbox";inp.checked=!!w.wert;
+    inp.onchange=()=>saveSettingDirect(n,inp.checked?1:0);
+    const sld=el("span","slider");
+    lbl.append(inp,sld);
+    valCell.append(lbl);
+   } else if(sp.min!=null&&sp.max!=null&&(sp.max-sp.min<=10)){
+    hasDirectCtrl=true;
+    const sel=el("select","setting-ctrl");
+    for(let i=sp.min;i<=sp.max;i++){
+     const o=el("option",null,String(i));o.value=i;if(i===w.wert)o.selected=true;sel.append(o);
+    }
+    sel.onchange=()=>saveSettingDirect(n,Number(sel.value));
+    valCell.append(sel);
+   }
+  }
+  if(!hasDirectCtrl){
+   valCell.textContent=w.wert==null?"–":w.wert;
+  }
+  r.append(valCell,el("td",null,w.quelle));
   const c=el("td");
-  if(e.schreiben){const b=el("button",null,"Ändern");b.onclick=()=>setSetting(n,w.wert,!!sp.erlaubt);c.append(b)}
+  if(e.schreiben){const b=el("button",null,"Ändern");if(hasDirectCtrl)b.style.display="none";b.onclick=()=>setSetting(n,w.wert,!!sp.erlaubt);c.append(b)}
   r.append(c);t.append(r)})}
 function renderWake(s){const b=$("wake");b.replaceChildren();if(!s.wecken)return;const t=el("button",null,"Takt starten");t.onclick=wecken;b.append(t)}
 function renderLog(){const l=$("log"),nur=$("nur").checked,
