@@ -44,6 +44,11 @@ def _checks(state="success", runs=None):
     return {"state": state, "runs": GUTE_RUNS if runs is None else runs}
 
 
+def _lauf(name, status, conclusion, start):
+    """Check-Lauf mit Startzeit — die API liefert started_at, das Gate wählt danach den jüngsten."""
+    return {"name": name, "status": status, "conclusion": conclusion, "started_at": start}
+
+
 def _decide(**kwargs):
     args = dict(pr=PR, reviews=[_review()], checks=_checks(), label_actor=BOT,
                 trusted={"tripitest-art"}, bot=BOT)
@@ -371,3 +376,40 @@ def test_der_eigene_check_zaehlt_nicht_als_offen(monkeypatch, tmp_path):
     assert _main(monkeypatch, tmp_path, gh_cls=klasse) == 0
     assert geschlafen == []
     assert klasse.instances[-1].check_abrufe == 1
+
+
+# ---------------- Doppelte Läufe: der jüngste zählt ----------------
+# Ein Label-Event löst den Guard erneut aus (cancel-in-progress). Die API listet beide Läufe;
+# GitHub bewertet den jüngsten. An PR #380 war der ältere "cancelled" und das Gate hätte
+# deshalb abgelehnt, obwohl der frische Lauf grün war.
+def test_abgebrochener_alter_lauf_blockiert_nicht():
+    runs = [
+        _lauf("acceptance-guard", "completed", "cancelled", "2026-10-25T10:54:14Z"),
+        _lauf("acceptance-guard", "completed", "success", "2026-10-25T10:54:24Z"),
+        _lauf("tests", "completed", "success", "2026-10-25T10:54:13Z"),
+        _lauf("tests-als-root", "completed", "success", "2026-10-25T10:54:13Z"),
+    ]
+    d = _decide(checks=_checks(runs=runs))
+    assert d.merge is True, d.reasons
+
+
+def test_juengerer_roter_lauf_blockiert_trotz_frueheren_gruenen():
+    runs = [
+        _lauf("acceptance-guard", "completed", "success", "2026-10-25T10:54:14Z"),
+        _lauf("acceptance-guard", "completed", "failure", "2026-10-25T10:56:14Z"),
+        _lauf("tests", "completed", "success", "2026-10-25T10:54:13Z"),
+        _lauf("tests-als-root", "completed", "success", "2026-10-25T10:54:13Z"),
+    ]
+    d = _decide(checks=_checks(runs=runs))
+    assert d.merge is False
+    assert any("acceptance-guard" in r for r in d.reasons)
+
+
+def test_juengster_lauf_zaehlt_auch_bei_umgekehrter_reihenfolge():
+    runs = [
+        _lauf("acceptance-guard", "completed", "success", "2026-10-25T10:54:24Z"),
+        _lauf("acceptance-guard", "completed", "cancelled", "2026-10-25T10:54:14Z"),
+        _lauf("tests", "completed", "success", "2026-10-25T10:54:13Z"),
+        _lauf("tests-als-root", "completed", "success", "2026-10-25T10:54:13Z"),
+    ]
+    assert _decide(checks=_checks(runs=runs)).merge is True
