@@ -35,4 +35,7 @@ jobs:
       - name: Akzeptanztests und Test-Infrastruktur prüfen
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Nur diese Konten dürfen mit `freigabe-geschützt` eine Ausnahme erteilen.
+          # Leer = niemand; der Worker steht hier bewusst nicht.
+          GUARD_TRUSTED_ACTORS: tripitest-art
         run: python .github/scripts/acceptance_guard.py
