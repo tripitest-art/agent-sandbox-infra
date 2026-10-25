@@ -169,7 +169,10 @@ fi
 # root-eigenem Pre-Push-Hook, den der Agent nicht ersetzen kann). Eine gh-Anmeldung im
 # Agenten-Home wäre ein Token mit Schreibrecht am Repo, das fremder Text im Issue per
 # Prompt-Injection erreichen könnte. Reste älterer Installationen werden hier entfernt.
-rm -rf "$agent_home/.config/gh"
+if [ -e "$agent_home/.config/gh" ]; then
+  rm -rf "$agent_home/.config/gh"
+  echo "install: alte gh-Anmeldung im Agenten-Home entfernt (der Agent bekommt keinen GitHub-Zugang)"
+fi
 if [ "$AGENT" = opencode ]; then
   install -d -m 700 -o "$AGENT_USER" -g "$AGENT_USER" "$agent_home/.config/opencode"
   install -m 600 -o "$AGENT_USER" -g "$AGENT_USER" \
