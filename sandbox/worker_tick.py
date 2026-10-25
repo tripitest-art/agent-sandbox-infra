@@ -3939,8 +3939,9 @@ def main_is_red_local(state: dict) -> bool:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return False
     key = f"_mainrotlokal:{REPO}"
-    if not check_main_health(BASE_WORKDIR):
-        sha = main_sha(BASE_WORKDIR)
+    repo_dir = WORKDIR
+    if not check_main_health(repo_dir):
+        sha = main_sha(repo_dir)
         kurz = sha[:7] if sha else "unbekannt"
         log_on_change(state, key, sha or "rot",
                       f"⚠ Stephan: Lokale Tests auf origin/main ({kurz}) rot; keine neuen Issue-Aufträge.")
