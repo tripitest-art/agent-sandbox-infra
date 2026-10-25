@@ -75,6 +75,23 @@ def latest_reviews(reviews: list[dict]) -> dict[str, dict]:
     return newest
 
 
+def juengste_checks(checks: dict) -> dict:
+    """Nur der jüngste Lauf je Check-Name zählt.
+
+    Ein Label-Event löst den acceptance-guard erneut aus (`cancel-in-progress`). Die API listet
+    dann zwei Läufe unter demselben Namen — den abgebrochenen und den frischen. GitHub bewertet
+    den jüngsten; ohne diese Auswahl blockiert das Gate jeden erneut ausgelösten Check.
+    Reine Funktion, kein Netz.
+    """
+    juengste: dict[str, dict] = {}
+    for lauf in checks.get("runs") or []:
+        name = lauf.get("name")
+        alt = juengste.get(name)
+        if alt is None or (lauf.get("started_at") or "") >= (alt.get("started_at") or ""):
+            juengste[name] = lauf
+    return dict(checks, runs=list(juengste.values()))
+
+
 def decide(pr: dict, reviews: list[dict], checks: dict, label_actor: str | None,
            trusted: set[str], bot: str) -> Decision:
     """Reine Logik, damit sie ohne GitHub testbar ist.
@@ -84,6 +101,7 @@ def decide(pr: dict, reviews: list[dict], checks: dict, label_actor: str | None,
     checks: {"state": …, "runs": [{"name", "status", "conclusion"}, …]}
     label_actor: Login, der `review-freigabe` zuletzt gesetzt hat
     """
+    checks = juengste_checks(checks)
     reasons: list[str] = []
     head = ((pr.get("head") or {}).get("sha") or "") or None
 
