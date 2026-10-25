@@ -1783,6 +1783,25 @@ def frage_des_agenten_posten(n: int) -> bool:
     return True
 
 
+def auto_commit_uncommitted_changes(workdir: str, env: dict, n: int) -> None:
+    """Sichert uncommittete Änderungen des Agenten vor dem PR-Check ab (#391)."""
+    try:
+        res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=workdir,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if (res.stdout or "").strip():
+            log(f"issue{n}: Uncommittete Änderungen des Agenten gefunden, führe automatischen Commit durch.")
+            subprocess.run(["git", "add", "-A"], cwd=workdir, env=env, check=False)
+            subprocess.run(["git", "commit", "-m", f"Umsetzung Issue #{n}"], cwd=workdir, env=env, check=False)
+    except FileNotFoundError:
+        pass
+
+
 def open_pr(n: int) -> bool:
     """Legt nach dem Agentenlauf den PR zu Issue n an. True, wenn es danach einen offenen PR von
     issue_branch(n) gibt, sonst False.
@@ -1820,11 +1839,19 @@ def open_pr(n: int) -> bool:
         log(f"issue{n}: Arbeitsverzeichnis fehlt, kein PR.")
         return False
 
-    # Auto-Commit: Falls der Agent geänderte Dateien hinterlassen hat, ohne `git commit` aufzurufen,
-    # sichern wir die Änderungen automatisch vor der Zählung ab (#391).
-    auto_commit_uncommitted_changes(WORKDIR, ENV, n)
-
-    count = git_rev_list_count(WORKDIR, ENV, branch)
+    res_count = subprocess.run(
+        ["git", "rev-list", "--count", "origin/main..HEAD"],
+        cwd=WORKDIR,
+        env=ENV,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    count_str = (res_count.stdout or "").strip()
+    try:
+        count = int(count_str)
+    except ValueError:
+        count = 0
     if count <= 1:
         log(f"issue{n}: keine Änderungen über den Akzeptanztest hinaus, kein PR.")
         return False
