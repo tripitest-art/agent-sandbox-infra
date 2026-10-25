@@ -1794,12 +1794,34 @@ def auto_commit_uncommitted_changes(workdir: str, env: dict, n: int) -> None:
             capture_output=True,
             text=True,
         )
+        if res.returncode != 0:
+            log(f"issue{n}: git status fehlgeschlagen (Exit {res.returncode}): {(res.stderr or '').strip()}")
+            return
         if (res.stdout or "").strip():
             log(f"issue{n}: Uncommittete Änderungen des Agenten gefunden, führe automatischen Commit durch.")
-            subprocess.run(["git", "add", "-A"], cwd=workdir, env=env, check=False)
-            subprocess.run(["git", "commit", "-m", f"Umsetzung Issue #{n}"], cwd=workdir, env=env, check=False)
-    except FileNotFoundError:
-        pass
+            res_add = subprocess.run(
+                ["git", "add", "-A"],
+                cwd=workdir,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if res_add.returncode != 0:
+                log(f"issue{n}: git add fehlgeschlagen (Exit {res_add.returncode}): {(res_add.stderr or '').strip()}")
+                return
+            res_commit = subprocess.run(
+                ["git", "commit", "-m", f"Umsetzung Issue #{n}"],
+                cwd=workdir,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if res_commit.returncode != 0:
+                log(f"issue{n}: git commit fehlgeschlagen (Exit {res_commit.returncode}): {(res_commit.stderr or '').strip()}")
+    except (FileNotFoundError, OSError) as e:
+        log(f"issue{n}: Auto-Commit nicht ausführbar ({type(e).__name__}): {e}")
 
 
 def open_pr(n: int) -> bool:
@@ -4559,6 +4581,8 @@ def main() -> int:
             # #384: Der Agent hat kein gh mehr; eine Rückfrage liegt nur als Datei vor. Vor dem
             # PR, damit sie auch dann ankommt, wenn das Anlegen des PRs scheitert.
             frage_des_agenten_posten(n)
+            # #391: Uncommittete Änderungen des Agenten absichern, bevor open_pr() Commits zählt
+            auto_commit_uncommitted_changes(WORKDIR, ENV, n)
             LAST_OPENED_PR = None   # setzt erst ein tatsächlich neu angelegter PR (#222)
             opened = open_pr(n)
             # pr_opened Event nur bei neu erstelltem PR (#222)
