@@ -316,3 +316,58 @@ def test_main_schreibt_die_begruendung_in_die_zusammenfassung(monkeypatch, tmp_p
     text = ziel.read_text(encoding="utf-8")
     assert "Nicht gemergt" in text
     assert "Keine Review von" in text
+
+
+# ---------------- Warten auf fremde Checks ----------------
+# Ein Label-Event startet auch den acceptance-guard neu. Ohne Warten sieht das Gate dessen
+# frischen Lauf als offen und lehnt ab — genau das ist an PR #371 passiert.
+class _SequenzGitHub(_FakeGitHub):
+    """Liefert die Checks in der Reihenfolge, in der sie fertig werden."""
+
+    FOLGE = []
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.check_abrufe = 0
+
+    def checks(self, sha):
+        self.check_abrufe += 1
+        return type(self).FOLGE.pop(0) if type(self).FOLGE else _checks()
+
+
+def test_wartet_bis_die_fremden_checks_fertig_sind(monkeypatch, tmp_path):
+    laufend = _checks(runs=GUTE_RUNS + _runs(("acceptance-guard", "in_progress", None)))
+    klasse = type("Wartend", (_SequenzGitHub,), {"instances": [], "FOLGE": [laufend, _checks()]})
+    geschlafen = []
+    monkeypatch.setattr(m.time, "sleep", lambda s: geschlafen.append(s))
+
+    assert _main(monkeypatch, tmp_path, gh_cls=klasse) == 0
+    assert klasse.instances[-1].calls == [("merge", 12, HEAD), ("delete", "feature/issue-7-test")]
+    assert geschlafen, "das Gate muss zwischen den Abfragen warten"
+    assert klasse.instances[-1].check_abrufe >= 2
+
+
+def test_gibt_nach_der_frist_auf_und_mergt_nicht(monkeypatch, tmp_path):
+    laufend = _checks(runs=GUTE_RUNS + _runs(("acceptance-guard", "in_progress", None)))
+    klasse = type("Haengend", (_SequenzGitHub,), {"instances": [], "FOLGE": []})
+    klasse.checks = lambda self, sha: laufend  # wird nie fertig
+
+    # Uhr, die beim Warten fortschreitet, statt echt zu schlafen.
+    zeit = {"t": 0.0}
+    monkeypatch.setattr(m.time, "sleep", lambda s: zeit.__setitem__("t", zeit["t"] + s))
+    monkeypatch.setattr(m.time, "monotonic", lambda: zeit["t"])
+    monkeypatch.setenv("MERGE_CHECK_WAIT", "60")
+
+    assert _main(monkeypatch, tmp_path, gh_cls=klasse) == 1
+    assert klasse.instances[-1].calls == []
+
+
+def test_der_eigene_check_zaehlt_nicht_als_offen(monkeypatch, tmp_path):
+    eigene = _checks(runs=GUTE_RUNS + _runs((m.SELF_CHECK, "in_progress", None)))
+    klasse = type("Eigener", (_SequenzGitHub,), {"instances": [], "FOLGE": [eigene]})
+    geschlafen = []
+    monkeypatch.setattr(m.time, "sleep", lambda s: geschlafen.append(s))
+
+    assert _main(monkeypatch, tmp_path, gh_cls=klasse) == 0
+    assert geschlafen == []
+    assert klasse.instances[-1].check_abrufe == 1

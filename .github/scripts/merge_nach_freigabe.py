@@ -36,6 +36,11 @@ TRUSTED_ACTORS_ENV = "GUARD_TRUSTED_ACTORS"
 DEFAULT_BOT = "sandbox-agent-reviewer-app[bot]"
 # "skipped"/"neutral" gelten als erfolgreich: ein nicht anwendbarer Check ist kein Fehler.
 OK_CONCLUSIONS = {"success", "neutral", "skipped"}
+# Ein Label-Event startet auch andere Workflows neu (der acceptance-guard hängt an
+# `labeled`). Deren frischer Lauf ist offen, wenn das Gate losläuft — ohne Warten lehnt
+# das Gate planmäßig ab. Deshalb wird vor dem Urteil auf fremde Checks gewartet.
+CHECK_WAIT_MAX = 900.0  # Sekunden insgesamt
+CHECK_POLL = 15.0       # Sekunden zwischen zwei Abfragen
 
 
 @dataclass
@@ -247,6 +252,28 @@ def report(decision: Decision, pr: dict, merged: bool) -> str:
     return "\n".join(lines) + "\n"
 
 
+def warte_auf_checks(gh, head, max_sekunden=None, poll=None, schlaf=None, uhr=None):
+    """Fremde Checks abwarten — reines Timing, kein Urteil.
+
+    Gibt die zuletzt gelesenen Checks zurück. Nach Ablauf der Frist wird nicht gemergt:
+    decide() sieht die offenen Checks und lehnt ab. fail-closed bleibt also erhalten.
+    """
+    max_sekunden = float(os.environ.get("MERGE_CHECK_WAIT", CHECK_WAIT_MAX)) if max_sekunden is None else max_sekunden
+    poll = max(float(os.environ.get("MERGE_CHECK_POLL", CHECK_POLL)) if poll is None else poll, 1.0)
+    schlaf = time.sleep if schlaf is None else schlaf
+    uhr = time.monotonic if uhr is None else uhr
+    frist = uhr() + max_sekunden
+    while True:
+        checks = gh.checks(head) if head else {"state": None, "runs": []}
+        offen = sorted({r.get("name") for r in checks.get("runs") or []
+                        if r.get("name") != SELF_CHECK and r.get("status") != "completed"})
+        rest = int(frist - uhr())
+        if not offen or rest <= 0:
+            return checks
+        print(f"Warte auf {len(offen)} offene Checks ({', '.join(offen)}), noch bis {rest} s.")
+        schlaf(poll)
+
+
 def main() -> int:
     event = json.loads(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8").read())
     label = (event.get("label") or {}).get("name")
@@ -278,7 +305,8 @@ def main() -> int:
                    "mergeable": fresh.get("mergeable"),
                    "head": fresh.get("head") or pr.get("head")}
         head = (zustand.get("head") or {}).get("sha")
-        decision = decide(zustand, gh.reviews(number), gh.checks(head) if head else {"state": None, "runs": []},
+        checks = warte_auf_checks(gh, head)
+        decision = decide(zustand, gh.reviews(number), checks,
                           gh.label_actor(number, MERGE_LABEL), trusted_actors(), bot)
         if decision.merge and head:
             gh.merge(number, head)
