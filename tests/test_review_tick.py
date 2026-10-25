@@ -20,6 +20,7 @@ OK_REVIEW = "**Freigegeben**\n\n### Muss\nkeine\n\n### Kann\n- Import nach oben\
 BAD_REVIEW = "**Änderungen nötig**\n\n### Muss\n1. `a.py` Zeile 3: Signatur weicht von „Schnittstellen“ ab.\n\n### Kann\n- keine"
 GOOD_CHECKS = [{"name": n, "status": "COMPLETED", "conclusion": "SUCCESS"} for n in ("tests", "acceptance-guard", "CodeQL")]
 SHA = "a" * 40
+_POST_REVIEW = r.post_review   # echt: Tests mit REVIEW_APPROVE=1 prüfen das gh-Review-Flag
 
 
 def _pr(number=7, **kw):
@@ -58,6 +59,9 @@ def _env(monkeypatch, tmp_path):
     # Servereinstellung REVIEW_POST=1/REVIEW_AUTO_MERGE=1: Vorgabe ist der Entwurfslauf ohne Merge.
     monkeypatch.setattr(r, "POST", False)
     monkeypatch.setattr(r, "AUTO_MERGE", True)
+    # #376: REVIEW_APPROVE=1 (Freigabe durch die App) ist auf dem Server ein Opt-in; die Tests
+    # rechnen mit dem bisherigen Weg, egal was in der Umgebung des Testlaufs steht.
+    monkeypatch.setattr(r, "REVIEW_APPROVE", False)
     # #178: review_posted schreibt ins Audit-Log; je Test nach tmp_path, nie in /root/audit.jsonl.
     monkeypatch.setattr(r.worker_tick, "AUDIT_LOG", str(tmp_path / "audit.jsonl"))
     # #235: dasselbe für das eigene Audit-Log des Review-Takts (review_started, review_finished,
@@ -339,7 +343,8 @@ def _fake_github(monkeypatch, prs, llm_text=OK_REVIEW, calls=None, diff="diff --
         calls["messages"] = messages
         return llm_text, {"prompt_tokens": 1000, "completion_tokens": 100}
     monkeypatch.setattr(r, "call_llm", call_llm)
-    monkeypatch.setattr(r, "post_review", lambda n, t: calls.setdefault("posted", []).append(n))
+    monkeypatch.setattr(r, "post_review",
+                        lambda n, t, flag="--comment": calls.setdefault("posted", []).append(n))
     return calls
 
 
@@ -973,6 +978,113 @@ def test_no_auto_merge_when_env_disabled(monkeypatch, capsys):
     assert calls.get("posted") == [7]
     assert merged == []
     assert "REVIEW_AUTO_MERGE=0; kein Merge" in capsys.readouterr().out
+
+
+# --- Freigabe durch die App, Merge durch das Gate (Issue #376) ---
+
+def _github_mit_app(monkeypatch, label_ok=True):
+    """Freigegebener Worker-PR im Auto-Merge-Modus; gh_text protokolliert Review, Label und Merge.
+
+    post_review bleibt echt, damit der Test das gh-Flag (`--approve`/`--comment`) sieht.
+    """
+    calls = _fake_github(monkeypatch, [_pr()])
+    calls.update(review=[], edits=[], merged=[], comments=[], dateiliste=[])
+    monkeypatch.setattr(r, "post_review", _POST_REVIEW)
+    base_json = r.gh_json
+
+    def gh_json(*args):
+        if args[:2] == ("issue", "list"):
+            return []
+        if args[:2] == ("issue", "view") and "labels" not in args and "state" not in args:
+            return {"number": 5, "title": "T", "body": "### Merge-Modus\nautomatisch"}
+        return base_json(*args)
+
+    def gh_text(*args, **kw):
+        if args[:2] == ("pr", "review"):
+            calls["review"] = args
+            return ""
+        if args[:2] == ("pr", "edit"):
+            if r.FREIGABE_LABEL in args and not label_ok:
+                raise r.subprocess.CalledProcessError(1, "gh", stderr="label fehlt")
+            calls["edits"].append(args[2:])
+            return ""
+        if args[:2] == ("pr", "merge"):
+            calls["merged"].append(args[2])
+            return ""
+        if args[:2] == ("pr", "comment"):
+            calls["comments"].append(args[2])
+            return ""
+        if args[0] == "api":
+            return ""
+        if args[:2] == ("pr", "diff"):
+            return "diff --git a/a.py b/a.py\n+x\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(r, "gh_json", gh_json)
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    monkeypatch.setattr(r, "POST", True)
+    return calls
+
+
+def test_mit_review_approve_freigabe_setzt_label_und_mergt_nicht(monkeypatch, capsys):
+    """REVIEW_APPROVE=1: `gh pr review --approve`, Label `review-freigabe`, kein eigener Merge."""
+    monkeypatch.setattr(r, "REVIEW_APPROVE", True)
+    calls = _github_mit_app(monkeypatch)
+    assert r.run_once() == 0
+    assert calls["review"][:3] == ("pr", "review", "7") and "--approve" in calls["review"]
+    assert calls["edits"] == [("7", "--add-label", r.FREIGABE_LABEL)]
+    assert calls["merged"] == []
+    assert "Freigegeben, Label review-freigabe gesetzt; Merge übernimmt das Gate." in capsys.readouterr().out
+
+
+def test_ohne_review_approve_bleibt_der_bisherige_weg(monkeypatch):
+    """REVIEW_APPROVE=0: Kommentar-Review, Merge durch den Takt, Nachhol-Merges wie bisher."""
+    calls = _github_mit_app(monkeypatch)
+    nachgeholt = []
+    monkeypatch.setattr(r, "retry_merges", lambda state: nachgeholt.append(state))
+    assert r.run_once() == 0
+    assert calls["review"][:3] == ("pr", "review", "7") and "--comment" in calls["review"]
+    assert "--approve" not in calls["review"]
+    assert calls["edits"] == []
+    assert calls["merged"] == ["7"]
+    assert len(nachgeholt) == 1
+
+
+def test_mit_app_holt_der_takt_keine_merges_nach(monkeypatch):
+    """REVIEW_APPROVE=1: Auch gescheiterte Merges wiederholt der Takt nicht mehr."""
+    monkeypatch.setattr(r, "REVIEW_APPROVE", True)
+    _github_mit_app(monkeypatch)
+    nachgeholt = []
+    monkeypatch.setattr(r, "retry_merges", lambda state: nachgeholt.append(state))
+    assert r.run_once() == 0
+    assert nachgeholt == []
+
+
+def test_gescheitertes_freigabe_label_landet_bei_stephan(monkeypatch, capsys):
+    """Scheitert das Label, meldet der Takt es und übergibt den PR an Stephan, statt abzubrechen."""
+    monkeypatch.setattr(r, "REVIEW_APPROVE", True)
+    calls = _github_mit_app(monkeypatch, label_ok=False)
+    assert r.run_once() == 0
+    assert calls["merged"] == []
+    assert ("7", "--add-label", r.STEPHAN_LABEL) in calls["edits"]
+    assert calls["comments"] == ["7"]
+    assert "⚠ Stephan: Label review-freigabe nicht gesetzt (CalledProcessError)" in capsys.readouterr().out
+
+
+def test_docstring_nennt_den_freigabeweg():
+    """Der Kopf von review_tick.py beschreibt Freigabe + Label und den Merge im Gate."""
+    assert "REVIEW_APPROVE" in r.__doc__ and "review-freigabe" in r.__doc__
+    assert "merge_nach_freigabe.py" in r.__doc__
+
+
+def test_freigabe_label_passt_zum_gate():
+    """Der Takt setzt genau das Label, auf das merge_nach_freigabe.py reagiert (#376)."""
+    pfad = Path(__file__).resolve().parents[1] / ".github" / "scripts" / "merge_nach_freigabe.py"
+    spec = importlib.util.spec_from_file_location("merge_nach_freigabe_label", pfad)
+    gate = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = gate
+    spec.loader.exec_module(gate)
+    assert r.FREIGABE_LABEL == gate.MERGE_LABEL
 
 
 
