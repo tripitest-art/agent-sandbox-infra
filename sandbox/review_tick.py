@@ -9,7 +9,9 @@ fertig sind und der für den aktuellen Commit noch kein Review des Besitzers hat
 Skript selbst Issue, Dateiliste, Diff und Checks und schickt sie als reinen Text an ein Modell über
 LiteLLM. Das Modell hat KEINE Werkzeuge: Issue-, PR- und Diff-Texte sind fremder Input, ein Modell
 mit GitHub-Zugriff ließe sich damit steuern.
-Nur dieses Skript schreibt etwas (festes Format, ein Kommentar-Review, nie Approve oder Merge).
+Nur dieses Skript schreibt etwas (festes Format, ein Kommentar-Review). Mit REVIEW_APPROVE=1 gibt es
+stattdessen eine Freigabe ab (`gh pr review --approve`) und setzt danach das Label `review-freigabe`;
+gemergt wird dann nicht hier, sondern vom Gate `.github/scripts/merge_nach_freigabe.py` (#375, #376).
 
 Prüfbar vom Skript, nicht vom Modell: Teststatus (nur aus den Check-Runs), Modellzeile
 (Worker aus dem PR-Text, Reviewer aus dem Alias, der für diesen Diff wirklich aufgerufen wird)
@@ -26,8 +28,10 @@ des Worker-Takts von selbst (worker_tick.py wertet Reviews des Besitzers aus).
 Liegt für den aktuellen Commit schon ein postbarer Entwurf (aus einem Lauf mit REVIEW_POST=0),
 postet REVIEW_POST=1 ihn ohne neuen Modellaufruf.
 
-Mit REVIEW_POST=1 zusätzlich: Freigegebene PRs mit Merge-Modus „automatisch“ werden gemergt; scheitert
-der Merge (z. B. noch nicht mergebar), versucht der nächste Takt es erneut (MERGE_RETRIES). Ein PR mit
+Mit REVIEW_POST=1 und REVIEW_APPROVE=0 zusätzlich: Freigegebene PRs mit Merge-Modus „automatisch“ werden
+gemergt; scheitert der Merge (z. B. noch nicht mergebar), versucht der nächste Takt es erneut (MERGE_RETRIES).
+Mit REVIEW_APPROVE=1 mergt das Gate statt dieses Takts: Der Takt gibt frei, setzt das Label und versucht
+keine eigenen Merges (auch keine Nachhol-Merges). Ein PR mit
 Label `review-anfordern`, zu dem es kein Worker-Issue gibt, hat keinen Vertrag: dort entscheidet der
 PR-Text („Merge-Modus: automatisch“), sonst liegt er nach dem Review bei Stephan.
 Nach dem geposteten Review setzt der Takt auf den geprüften Commit den Status `review`
@@ -86,6 +90,11 @@ REVIEW_MODEL_BIG = agent_settings.value("REVIEW_MODEL_BIG", REVIEW_MODEL)   # f�
 REVIEWER_NAME = os.environ.get("REVIEWER_NAME", "GLM")                 # Zeile „Reviewer: …“
 POST = os.environ.get("REVIEW_POST", "0") == "1"
 AUTO_MERGE = os.environ.get("REVIEW_AUTO_MERGE", "1") == "1"
+# #376: Freigabe durch die Reviewer-App statt durch den Takt. Mit REVIEW_APPROVE=1 postet der Takt
+# `gh pr review --approve` und setzt danach nur das Label; gemergt wird im Gate. Vorgabe 0: alles
+# wie bisher (Kommentar-Review, Merge durch den Takt).
+REVIEW_APPROVE = os.environ.get("REVIEW_APPROVE", "0") == "1"
+FREIGABE_LABEL = "review-freigabe"   # muss zu MERGE_LABEL in .github/scripts/merge_nach_freigabe.py passen
 BASE_STATE = os.environ.get("REVIEW_STATE", "/root/review-state.json")
 BASE_DRAFT_DIR = os.environ.get("REVIEW_DRAFTS", "/root/reviews")
 STATE, DRAFT_DIR = BASE_STATE, BASE_DRAFT_DIR
@@ -713,14 +722,50 @@ def save_draft(pr: dict, text: str, meta: str) -> str:
     return path
 
 
-def post_review(number: int, text: str) -> None:
+def post_review(number: int, text: str, flag: str = "--comment") -> None:
     path = os.path.join(DRAFT_DIR, f".post-{number}.md")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
     try:
-        gh_text("pr", "review", str(number), "--comment", "--body-file", path)
+        gh_text("pr", "review", str(number), flag, "--body-file", path)
     finally:
         os.unlink(path)
+
+
+def review_art(verdict: str, approve: bool) -> tuple[str, str] | None:
+    """Wie ein Urteil gepostet wird und ob danach das Freigabe-Label gesetzt wird.
+
+    Rückgabe (flag, label):
+      ("--approve", "review-freigabe")   Freigegeben und approve=True
+      ("--comment", "")                  Freigegeben und approve=False
+      ("--comment", "")                  Änderungen nötig (approve egal)
+      None                               jedes andere Urteil, kein Review
+
+    Reine Funktion, kein Netz, keine Seiteneffekte. `approve` ist der Schalter REVIEW_APPROVE."""
+    if verdict == VERDICTS[0]:
+        return ("--approve", FREIGABE_LABEL) if approve else ("--comment", "")
+    if verdict == VERDICTS[1]:
+        return ("--comment", "")
+    return None
+
+
+def darf_selbst_mergen(verdict: str, approve: bool, auto_merge: bool) -> bool:
+    """True nur bei Freigegeben, REVIEW_APPROVE=0 und erlaubtem Auto-Merge.
+    Mit REVIEW_APPROVE=1 mergt immer das Gate, nie der Takt."""
+    return verdict == VERDICTS[0] and not approve and auto_merge
+
+
+def set_freigabe_label(number: int) -> bool:
+    """Setzt FREIGABE_LABEL am PR. False bei Fehler, ohne Ausnahme nach außen: Log-Zeile
+    'PR #<n>: ⚠ Stephan: Label review-freigabe nicht gesetzt (<ExceptionName>)' und
+    audit('stephan_alarm', …), analog zu post_review_status()."""
+    try:
+        gh_text("pr", "edit", str(number), "--add-label", FREIGABE_LABEL)
+        return True
+    except Exception as exc:   # ein Label darf den Takt nie abbrechen
+        log(f"PR #{number}: ⚠ Stephan: Label {FREIGABE_LABEL} nicht gesetzt ({type(exc).__name__})")
+        audit("stephan_alarm", pr=number, reason=f"Label {FREIGABE_LABEL} nicht gesetzt: {type(exc).__name__}")
+        return False
 
 
 def review_status(verdict: str) -> tuple[str, str] | None:
@@ -1266,7 +1311,16 @@ def _run_pr_review() -> int:
                     f"({pr['headRefOid'][:7]} -> {fresh_sha[:7]}); Review verworfen.")
                 audit("review_dropped_new_head", pr=n, sha=pr["headRefOid"], new_sha=fresh_sha)
                 return 0
-        post_review(n, text)
+        # #376: REVIEW_APPROVE entscheidet, wie das Urteil gepostet wird. Der Standardpfad bleibt
+        # zweistellig, weil eingefrorene Akzeptanztests post_review(n, text) ersetzen.
+        art = review_art(verdict, REVIEW_APPROVE)
+        if art is None:   # parse_review kennt nur die beiden Urteile; ohne Art kein Review
+            log(f"PR #{n}: Urteil {verdict} ist kein Review-Urteil; nichts gepostet.")
+            return 0
+        if art[0] == "--comment":
+            post_review(n, text)
+        else:
+            post_review(n, text, art[0])
         post_review_status(pr["headRefOid"], verdict)
         # #178: Erst nach dem Posten steht fest, dass dieses Review Ausgaben verursacht hat.
         # Ohne cost-Angabe bleibt kosten None; rote Checks ohne Aufruf kosten 0.0.
@@ -1288,6 +1342,22 @@ def _run_pr_review() -> int:
         state.setdefault("runden", {})[str(n)] = state.get("runden", {}).get(str(n), 0) + 1
     save_state(state)
     if POST and verdict == VERDICTS[0]:
+        if art[1]:
+            # #376: Freigabe durch die App. Der Takt setzt nur das Label; gemergt wird im Gate,
+            # weil die App-Identität nicht mergen darf.
+            if AUTO_MERGE and PROJECT_AUTO_MERGE:
+                if set_freigabe_label(n):
+                    log(f"PR #{n}: Freigegeben, Label {FREIGABE_LABEL} gesetzt; Merge übernimmt das Gate.")
+                else:
+                    to_stephan(n, key, f"Freigegeben, aber Label {FREIGABE_LABEL} nicht gesetzt: "
+                               f"bitte prüfen und mergen.", state)
+            elif not AUTO_MERGE:
+                log(f"PR #{n}: Freigegeben, aber REVIEW_AUTO_MERGE=0; kein Merge.")
+                to_stephan(n, key, "Freigegeben, REVIEW_AUTO_MERGE=0: bitte prüfen und mergen.", state)
+            else:
+                log(f"PR #{n}: Freigegeben, aber {REPO} ist auf manuellen Merge gestellt (auto_merge=false).")
+                to_stephan(n, key, "Freigegeben; in diesem Projekt mergt immer Stephan: bitte prüfen und mergen.", state)
+            return 0
         if not AUTO_MERGE:
             log(f"PR #{n}: Freigegeben, aber REVIEW_AUTO_MERGE=0; kein Merge.")
             return 0
@@ -1325,8 +1395,9 @@ def _run_pr_review() -> int:
                     to_stephan(n, key, f"Freigegeben, berührt Dateien mit manuellem Merge "
                                f"({', '.join(hits[:3])}): bitte prüfen und mergen.", state)
                     return 0
-            merge_or_queue(n, pr["headRefOid"], state)
-            save_state(state)
+            if darf_selbst_mergen(verdict, REVIEW_APPROVE, AUTO_MERGE):
+                merge_or_queue(n, pr["headRefOid"], state)
+                save_state(state)
         else:
             log(f"PR #{n}: Freigegeben, aber Merge-Modus manuell; liegt bei Stephan.")
             to_stephan(n, key, "Freigegeben, Merge-Modus manuell: bitte prüfen und mergen.", state)
@@ -1342,7 +1413,8 @@ def run_once() -> int:
             use_project(p, first=(i == 0))
         rate_limit = False
         try:
-            if POST and AUTO_MERGE and PROJECT_AUTO_MERGE:
+            # #376: Mit REVIEW_APPROVE=1 mergt das Gate; Nachhol-Merges sind dann nicht Sache des Takts.
+            if POST and AUTO_MERGE and PROJECT_AUTO_MERGE and not REVIEW_APPROVE:
                 retry_merges(load_state())
             _run_pr_review()
         except Exception as exc:   # ein Projekt darf die anderen nicht blockieren
