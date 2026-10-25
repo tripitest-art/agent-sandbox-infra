@@ -178,15 +178,31 @@ sondern eine fortlaufende Optimierungsarbeit an zwei eng verzahnten Themen.
    verfügbaren Werkzeugs je Auftrag statt fester Konfiguration pro Slot.
 
 #### Pipeline-Ausbau & -Optimierung:
-1. **Scheduling:** Prioritäts-Score mit Anti-Starvation (#240), Fair-Share-Rotation über mehrere
-   Projekte (`_last_project`), Regel-8-Kollisionsschutz mit Dauerkollisions-Alarm (#206).
-2. **Fehlertoleranz:** Stillstandswächter mit Ursachenangabe (#218, #274), Reviewer-Ausweichen bei
+1. **Scheduling & Sofort-Trigger:** Prioritäts-Score mit Anti-Starvation (#240), Fair-Share-Rotation
+   über mehrere Projekte (`_last_project`), Regel-8-Kollisionsschutz mit Dauerkollisions-Alarm (#206).
+   Sofort-Trigger via `agent-wake.service` (`wake_listener.py`), der auf ntfy-Streams lauscht und Takte
+   bei neuen Ereignissen ohne Timer-Wartezeit anstößt (#128, #347).
+2. **Orientierung & Token-Einsparung (Repomap):** Automatische AST-Symbol-Landkarte (`repomap.py`, #227)
+   der betroffenen Dateien im Worker-Prompt, um teure rekursive Suchläufe des Agenten zu vermeiden.
+3. **Fehlertoleranz:** Stillstandswächter mit Ursachenangabe (#218, #274), Reviewer-Ausweichen bei
    Modellausfall (#273, #275), automatische Freigabe verwaister Claims (#183, #206, #207).
-3. **Kosten- und Fehlertransparenz:** Audit-Log mit Lifecycle-Ereignissen und Kosten je Lauf (#178,
+4. **Kosten- und Fehlertransparenz:** Audit-Log mit Lifecycle-Ereignissen und Kosten je Lauf (#178,
    #181, #222), Dashboard-Statistiken zu Reviews, Merges und Übergaben an Stephan (#115, #286).
-4. **Offen:** Budget-Dashboards je Agentenharness/Abo statt nur je LiteLLM-Key, automatische
+5. **Offen:** Budget-Dashboards je Agentenharness/Abo statt nur je LiteLLM-Key, automatische
    Nutzung von Free-Tier-Kontingenten mehrerer Anbieter im Wechsel, feinere Kostenprognose vor
    Auftragsvergabe.
+
+---
+
+### 📊 Stufe 7: Modell- & Review-Benchmark (Laufend)
+
+Empirische Bewertung der angebundenen Modelle unter realen Homelab-Bedingungen (Code-Generierung und werkzeuglose Reviews), um Kosten, Latenzen und Regressionen nach Anbieter-Updates objektiv zu überwachen.
+
+#### Die 4 Phasen:
+- **Phase A (Mess-Basis & Runner):** Standardisierte, isolierte Testaufgaben für Codierung (`benchmark_code.py`) und Review-Qualität (`benchmark_review.py`) ohne Netzabhängigkeit. CLI-Runner `sandbox/benchmark.py` mit Append-only-Ergebnisablage (`/root/benchmark-ergebnisse.jsonl`). *(✅ Gemergt in #335, #336, #337)*
+- **Phase B (Automatisierung & Kollisionsschutz):** Schalter `--wenn-frei` (prüft Worker-Slot-Locks `/run/qwen-worker-w*.lock` und überspringt leise bei aktiver Arbeit) sowie systemd-Timer für wöchentlichen Hintergrundlauf. *(🟡 In Umsetzung in #388)*
+- **Phase C (Dashboard-Integration):** Visuelle Auswertung im Web-Dashboard (`sandbox/dashboard.py`): Vergleichstabelle mit Erfolgsquote (%), Tokenverbrauch, Latenzen und Kosten je Modell/Alias. *(🔵 Geplant)*
+- **Phase D (Dynamisches Routing):** Nutzung der Benchmark-Ergebnisse zur automatischen Anpassung der Modell- und Fallback-Prioritäten in `worker_tick.py`. *(⚪ Offen)*
 
 ---
 
@@ -200,9 +216,13 @@ sondern eine fortlaufende Optimierungsarbeit an zwei eng verzahnten Themen.
 | **Stufe 4** | Prime-Time- & Budget-Scheduling | ⭐⭐⭐ | 🔵 **Geplant** |
 | **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🟡 **In Umsetzung (#17)** |
 | **Stufe 6** | Agentenharness & Pipeline-Optimierung (laufend, kein Enddatum) | ⭐⭐⭐⭐⭐ | 🔁 **Laufend (#270, #271, #282, #293)** |
+| **Stufe 7** | Modell- & Review-Benchmark (Phasen A–D) | ⭐⭐⭐⭐ | 🟡 **In Umsetzung (Phase A gemergt, Phase B in #388)** |
 | **Baustein** | Web-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | ✅ **Gemergt (#104, #105, #114, #286)**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |
 | **Baustein** | Mehrere Projekte (Projektliste, Infra-Repo als zweites Projekt) | ⭐⭐⭐⭐ | ✅ **Gemergt (#18, #19, #20)**; Inbetriebnahme auf dem Server: siehe [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) |
+| **Baustein** | Repomap-Symbolkarte (`sandbox/repomap.py`, #227) | ⭐⭐⭐⭐ | ✅ **Gemergt (#227)**; reduziert Orientierungs-Tokens im Worker-Slot |
+| **Baustein** | Wake-Listener Sofort-Trigger (`sandbox/wake_listener.py`, Dienst `agent-wake`) | ⭐⭐⭐ | 🟡 **Aktiv auf CT 112 (#128, #347)**; Webhook-Verbindung optional |
 | **Eingestellt** | Lokaler LLM-Host (Gaming-PC, Ollama, WoL-Proxy, GPU-Tuning) | – | ⛔ **Nicht mehr verfolgt** (Ineffizienz; siehe Abschnitt 0). `hardware/` bleibt als Referenz. |
+| **Eingestellt** | Home-Assistant-Status & Webhooks (`ha_status.py`, `qwen_webhook.py`) | – | ⛔ **Entkoppelt / Stillgelegt**; durch nativeres Web-Dashboard ersetzt (#151). |
 
 ---
 
