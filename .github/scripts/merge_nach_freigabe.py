@@ -58,15 +58,29 @@ def trusted_actors() -> set[str]:
     return {p.strip().lower() for p in os.environ.get(TRUSTED_ACTORS_ENV, "").split(",") if p.strip()}
 
 
+def akteur_key(login: str | None) -> str:
+    """Vergleichsform eines Akteurs.
+
+    GitHub nennt dasselbe App-Konto je nach Quelle `name[bot]` (REST) oder `name` (GraphQL,
+    Label-Events). Ohne Normalisierung lehnt das Gate jede vom Reviewer gesetzte Freigabe ab —
+    belegt an PR #380: Label-Akteur `sandbox-agent-reviewer-app`, erlaubt war nur
+    `sandbox-agent-reviewer-app[bot]`.
+    """
+    name = (login or "").strip()
+    if name.lower().endswith("[bot]"):
+        name = name[: -len("[bot]")]
+    return name.lower()
+
+
 def latest_reviews(reviews: list[dict]) -> dict[str, dict]:
     """Je Login die zuletzt abgegebene Review.
 
     Ohne diese Reduktion würde eine alte Freigabe eine spätere Änderungsanforderung
-    desselben Kontos überdecken.
+    desselben Kontos überdecken. Schlüssel ist die Vergleichsform aus `akteur_key()`.
     """
     newest: dict[str, dict] = {}
     for r in reviews:
-        login = ((r.get("user") or {}).get("login") or "").lower()
+        login = akteur_key((r.get("user") or {}).get("login"))
         if not login:
             continue
         stamp = r.get("submitted_at") or ""
@@ -112,13 +126,13 @@ def decide(pr: dict, reviews: list[dict], checks: dict, label_actor: str | None,
     if not head:
         reasons.append("Head-SHA fehlt; ohne ihn ist keine Freigabe zuordenbar.")
 
-    allowed = {bot.lower()} | {a.lower() for a in trusted}
-    if (label_actor or "").lower() not in allowed:
+    allowed = {akteur_key(bot)} | {akteur_key(a) for a in trusted}
+    if akteur_key(label_actor) not in allowed:
         reasons.append(f"Label `{MERGE_LABEL}` wurde von `{label_actor or 'unbekannt'}` gesetzt; "
                        f"erlaubt sind nur `{bot}` und die Konten aus `{TRUSTED_ACTORS_ENV}`.")
 
     newest = latest_reviews(reviews)
-    bot_review = newest.get(bot.lower())
+    bot_review = newest.get(akteur_key(bot))
     if bot_review is None:
         reasons.append(f"Keine Review von `{bot}`.")
     elif bot_review.get("state") != "APPROVED":

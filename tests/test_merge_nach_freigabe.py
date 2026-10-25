@@ -413,3 +413,33 @@ def test_juengster_lauf_zaehlt_auch_bei_umgekehrter_reihenfolge():
         _lauf("tests-als-root", "completed", "success", "2026-10-25T10:54:13Z"),
     ]
     assert _decide(checks=_checks(runs=runs)).merge is True
+
+
+# ---------------- Akteur-Namen: REST `name[bot]`, GraphQL `name` ----------------
+# An PR #380 real aufgetreten: Das Label setzte `sandbox-agent-reviewer-app[bot]`, das
+# Label-Event nannte als Akteur `sandbox-agent-reviewer-app` (GraphQL). Das Gate lehnte ab —
+# damit konnte der Reviewer-Weg nie mergen.
+def test_label_akteur_ohne_bot_suffix_wird_erkannt():
+    d = _decide(label_actor="sandbox-agent-reviewer-app")
+    assert d.merge is True, d.reasons
+
+
+def test_label_akteur_mit_bot_suffix_bleibt_erlaubt():
+    assert _decide(label_actor=BOT).merge is True
+
+
+def test_fremder_akteur_bleibt_blockiert():
+    d = _decide(label_actor="irgendwer")
+    assert d.merge is False
+    assert any("gesetzt" in r for r in d.reasons)
+
+
+def test_review_von_bot_ohne_suffix_zaehlt_als_bot_review():
+    reviews = [_review(login="sandbox-agent-reviewer-app")]
+    assert _decide(reviews=reviews).merge is True
+
+
+def test_akteur_key_normalisiert():
+    assert m.akteur_key("Sandbox-Agent-Reviewer-App[bot]") == "sandbox-agent-reviewer-app"
+    assert m.akteur_key(" tripitest-art ") == "tripitest-art"
+    assert m.akteur_key(None) == ""
