@@ -3850,3 +3850,64 @@ def test_rework_job_mit_ausweichmodell_ersetzt_beide_worker_stellen(monkeypatch)
     assert f"„Worker: {alt}“" not in umgestellt
     assert vorlage in umgestellt            # Vorlage unverändert, kein zweiter Aufbau der Suche
     assert REVIEW_CHANGES in umgestellt
+
+
+def test_auto_commit_uncommitted_changes_committet_bei_aenderungen(monkeypatch, capsys):
+    """#391: Nicht committete Dateien werden vor dem PR-Check automatisch committet."""
+    commands = []
+
+    def fake_run(cmd, cwd=None, env=None, check=False, capture_output=False, text=False):
+        commands.append(cmd)
+        if cmd == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(cmd, 0, " M sandbox/worker_tick.py\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    w.auto_commit_uncommitted_changes("/fake/dir", {}, 391)
+    assert ["git", "status", "--porcelain"] in commands
+    assert ["git", "add", "-A"] in commands
+    assert ["git", "commit", "-m", "Umsetzung Issue #391"] in commands
+    out = capsys.readouterr().out
+    assert "Uncommittete Änderungen des Agenten gefunden" in out
+
+
+def test_auto_commit_uncommitted_changes_ueberspringt_bei_sauberem_tree(monkeypatch, capsys):
+    """#391: Bei sauberem Baum wird kein Commit ausgeführt."""
+    commands = []
+
+    def fake_run(cmd, cwd=None, env=None, check=False, capture_output=False, text=False):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    w.auto_commit_uncommitted_changes("/fake/dir", {}, 391)
+    assert commands == [["git", "status", "--porcelain"]]
+    out = capsys.readouterr().out
+    assert out == ""
+
+
+def test_auto_commit_uncommitted_changes_loggt_fehler_bei_git_crash(monkeypatch, capsys):
+    """#391 / Regel 7: Fehler bei git commit oder git add werden geloggt, nicht verschluckt."""
+    def fake_run(cmd, cwd=None, env=None, check=False, capture_output=False, text=False):
+        if cmd == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(cmd, 0, " M file.py\n", "")
+        if cmd == ["git", "add", "-A"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "error: unable to add")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    w.auto_commit_uncommitted_changes("/fake/dir", {}, 391)
+    out = capsys.readouterr().out
+    assert "git add fehlgeschlagen (Exit 1): error: unable to add" in out
+
+
+def test_auto_commit_uncommitted_changes_loggt_os_error(monkeypatch, capsys):
+    """#391 / Regel 7: Wenn git fehlt oder OSError auftritt, wird das geloggt."""
+    def fake_run(cmd, **kw):
+        raise FileNotFoundError("No such file or directory: 'git'")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    w.auto_commit_uncommitted_changes("/fake/dir", {}, 391)
+    out = capsys.readouterr().out
+    assert "Auto-Commit nicht ausführbar (FileNotFoundError)" in out
+
