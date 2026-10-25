@@ -113,8 +113,8 @@ def test_billig_fallbacks_enthaelt_kein_bezahltes_und_kein_abo_modell(monkeypatc
 
 def test_slot_2_ohne_einstellung_bleibt_normal(monkeypatch, tmp_path):
     monkeypatch.delenv("AGENT_SETTINGS", raising=False)
+    monkeypatch.delenv("LITELLM_MODEL_BILLIG", raising=False)
     monkeypatch.setattr(agent_settings, "VORGABE_PFAD", str(tmp_path / "nicht_vorhanden.json"))
-    monkeypatch.setattr(agent_settings, "_cache", None)
     w = _tick(monkeypatch)
     assert w.BILLIG_MODEL is None
     assert w.IS_BILLIG_SLOT is False
