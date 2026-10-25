@@ -1822,32 +1822,9 @@ def open_pr(n: int) -> bool:
 
     # Auto-Commit: Falls der Agent geänderte Dateien hinterlassen hat, ohne `git commit` aufzurufen,
     # sichern wir die Änderungen automatisch vor der Zählung ab (#391).
-    res_status = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=WORKDIR,
-        env=ENV,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if (res_status.stdout or "").strip():
-        log(f"issue{n}: Uncommittete Änderungen des Agenten gefunden, führe automatischen Commit durch.")
-        subprocess.run(["git", "add", "-A"], cwd=WORKDIR, env=ENV, check=False)
-        subprocess.run(["git", "commit", "-m", f"Umsetzung Issue #{n}"], cwd=WORKDIR, env=ENV, check=False)
+    auto_commit_uncommitted_changes(WORKDIR, ENV, n)
 
-    res_count = subprocess.run(
-        ["git", "rev-list", "--count", "origin/main..HEAD"],
-        cwd=WORKDIR,
-        env=ENV,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    count_str = (res_count.stdout or "").strip()
-    try:
-        count = int(count_str)
-    except ValueError:
-        count = 0
+    count = git_rev_list_count(WORKDIR, ENV, branch)
     if count <= 1:
         log(f"issue{n}: keine Änderungen über den Akzeptanztest hinaus, kein PR.")
         return False
