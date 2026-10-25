@@ -1,0 +1,62 @@
+name: gate
+
+# Zentraler Freigabe-Merge für alle Repos mit demselben Vertrag.
+#
+# Ein Zielrepo braucht nur diesen Stub; die Logik liegt hier an einer Stelle, die der
+# Agent nicht schreiben darf:
+#
+#   name: merge-nach-freigabe
+#   on:
+#     pull_request_target:
+#       types: [labeled]
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#     checks: read
+#     statuses: read
+#   concurrency:
+#     group: merge-nach-freigabe-${{ github.event.pull_request.number }}
+#     cancel-in-progress: false
+#   jobs:
+#     gate:
+#       if: github.event.label.name == 'review-freigabe'
+#       uses: tripitest-art/agent-sandbox-infra/.github/workflows/gate.yml@main
+#
+# pull_request_target: Workflow und Skript stammen immer aus `main` des Aufrufers, nie aus
+# dem PR. Geprüft wird nur, was das Skript selbst nachliest. PR-Texte gehören deshalb
+# niemals per ${{ }} in run:-Zeilen (Shell-Injection).
+on:
+  workflow_call:
+
+permissions:
+  contents: write      # Merge-Commit und Löschen des Feature-Branches
+  pull-requests: write # Merge-API
+  checks: read
+  statuses: read
+
+jobs:
+  # Der Jobname muss dem Wert von SELF_CHECK im Skript entsprechen: der eigene, noch
+  # laufende Check darf bei „alle Checks grün" nicht mitzählen. Aufgerufen heißt er
+  # "<Job des Aufrufers> / merge-nach-freigabe", dafür normalisiert das Skript.
+  merge-nach-freigabe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Freigabe prüfen und mergen
+        env:
+          # github.token erbt die Rechte des Aufrufers und steht auch im aufgerufenen
+          # Workflow bereit (secrets.GITHUB_TOKEN müsste übergeben werden).
+          GITHUB_TOKEN: ${{ github.token }}
+          REVIEWER_BOT: sandbox-agent-reviewer-app[bot]
+          GUARD_TRUSTED_ACTORS: tripitest-art
+        run: python .github/scripts/merge_nach_freigabe.py

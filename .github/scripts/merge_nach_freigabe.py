@@ -106,6 +106,17 @@ def juengste_checks(checks: dict) -> dict:
     return dict(checks, runs=list(juengste.values()))
 
 
+def selbst_check(name: str | None) -> bool:
+    """True, wenn dieser Check-Lauf das Gate selbst ist.
+
+    Im eigenen Repo heißt der Check wie der Job (``merge-nach-freigabe``). Wird der Workflow
+    über ``workflow_call`` aufgerufen, stellt GitHub den Namen des Aufrufers davor
+    (``gate / merge-nach-freigabe``). Ohne diese Normalisierung hielte das Gate seinen eigenen,
+    noch laufenden Check für einen fremden und blockierte jeden Merge.
+    """
+    return (name or "").split(" / ")[-1].strip() == SELF_CHECK
+
+
 def decide(pr: dict, reviews: list[dict], checks: dict, label_actor: str | None,
            trusted: set[str], bot: str) -> Decision:
     """Reine Logik, damit sie ohne GitHub testbar ist.
@@ -148,7 +159,7 @@ def decide(pr: dict, reviews: list[dict], checks: dict, label_actor: str | None,
     state = checks.get("state")
     if state != "success":
         reasons.append(f"Kombinierter Status ist {state!r}, nicht 'success'.")
-    runs = [r for r in (checks.get("runs") or []) if r.get("name") != SELF_CHECK]
+    runs = [r for r in (checks.get("runs") or []) if not selbst_check(r.get("name"))]
     if not runs:
         reasons.append("Keine fremden Check-Läufe gefunden; nichts geprüft heißt nicht gemergt.")
     bad = [f"{r.get('name')} ({r.get('status')}/{r.get('conclusion')})"
@@ -298,7 +309,7 @@ def warte_auf_checks(gh, head, max_sekunden=None, poll=None, schlaf=None, uhr=No
     while True:
         checks = gh.checks(head) if head else {"state": None, "runs": []}
         offen = sorted({r.get("name") for r in checks.get("runs") or []
-                        if r.get("name") != SELF_CHECK and r.get("status") != "completed"})
+                        if not selbst_check(r.get("name")) and r.get("status") != "completed"})
         rest = int(frist - uhr())
         if not offen or rest <= 0:
             return checks
