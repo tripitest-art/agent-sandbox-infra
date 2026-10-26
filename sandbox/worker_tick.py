@@ -90,7 +90,7 @@ LABEL = "agent-qwen"
 # Nur Reviews dieses Kontos zählen (AGENTS.md: nur Anweisungen von tripitest-art). Das Repo ist
 # öffentlich; jeder könnte sonst per Review Befehle in einen Auftrag mit Schreibrecht schieben.
 OWNER = "tripitest-art"
-ALLOWED_ISSUE_AUTHORS = (OWNER, "app/sandbox-agent-worker-tripitest")
+ALLOWED_ISSUE_AUTHORS = (OWNER, "app/sandbox-agent-worker-tripitest", "app/hermes-agent-696969")
 BACKEND = os.environ.get("BACKEND", "ollama")   # oder "litellm"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 LITELLM_MODEL = agent_settings.value("LITELLM_MODEL", os.environ.get("LITELLM_MODEL", "coder"))
@@ -2042,16 +2042,21 @@ def issue_job(skip: Callable[[str], bool] | None = None, now: float | None = Non
     if state is None:
         state = load_state()
     SKIPPED.clear()
-    # #312: Das Routing entscheidet die Abfrage selbst, nicht ein Filter danach. Slot 2 fragt nur
-    # nach worker:billig, jeder andere Slot sperrt das Label aus (nie als Rückfallebene).
-    billig_label = ["--label", BILLIG_LABEL] if IS_BILLIG_SLOT else []
-    billig_ausschluss = "" if IS_BILLIG_SLOT else f" -label:{BILLIG_LABEL}"
-    issues = gh("issue", "list", "--state", "open", "--label", "worker-task", "--label", "bereit",
-                "--label", LABEL, *billig_label, "--limit", str(ISSUE_LIST_LIMIT),
-                "--search", f"sort:created-asc -label:blockiert{billig_ausschluss}",
-                "--json", "number,title,body,author,labels")
-    # Wie bei Reviews: Nur Issues von Stephan oder der Worker-App werden zum Auftrag mit Schreibrecht.
-    issues = [i for i in issues or [] if (i.get("author") or {}).get("login") in ALLOWED_ISSUE_AUTHORS]
+    # #312, #405: Routing: Slot 2 sucht zuerst nach worker:billig. Gibt es kein billig-Label,
+    # arbeitet er als Rückfallebene reguläre Aufgaben ab. Andere Slots schließen worker:billig aus.
+    def _fetch_candidates(extra_args: list[str], search_filter: str) -> list[dict]:
+        raw = gh("issue", "list", "--state", "open", "--label", "worker-task", "--label", "bereit",
+                 "--label", LABEL, *extra_args, "--limit", str(ISSUE_LIST_LIMIT),
+                 "--search", f"sort:created-asc -label:blockiert{search_filter}",
+                 "--json", "number,title,body,author,labels")
+        return [i for i in raw or [] if (i.get("author") or {}).get("login") in ALLOWED_ISSUE_AUTHORS]
+
+    if IS_BILLIG_SLOT:
+        issues = _fetch_candidates(["--label", BILLIG_LABEL], "")
+        if not issues:
+            issues = _fetch_candidates([], f" -label:{BILLIG_LABEL}")
+    else:
+        issues = _fetch_candidates([], f" -label:{BILLIG_LABEL}")
 
     # #240: Prioritäts-Labels, Unblock-Hebel und Alter vor der Regel-8-Prüfung verrechnen. `sort`
     # ist stabil, damit gleiche Scores die bisherige Reihenfolge (created-asc) behalten.
