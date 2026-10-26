@@ -130,3 +130,14 @@ def test_einstellung_ohne_slot_2_schaltet_keinen_billig_modus(monkeypatch, tmp_p
     w = _tick(monkeypatch, slot="1")
     assert w.BILLIG_MODEL == "coder-mimo-free"
     assert w.IS_BILLIG_SLOT is False
+
+
+# ---- Autorenfilter & Slot-2-Rückfall ----
+
+
+def test_allowed_issue_authors_enthaelt_hermes_agent(monkeypatch):
+    w = _tick(monkeypatch)
+    assert "app/hermes-agent-696969" in w.ALLOWED_ISSUE_AUTHORS
+    assert "app/sandbox-agent-worker-tripitest" in w.ALLOWED_ISSUE_AUTHORS
+    assert w.OWNER in w.ALLOWED_ISSUE_AUTHORS
+

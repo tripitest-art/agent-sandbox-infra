@@ -58,8 +58,8 @@ class FakeGH:
                 raise AssertionError(f"kein Billig-Routing in der Abfrage: {args}")
             if frage_billig and self.rolle == "normal":
                 raise AssertionError("normaler Slot fragt nach worker:billig (verboten)")
-            if frage_normal and self.rolle == "billig":
-                raise AssertionError("Billig-Slot fragt mit Ausschluss von worker:billig (verboten)")
+            if frage_normal and self.rolle == "billig" and self.billig:
+                raise AssertionError("Billig-Slot fragt mit Ausschluss von worker:billig trotz vorhandener Billig-Aufträge")
             self.angefragt["billig" if frage_billig else "normal"] = True
             return self.billig if frage_billig else self.normal
         if args[:2] == ("issue", "edit"):
@@ -103,14 +103,16 @@ def test_billig_slot_nimmt_billig_issue(monkeypatch, tmp_path):
     assert "#501" in task
 
 
-def test_billig_slot_laesst_normales_issue_liegen(monkeypatch, tmp_path):
+def test_billig_slot_faellt_auf_normales_issue_zurueck_wenn_kein_billig(monkeypatch, tmp_path):
     w = _lade(monkeypatch, tmp_path, "2", {"LITELLM_MODEL_BILLIG": "coder-mimo-free"})
-    # Nur ein normales Issue in der Welt; der Fake verlangt die Billig-Anfrage und
-    # lehnt eine Ausschluss-Abfrage ab — Slot 2 darf das normale Issue gar nicht anfragen.
+    # Nur ein normales Issue in der Welt; Slot 2 sucht zuerst billig (keins da)
+    # und nimmt als Rückfallebene das normale Issue.
     gh = FakeGH("billig", normal=[_issue(502, False)])
     monkeypatch.setattr(w, "gh", gh)
     assert gh.normal, "Aufbau: das normale Issue existiert"
-    assert w.issue_job(state={}, now=1_000_000.0) is None
+    job = w.issue_job(state={}, now=1_000_000.0)
+    assert job is not None
+    assert job[0] == "issue502"
 
 
 def test_normaler_slot_laesst_billig_issue_liegen(monkeypatch, tmp_path):
