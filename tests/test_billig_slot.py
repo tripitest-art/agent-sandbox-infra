@@ -112,9 +112,11 @@ def test_billig_fallbacks_enthaelt_kein_bezahltes_und_kein_abo_modell(monkeypatc
 # ---- Slot ohne Einstellung bleibt ein normaler Slot ----
 
 def test_slot_2_ohne_einstellung_bleibt_normal(monkeypatch, tmp_path):
+    nicht_da = str(tmp_path / "nicht_vorhanden.json")
     monkeypatch.delenv("AGENT_SETTINGS", raising=False)
     monkeypatch.delenv("LITELLM_MODEL_BILLIG", raising=False)
-    monkeypatch.setattr(agent_settings, "VORGABE_PFAD", str(tmp_path / "nicht_vorhanden.json"))
+    monkeypatch.setattr(agent_settings, "VORGABE_PFAD", nicht_da)
+    monkeypatch.setenv("AGENT_SETTINGS", nicht_da)
     w = _tick(monkeypatch)
     assert w.BILLIG_MODEL is None
     assert w.IS_BILLIG_SLOT is False
