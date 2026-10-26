@@ -12,6 +12,7 @@ der Umgebung, stehen nie in einer Zeile und erscheinen in keiner Ausgabe.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -33,6 +34,23 @@ from sandbox.core import (  # noqa: E402
 from sandbox.core.benchmark_providers import Provider  # noqa: E402
 
 ERGEBNIS_PFAD = "/root/benchmark-ergebnisse.jsonl"
+
+LOCK_PFADE = [
+    "/run/qwen-worker-w*.lock",
+    "/run/qwen-worker.lock",
+    "/run/qwen-review.lock",
+]
+
+
+def ist_slot_belegt(pfade: Sequence[str] | None = None) -> bool:
+    """Prüft, ob aktive Lock-Dateien für Worker- oder Review-Slots existieren."""
+    pfad_muster = LOCK_PFADE if pfade is None else pfade
+    for muster in pfad_muster:
+        treffer = glob.glob(muster)
+        if treffer:
+            return True
+    return False
+
 
 GRUND_RATENBEGRENZT = "ratenbegrenzt"
 
@@ -235,6 +253,11 @@ def _argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="nur aktuelle Worker-/Review-Aliase, keine Providerliste lesen",
     )
+    parser.add_argument(
+        "--wenn-frei",
+        action="store_true",
+        help="überspringt den Lauf, wenn ein Worker- oder Review-Slot belegt ist",
+    )
     return parser
 
 
@@ -277,6 +300,11 @@ def main(
     args = parser.parse_args(argv)
     if args.nur_aktuelle and (args.providers or args.ohne_aktuelle):
         parser.error("--nur-aktuelle schließt --providers und --ohne-aktuelle aus")
+
+    if args.wenn_frei or env.get("BENCHMARK_WENN_FREI") == "1":
+        if ist_slot_belegt():
+            print("Benchmark übersprungen: Slot aktiv.")
+            return 0
 
     try:
         aktiv, uebersprungen = _anbieter(args, env)
