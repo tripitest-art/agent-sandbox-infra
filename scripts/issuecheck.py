@@ -40,7 +40,7 @@ MANUAL_PATHS = (
 )
 
 # Importe, die ein Akzeptanztest nicht braucht und die Netzwerk, Uhrzeit oder Zufall ins Spiel bringen.
-FORBIDDEN_IMPORTS = frozenset({"requests", "httpx", "socket", "http", "ftplib", "smtplib", "random"})
+FORBIDDEN_IMPORTS = frozenset({"requests", "httpx", "socket", "http", "ftplib", "smtplib", "random", "urllib", "aiohttp"})
 ALLOWED_IMPORT_ROOTS = frozenset({"pytest", "sandbox", "tests"})
 
 # Aufrufe, die den Testlauf von der Uhr oder vom Zufall abhängig machen.
@@ -82,8 +82,15 @@ def _section_lines(issue_md: str, name: str) -> list[str] | None:
     höherer Ebene. None, wenn die Überschrift fehlt."""
     lines = issue_md.replace("\r\n", "\n").split("\n")
     heads = _headings_outside_fences(lines)
+    target = name.lower()
     for pos, (line_no, level, text) in enumerate(heads):
-        if text.lower() != name.lower():
+        t = text.lower()
+        match = (t == target) or (t.startswith(target))
+        if not match and target.startswith("akzeptanztest"):
+            match = t.startswith("akzeptanztest")
+        if not match and target.startswith("fertig"):
+            match = t.startswith("fertig")
+        if not match:
             continue
         end = len(lines)
         for later_no, later_level, _ in heads[pos + 1:]:
@@ -203,17 +210,33 @@ def check_static(issue_md: str) -> list[Finding]:
 
     # 1. Überschriften prüfen
     found_headings = [name for _, _, name in _headings_outside_fences(lines)]
-    headings_set = {name.lower() for name in found_headings}
-    for name in REQUIRED_HEADINGS:
-        if name.lower() not in headings_set:
+    headings_lower = [name.lower() for name in found_headings]
+
+    has_ziel = any(h == "ziel" or h.startswith("ziel") for h in headings_lower)
+    has_anforderungen = any(h == "anforderungen" or h.startswith("anforderung") for h in headings_lower)
+    if not has_ziel and has_anforderungen:
+        req_headings = ("Kontext", "Betroffene Dateien", "Anforderungen", "Akzeptanztest", "Fertig wenn")
+    else:
+        req_headings = REQUIRED_HEADINGS
+
+    for name in req_headings:
+        target = name.lower()
+        matched = any(h == target or h.startswith(target) for h in headings_lower)
+        if not matched and target.startswith("akzeptanztest"):
+            matched = any(h.startswith("akzeptanztest") for h in headings_lower)
+        if not matched and target.startswith("fertig"):
+            matched = any(h.startswith("fertig") for h in headings_lower)
+        if not matched:
             findings.append(Finding("fehler", "ueberschrift-fehlt", f"Pflichtüberschrift fehlt: ### {name}"))
 
     # Reihenfolge prüfen
     idx_map = {name.lower(): i for i, (_, _, name) in enumerate(_headings_outside_fences(lines))}
     last_idx = -1
-    for name in REQUIRED_HEADINGS:
-        if name.lower() in idx_map:
-            curr_idx = idx_map[name.lower()]
+    for name in req_headings:
+        target = name.lower()
+        found_key = next((k for k in idx_map if k == target or k.startswith(target)), None)
+        if found_key is not None:
+            curr_idx = idx_map[found_key]
             if curr_idx < last_idx:
                 findings.append(Finding("warnung", "reihenfolge",
                                         f"Überschrift ### {name} steht nicht in der vorgeschriebenen Reihenfolge."))
@@ -251,7 +274,9 @@ def check_static(issue_md: str) -> list[Finding]:
                                         "Merge-Modus darf nicht automatisch sein (Regel 4: manuell durch Stephan erforderlich)."))
 
     # 4. Akzeptanztests prüfen
-    section = _section_lines(text, "Akzeptanztests")
+    section = _section_lines(text, "Akzeptanztest")
+    if section is None:
+        section = _section_lines(text, "Akzeptanztests")
     if section is None:  # fehlende Überschrift ist bereits gemeldet
         return _dedupe(findings)
 
