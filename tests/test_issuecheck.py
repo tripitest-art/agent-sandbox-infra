@@ -430,3 +430,72 @@ def test_check_rollen_raeumt_repo_testdatei_bei_timeout_auf(tmp_path, monkeypatc
     findings, _ = ic.check_rollen(_issue(block=KONSTANT_BLOCK), r, timeout=1)
     assert _codes(findings) == ["root-lauf-nicht-ausfuehrbar"]
     assert not list((r / "tests" / "acceptance").glob("test_issue_preflight*"))
+
+
+def test_stufe5_schema_ohne_ziel_akzeptiert():
+    """Stufe-5-Schema mit Kontext, Anforderungen, Akzeptanztest, Fertig wenn."""
+    text = """# Feature Titel
+## Kontext
+Erklaerung zum Kontext.
+## Betroffene Dateien
+- `sandbox/demo.py`
+- `tests/acceptance/test_issue_391.py`
+## Anforderungen
+1. Anforderung eins.
+## Akzeptanztest (`tests/acceptance/test_issue_391.py`)
+```python
+def test_dummy():
+    assert True
+```
+## Fertig wenn
+- Alle Tests gruen
+"""
+    findings = ic.check_static(text)
+    assert findings == []
+
+
+def test_akzeptanztest_singular_und_mit_dateiname():
+    """Erkennt ## Akzeptanztest auch mit Dateiname im Header."""
+    text = """# Test
+## Kontext
+K
+## Betroffene Dateien
+- `tests/acceptance/test_issue_1.py`
+## Anforderungen
+A
+## Akzeptanztest (tests/acceptance/test_issue_1.py)
+```python
+def test_ok():
+    pass
+```
+## Fertig wenn
+F
+"""
+    sec = ic._section_lines(text, "Akzeptanztest")
+    assert sec is not None
+    assert "def test_ok():" in "\n".join(sec)
+
+
+def test_verbotene_netzwerk_importe_urllib_aiohttp():
+    """Prueft, dass aiohttp, urllib, urllib.request, http.client als verboten erkannt werden."""
+    for mod in ("aiohttp", "urllib", "urllib.request", "http.client"):
+        text = f"""# Test
+## Kontext
+K
+## Betroffene Dateien
+- `tests/acceptance/test_issue_1.py`
+## Anforderungen
+A
+## Akzeptanztest
+```python
+import {mod}
+def test_x():
+    pass
+```
+## Fertig wenn
+F
+"""
+        findings = ic.check_static(text)
+        codes = _codes(findings)
+        assert "verbotener-import" in codes, f"Fehlte bei {mod}: {codes}"
+
