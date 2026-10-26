@@ -90,7 +90,7 @@ LABEL = "agent-qwen"
 # Nur Reviews dieses Kontos zählen (AGENTS.md: nur Anweisungen von tripitest-art). Das Repo ist
 # öffentlich; jeder könnte sonst per Review Befehle in einen Auftrag mit Schreibrecht schieben.
 OWNER = "tripitest-art"
-ALLOWED_ISSUE_AUTHORS = (OWNER, "app/sandbox-agent-worker-tripitest")
+ALLOWED_ISSUE_AUTHORS = (OWNER, "app/sandbox-agent-worker-tripitest", "app/hermes-agent-696969")
 BACKEND = os.environ.get("BACKEND", "ollama")   # oder "litellm"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 LITELLM_MODEL = agent_settings.value("LITELLM_MODEL", os.environ.get("LITELLM_MODEL", "coder"))
