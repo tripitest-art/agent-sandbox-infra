@@ -1597,7 +1597,7 @@ def acceptance_block(issue_body: str | None) -> str | None:
     start = level = None
     for i, line in enumerate(lines):
         m = _ACCEPTANCE_HEADING_RE.match(line)
-        if m and m.group(2).lower().startswith("akzeptanztests"):
+        if m and m.group(2).lower().startswith("akzeptanztest"):  # Singular und Plural (#388)
             start, level = i + 1, len(m.group(1))
             break
     if start is None:
