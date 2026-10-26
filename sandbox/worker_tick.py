@@ -80,6 +80,7 @@ SLOT_DIR: str = os.environ.get("SLOT_DIR", "/run/worker-slots")
 # und eine „⚠ Stephan:“-Meldung, statt die Worker endlos zu sperren (Regel 7).
 DEPLOY_PENDING_FILE: str = os.environ.get("DEPLOY_PENDING_FILE", "/run/agent-deploy-pending")
 DEPLOY_PENDING_MAX_AGE_S: int = 3600
+PAUSE_FILE: str = os.environ.get("PIPELINE_PAUSE_FILE", "/run/pipeline-pause")
 # #317: Obergrenze der Datei-Stichprobe im Sandbox-Check. Der Baum hat tausende Dateien; eine
 # Handvoll genügt, um einen root-eigenen Fehlgriff (#280) vor dem Claim zu erkennen.
 HEALTH_CHECK_MAX_FILES = 20
@@ -3980,6 +3981,21 @@ def deploy_steht_an(state: dict, path: str | None = None, now: float | None = No
     return False
 
 
+def pipeline_pausiert(state: dict | None = None, pause_file: str | None = None) -> bool:
+    """True, wenn die Pipeline manuell ueber das Dashboard pausiert wurde (#pipeline-pause).
+
+    Solange PAUSE_FILE existiert, nimmt der Takt keine neuen Issue-Auftraege an.
+    Laufende Auftraege, Nacharbeiten und PR-Abschluesse laufen weiter sauber zu Ende.
+    """
+    pf = pause_file or PAUSE_FILE
+    if not os.path.exists(pf):
+        return False
+    if state is not None:
+        log_on_change(state, "_pipeline_pausiert", "1",
+                      "Pipeline pausiert: keine neuen Issue-Auftraege (aktive laufen zu Ende).")
+    return True
+
+
 def find_job(state: dict):
     """Erster Auftrag, dessen Schlüssel weder geparkt noch von einem anderen Slot belegt oder
     erledigt ist, oder None.
@@ -4007,7 +4023,7 @@ def find_job(state: dict):
     except (ValueError, TypeError):
         takes_state = True
     job = issue_job(skip, state=state) if takes_state else issue_job(skip)
-    if job and (main_is_red(state) or main_is_red_local(state) or deploy_steht_an(state)):
+    if job and (main_is_red(state) or main_is_red_local(state) or deploy_steht_an(state) or pipeline_pausiert(state)):
         return None
     return job
 
