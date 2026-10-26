@@ -414,6 +414,35 @@ def test_einstellungen_state_zeigt_knopf_nur_mit_schreiben(tmp_path):
     assert dash.state()["einstellungen"]["schreiben"] is True
 
 
+def test_dashboard_pause_api_schaltet_pause_datei_um(tmp_path):
+    pause_datei = tmp_path / "pipeline-pause"
+    dash = _dash(tmp_path)
+    dash.pause_file = str(pause_datei)
+    dash.settings_writer = d.SettingsWriter(env={"DASHBOARD_WRITE_TOKEN": TOKEN})
+
+    assert not dash.is_paused()
+    st = dash.state()
+    assert st["pausiert"] is False
+    assert not any(a["art"] == "pause" for a in st["alerts"])
+
+    # Pausieren aktivieren
+    assert dash.set_paused(True) is True
+    assert pause_datei.exists()
+    assert dash.is_paused()
+    st_paused = dash.state()
+    assert st_paused["pausiert"] is True
+    assert any(a["art"] == "pause" for a in st_paused["alerts"])
+
+    # Fortsetzen
+    assert dash.set_paused(False) is False
+    assert not pause_datei.exists()
+    assert not dash.is_paused()
+
+    assert "api/pause" in d.PAGE
+    assert "togglePause" in d.PAGE
+    assert "pause-btn" in d.PAGE and "resume-btn" in d.PAGE
+
+
 def test_settings_writer_braucht_nur_den_token():
     assert d.SettingsWriter(env={"DASHBOARD_WRITE_TOKEN": TOKEN}).enabled
     assert not d.SettingsWriter(env={}).enabled

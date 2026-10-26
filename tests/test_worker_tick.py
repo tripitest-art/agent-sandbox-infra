@@ -3911,3 +3911,25 @@ def test_auto_commit_uncommitted_changes_loggt_os_error(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Auto-Commit nicht ausführbar (FileNotFoundError)" in out
 
+
+def test_pipeline_pausiert_sperrt_neue_issue_auftraege(tmp_path, monkeypatch, capsys):
+    pause_datei = tmp_path / "pipeline-pause"
+    pause_datei.write_text("pausiert\n", encoding="utf-8")
+    monkeypatch.setattr(w, "PAUSE_FILE", str(pause_datei))
+    state = {}
+    assert w.pipeline_pausiert(state, pause_file=str(pause_datei)) is True
+    assert "Pipeline pausiert: keine neuen Issue-Auftraege" in capsys.readouterr().out
+
+    monkeypatch.setattr(w, "issue_job", lambda *a, **k: ("issue100", "task", None, None))
+    monkeypatch.setattr(w, "rework_job", lambda *a: None)
+    monkeypatch.setattr(w, "text_fix_job", lambda *a: None)
+    monkeypatch.setattr(w, "main_is_red", lambda *a: False)
+    monkeypatch.setattr(w, "main_is_red_local", lambda *a: False)
+    monkeypatch.setattr(w, "deploy_steht_an", lambda *a: False)
+    assert w.find_job(state) is None
+
+    # Wenn Pause-Datei entfernt wird, laeuft die Vergabe wieder
+    pause_datei.unlink()
+    assert w.pipeline_pausiert(state, pause_file=str(pause_datei)) is False
+    assert w.find_job(state) == ("issue100", "task", None, None)
+

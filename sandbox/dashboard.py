@@ -48,6 +48,7 @@ import urllib.request
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # Module liegen nebenan
@@ -78,6 +79,7 @@ MAX_BUDGET_LIMIT = 10000   # Obergrenze gegen Tippfehler (USD)
 FAIL_DELAY = 1.0           # Sekunden Wartezeit nach falschem Token (bremst Raten)
 WAKE_COOLDOWN = 10.0       # Sekunden zwischen zwei Takt-Starts über das Dashboard
 DEAD_MESSAGE = "Prozess beendet"   # setzt read_slots für einen verwaisten Lauf
+PAUSE_FILE: str = os.environ.get("PIPELINE_PAUSE_FILE", "/run/pipeline-pause")
 
 # Status- und Budget-Konstanten
 STATES = ("bereit", "in-arbeit", "blockiert", "entwurf")
@@ -688,9 +690,10 @@ class Dashboard:
                  infra_dir: str = INFRA_DIR, is_pid_alive=pid_is_active,
                  clock: Callable[[], datetime] = lambda: datetime.now(),
                  writer: BudgetWriter | None = None, waker: WakeSender | None = None,
-                 token_stats: TokenStatsCache | None = None):
+                 token_stats: TokenStatsCache | None = None, pause_file: str = PAUSE_FILE):
         self.cache, self.logbuf, self.slot_dir, self.infra_dir = cache, logbuf, slot_dir, infra_dir
         self.is_pid_alive, self.clock = is_pid_alive, clock
+        self.pause_file = pause_file
         self.writer = writer or BudgetWriter(env={})   # ohne Angabe: Ändern aus
         self.waker = waker or WakeSender(env={})       # ohne Angabe: Wecken aus
         self.settings_writer = SettingsWriter()        # ohne Token in der Umgebung: Ändern aus
@@ -700,6 +703,23 @@ class Dashboard:
         new = self.writer.set_budget(alias, value)
         self.cache.invalidate()   # die Anzeige holt den neuen Stand sofort
         return new
+
+    def is_paused(self) -> bool:
+        return os.path.exists(self.pause_file)
+
+    def set_paused(self, paused: bool) -> bool:
+        if paused:
+            try:
+                Path(self.pause_file).write_text(f"pausiert seit {self.clock().isoformat()}\n", encoding="utf-8")
+            except OSError as exc:
+                raise BudgetError(f"Pause-Datei nicht schreibbar ({type(exc).__name__})", 500) from None
+        else:
+            try:
+                if os.path.exists(self.pause_file):
+                    os.remove(self.pause_file)
+            except OSError as exc:
+                raise BudgetError(f"Pause-Datei nicht entfernbar ({type(exc).__name__})", 500) from None
+        return paused
 
     def state(self) -> dict:
         status, veraltet = self.cache.get()
@@ -720,6 +740,10 @@ class Dashboard:
         stats = self.logbuf.stats
         state["statistik"] = stats.snapshot(self.clock()) if stats is not None else None
         state["token"] = self.token_stats.get(self.clock()) if self.token_stats is not None else None
+        state["pausiert"] = self.is_paused()
+        if state["pausiert"]:
+            state["alerts"].append({"art": "pause",
+                                     "text": "⏸ Pipeline pausiert: Aktive Tasks laufen zu Ende, keine neuen Aufträge."})
         return state
 
     def frames(self, last_seq: int, last_state_json: str | None):
@@ -872,6 +896,15 @@ async function setBudget(alias,cur){
  if(r.ok){try{sessionStorage.setItem("wt",tok)}catch(e){}alert("Limit von "+alias+" auf $"+j.max_budget+" gesetzt")}
  else{if(r.status===403){try{sessionStorage.removeItem("wt")}catch(e){}}alert(j.fehler||"Fehler "+r.status)}
 }
+async function togglePause(pausieren){
+ let tok="";try{tok=sessionStorage.getItem("wt")||""}catch(e){}
+ if(!tok){tok=prompt("Schreib-Token:")||"";if(!tok)return}
+ const r=await fetch("api/pause",{method:"POST",headers:{"Content-Type":"application/json","X-Dashboard-Token":tok},
+  body:JSON.stringify({pausiert:pausieren})});
+ const j=await r.json().catch(()=>({}));
+ if(r.ok){try{sessionStorage.setItem("wt",tok)}catch(e){}}
+ else{if(r.status===403){try{sessionStorage.removeItem("wt")}catch(e){}}alert(j.fehler||"Fehler "+r.status)}
+}
 async function wecken(){
  let tok="";try{tok=sessionStorage.getItem("wt")||""}catch(e){}
  if(!tok){tok=prompt("Schreib-Token:")||"";if(!tok)return}
@@ -947,7 +980,7 @@ function renderEinstellungen(e){
   const c=el("td");
   if(e.schreiben){const b=el("button",null,"Ändern");if(hasDirectCtrl)b.style.display="none";b.onclick=()=>setSetting(n,w.wert,!!sp.erlaubt);c.append(b)}
   r.append(c);t.append(r)})}
-function renderWake(s){const b=$("wake");b.replaceChildren();if(!s.wecken)return;const t=el("button",null,"Takt starten");t.onclick=wecken;b.append(t)}
+function renderWake(s){const b=$("wake");b.replaceChildren();const paust=!!s.pausiert;if(s.einstellungen&&s.einstellungen.schreiben){const p=el("button",paust?"resume-btn":"pause-btn",paust?"▶ Pipeline fortsetzen":"⏸ Nach nächstem Task stoppen");p.onclick=()=>togglePause(!paust);b.append(p)}if(!s.wecken)return;const t=el("button",null,"Takt starten");t.onclick=wecken;b.append(t)}
 function renderLog(){const l=$("log"),nur=$("nur").checked,
  stick=l.scrollTop+l.clientHeight>=l.scrollHeight-20;
  l.textContent=logLines.filter(x=>!nur||x.includes("⚠ Stephan")).join("\n");
@@ -1039,6 +1072,9 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
             if path == "/api/wake":
                 self._wake()
                 return
+            if path == "/api/pause":
+                self._pause()
+                return
             if path == "/api/settings":
                 self._settings()
                 return
@@ -1074,6 +1110,33 @@ def make_handler(dash: Dashboard, interval: float = SSE_INTERVAL):
                 return
             print(f"dashboard: Budget-Limit {data['alias']} auf {value} gesetzt", flush=True)
             self._json(200, {"ok": True, "alias": data["alias"], "max_budget": value})
+
+        def _pause(self) -> None:
+            writer = dash.settings_writer
+            if not writer.enabled:
+                self._json(403, {"fehler": "Pipeline pausieren ist nicht eingerichtet"})
+                return
+            if not writer.token_ok(self.headers.get("X-Dashboard-Token", "")):
+                time.sleep(writer.fail_delay)
+                print("dashboard: Pause mit falschem Token abgelehnt", file=sys.stderr, flush=True)
+                self._json(403, {"fehler": "Token falsch"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
+            except (ValueError, UnicodeDecodeError):
+                self._json(400, {"fehler": "Ungültige Anfrage"})
+                return
+            pausieren = bool(data.get("pausiert", not dash.is_paused()))
+            try:
+                dash.set_paused(pausieren)
+            except BudgetError as exc:
+                print(f"dashboard: Pause fehlgeschlagen: {exc}", file=sys.stderr, flush=True)
+                self._json(exc.status, {"fehler": str(exc)})
+                return
+            status_txt = 'pausiert' if pausieren else 'fortgesetzt'
+            print(f'dashboard: Pipeline {status_txt}', flush=True)
+            self._json(200, {'ok': True, 'pausiert': pausieren})
 
         def _settings(self) -> None:
             writer = dash.settings_writer
