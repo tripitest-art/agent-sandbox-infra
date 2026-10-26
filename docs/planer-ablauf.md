@@ -45,8 +45,8 @@ The Planner writes issues, never code: no branches, no commits, no PRs, no merge
    - import only standard library modules and this repository's scripts;
    - write only into `tmp_path`. **Never** write to `/root` (non-writable on developer machines and disallowed in CI, #39).
 6. **Verify acceptance tests (with shell):** Save draft locally (e.g. `entwuerfe/issue-<topic>.md`) and run
-   48|   `python scripts/issuecheck.py <file>`. The script validates required headings (both classical template and Stufe 5 schema),
-   49|   merge mode, AST constraints (no network like `requests`, `urllib`, `aiohttp`, `socket`,
+   `python scripts/issuecheck.py <file>`. The script validates required headings (both classical template and Stufe 5 schema),
+   merge mode, AST constraints (no network like `requests`, `urllib`, `aiohttp`, `socket`,
    no time/randomness calls, no `skip`/`xfail`, no hardcoded `/root` paths, no accidental `Wartet auf:` lines), and executes
    the acceptance test in isolation with pytest. The test MUST be **red** (failing) prior to implementation,
    and it MUST stay green when the suite runs as root (the `pre-push` hook does): `issuecheck.py`
