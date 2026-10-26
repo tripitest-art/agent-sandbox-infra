@@ -197,3 +197,13 @@ logrotate_conf() {   # gibt die logrotate-Einstellung auf stdout aus; $LOG_ROTAT
 }
 CONF
 }
+
+# --- Benchmark-Units -----------------------------------------------------------------------------
+# Installiert agent-benchmark.service und agent-benchmark.timer nach /etc/systemd/system/ (oder $UNIT_DIR)
+benchmark_units_install() {
+  local unit_dir="${UNIT_DIR:-/etc/systemd/system}"
+  local src_dir="${1:-$SCRIPT_DIR/systemd}"
+  install -m 644 "$src_dir/agent-benchmark.service" "$unit_dir/agent-benchmark.service"
+  install -m 644 "$src_dir/agent-benchmark.timer" "$unit_dir/agent-benchmark.timer"
+}
+

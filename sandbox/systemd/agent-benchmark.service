@@ -1,0 +1,10 @@
+[Unit]
+Description=Wöchentlicher Modell-Benchmark (--wenn-frei)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/venv/bin/python /root/agent-sandbox-infra/sandbox/benchmark.py --wenn-frei --nur-aktuelle
+Nice=15
+StandardOutput=append:/root/worker.log
+StandardError=append:/root/worker.log
