@@ -1725,6 +1725,23 @@ def test_parse_affected_files_prosa_ohne_ausschlusswort_zaehlt_weiter():
     assert w.parse_affected_files(body) == {"a.py", "b.py"}
 
 
+def test_parse_affected_files_unreleased_loest_keine_kollision_aus():
+    # #405: „… eine Zeile unter `Unreleased` …“ ist kein Dateiname. `parse_affected_files()` bleibt
+    # unverändert und liest das Backtick-Wort als Kandidat; `collision_files()` filtert es jetzt
+    # über COLLISION_EXEMPT — wie `CHANGELOG.md` zählt `Unreleased` nicht (sc-digger #404 vs. #402).
+    body = (
+        "### Betroffene Dateien (nur diese)\n\n"
+        "- `sc_digger/web/app.py`\n"
+        "- `CHANGELOG.md` — eine Zeile unter `Unreleased` mit der PR-Nummer\n"
+    )
+    assert w.parse_affected_files(body) == {"sc_digger/web/app.py", "CHANGELOG.md", "Unreleased"}
+    assert w.collision_files(w.parse_affected_files(body)) == {"sc_digger/web/app.py"}
+    assert w.COLLISION_EXEMPT == frozenset({"CHANGELOG.md", "README.md", "Unreleased"})
+    assert w.collision_files({"Unreleased", "sandbox/worker_tick.py", "Dockerfile"}) == {
+        "sandbox/worker_tick.py", "Dockerfile"
+    }
+
+
 def test_projects_example_hat_hotspot_fuer_dieses_repo():
     data = json.loads((REPO_ROOT / "sandbox" / "projects.example.json").read_text(encoding="utf-8"))
     infra = next(p for p in data["projects"] if p["name"] == "agent-sandbox-infra")
