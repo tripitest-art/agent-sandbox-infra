@@ -10,7 +10,9 @@ _spec.loader.exec_module(w)
 
 
 def test_exempt_enthaelt_changelog_und_readme():
-    assert w.COLLISION_EXEMPT == frozenset({"CHANGELOG.md", "README.md"})
+    # #405: `Unreleased` (Backtick-Wort in einer CHANGELOG-Zeile, zählt wie `CHANGELOG.md` nicht)
+    # kam zu der Menge der ausgenommenen Doku-Pflichtzeilen hinzu.
+    assert w.COLLISION_EXEMPT == frozenset({"CHANGELOG.md", "README.md", "Unreleased"})
 
 
 def test_doku_und_akzeptanztest_zaehlen_nicht():

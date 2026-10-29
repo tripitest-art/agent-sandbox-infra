@@ -1228,8 +1228,10 @@ def _path_candidate(text: str) -> str | None:
 
 # Regel 8: Fast jedes Issue nennt die Doku-Dateien (Pflicht nach AGENTS.md, „Doku und Changelog“)
 # und den Akzeptanztest-Platzhalter `tests/acceptance/test_issue_<N>.py`. Beides blockierte bisher
-# jeden zweiten Auftrag (#189); Code-Dateien zählen weiterhin.
-COLLISION_EXEMPT: frozenset[str] = frozenset({"CHANGELOG.md", "README.md"})
+# jeden zweiten Auftrag (#189); Code-Dateien zählen weiterhin. `Unreleased` ist ein Backtick-Wort,
+# das `parse_affected_files()` in einer CHANGELOG-Zeile („… unter `Unreleased` …“) als Datei liest,
+# aber keine ist — es zählt wie `CHANGELOG.md` nicht (sc-digger #404 gegen #402).
+COLLISION_EXEMPT: frozenset[str] = frozenset({"CHANGELOG.md", "README.md", "Unreleased"})
 _ACCEPTANCE_TEST_PREFIX = "tests/acceptance/test_issue_"
 
 
