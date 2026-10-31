@@ -6,7 +6,7 @@ Konfiguration und kein Runbook zum Anwenden von Regeln**.
 
 ## Status
 
-Issue [#87](https://github.com/tripitest-art/agent-sandbox-infra/issues/87)
+Issue #87
 beschreibt den Filter als noch ausstehende Betriebsarbeit. Die dort geforderte
 passive Mitschnitt-Phase, die endgültige Allowlist und die Aktivierung der
 Firewall sind in diesem Repository nicht nachgewiesen. Insbesondere ist nicht
