@@ -141,3 +141,54 @@ def test_allowed_issue_authors_enthaelt_hermes_agent(monkeypatch):
     assert "app/sandbox-agent-worker-tripitest" in w.ALLOWED_ISSUE_AUTHORS
     assert w.OWNER in w.ALLOWED_ISSUE_AUTHORS
 
+
+
+# ---- Optionales Ausweichen auf OpenCode Go (#424) ----
+
+
+def _billig_go(monkeypatch, tmp_path, ausweich):
+    """Billig-Slot mit gesetzter Einstellung laden; `ausweich=None` löscht die Variable."""
+    datei = tmp_path / "agent-settings.json"
+    datei.write_text(json.dumps({"LITELLM_MODEL_BILLIG": "coder-mimo-free"}), encoding="utf-8")
+    monkeypatch.setenv("AGENT_SETTINGS", str(datei))
+    if ausweich is None:
+        monkeypatch.delenv("LITELLM_BILLIG_AUSWEICH", raising=False)
+    else:
+        monkeypatch.setenv("LITELLM_BILLIG_AUSWEICH", ausweich)
+    return _tick(monkeypatch)
+
+
+def test_billig_kette_ohne_variable_bleibt_frei(monkeypatch, tmp_path):
+    w = _billig_go(monkeypatch, tmp_path, None)
+    assert w.BILLIG_AUSWEICHMODELL is None
+    assert w.billig_kette(w.BILLIG_MODEL) == FREIE_ALIASE[1:]
+    assert w.abo_ausweichen(w.BILLIG_MODEL, "coder-go") is None
+
+
+def test_billig_kette_haengt_go_als_letztes_an(monkeypatch, tmp_path):
+    w = _billig_go(monkeypatch, tmp_path, " coder-go ")
+    assert w.BILLIG_AUSWEICHMODELL == "coder-go"
+    assert w.billig_kette(w.BILLIG_MODEL) == [*FREIE_ALIASE[1:], "coder-go"]
+    assert w.billig_fallbacks(w.BILLIG_MODEL) == FREIE_ALIASE[1:]
+
+
+@pytest.mark.parametrize("wert", ["coder", "coder-or", "coder-pro-go", "coder-kimi-go",
+                                  "coder-mimo-free", "   ", ""])
+def test_billig_ausweich_lehnt_andere_werte_ab(monkeypatch, tmp_path, wert):
+    w = _billig_go(monkeypatch, tmp_path, wert)
+    assert w.BILLIG_AUSWEICHMODELL is None
+    assert w.billig_kette(w.BILLIG_MODEL) == FREIE_ALIASE[1:]
+
+
+def test_billig_kette_ohne_gueltigen_primary_ist_leer(monkeypatch, tmp_path):
+    w = _billig_go(monkeypatch, tmp_path, "coder-go")
+    for primary in (None, "", "coder-nichtda", "coder-go"):
+        assert w.billig_kette(primary) == []
+
+
+def test_abo_ausweichen_nur_fuer_das_ausweichmodell(monkeypatch, tmp_path):
+    w = _billig_go(monkeypatch, tmp_path, "coder-go")
+    assert w.abo_ausweichen("coder-mimo-free", "coder-go") == (
+        "Billig-Slot: kein freies Modell antwortet, weiche auf coder-go (OpenCode Go, Abo-Quote) aus.")
+    assert w.abo_ausweichen("coder-mimo-free", "coder-deepseek-free") is None
+    assert w.abo_ausweichen("coder-go", "coder-go") is None

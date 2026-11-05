@@ -123,6 +123,11 @@ LITELLM_FALLBACKS = [m.strip() for m in os.environ.get("LITELLM_FALLBACKS", "cod
 BILLIG_LABEL: str = "worker:billig"
 BILLIG_MODEL: str | None = agent_settings.value("LITELLM_MODEL_BILLIG", None)
 IS_BILLIG_SLOT: bool = WORKER_SLOT == "2" and bool(BILLIG_MODEL)
+# #424: Einziger erlaubter Wert für das optionale Ausweichmodell des Billig-Slots (OpenCode Go,
+# Abo-Quote). Ohne die Variable bleibt die Kette rein frei; bezahlte und Eskalationsaliase sind verboten.
+BILLIG_AUSWEICH_ERLAUBT: tuple[str, ...] = ("coder-go",)
+_BILLIG_AUSWEICH = os.environ.get("LITELLM_BILLIG_AUSWEICH", "").strip()
+BILLIG_AUSWEICHMODELL: str | None = _BILLIG_AUSWEICH if _BILLIG_AUSWEICH in BILLIG_AUSWEICH_ERLAUBT else None
 # #293: Diese Ausweichmodelle werden pay-as-you-go abgerechnet; der Anbietername steht im
 # Hinweis, damit ein Ausweichen im Log nicht wie ein kostenloser Go-Lauf aussieht.
 BEZAHLTE_MODELLE: dict[str, str] = {"coder": "DeepSeek-API", "coder-or": "OpenRouter"}
@@ -3256,6 +3261,37 @@ def billig_fallbacks(primary: str | None) -> list[str]:
     return [alias for alias in erlaubt if alias != primary]
 
 
+def billig_kette(primary: str | None) -> list[str]:
+    """Probenkette des Billig-Slots nach `primary` (#424).
+
+    - billig_fallbacks(primary) == [] (primary None, "" oder kein freier Alias) => [].
+    - sonst billig_fallbacks(primary), und wenn BILLIG_AUSWEICHMODELL nicht None ist, danach genau
+      dieser eine Alias als letztes Element.
+    Reine Funktion, wirft nie.
+    """
+    kette = billig_fallbacks(primary)
+    if not kette:
+        return []
+    if BILLIG_AUSWEICHMODELL is not None:
+        kette = [*kette, BILLIG_AUSWEICHMODELL]
+    return kette
+
+
+def abo_ausweichen(primary: str, model: str) -> str | None:
+    """Hinweiszeile, wenn der Billig-Slot auf das Ausweichmodell ausweicht, sonst None (#424).
+
+    - BILLIG_AUSWEICHMODELL is None => None.
+    - model != BILLIG_AUSWEICHMODELL oder model == primary => None.
+    - sonst genau die Ausweichzeile.
+    Reine Funktion, wirft nie.
+    """
+    if BILLIG_AUSWEICHMODELL is None:
+        return None
+    if model != BILLIG_AUSWEICHMODELL or model == primary:
+        return None
+    return f"Billig-Slot: kein freies Modell antwortet, weiche auf {model} (OpenCode Go, Abo-Quote) aus."
+
+
 def choose_model(primary: str | None = None,
                  fallbacks: list[str] | None = None) -> tuple[str | None, list[str]]:
     """Erstes Modell aus primary (oder LITELLM_MODEL) + `fallbacks`, das antwortet, und die Fehlschläge davor.
@@ -4529,7 +4565,7 @@ def main() -> int:
             failed: list[str] = []
             if model is None:
                 try:
-                    model, failed = (choose_model(primary, billig_fallbacks(primary))
+                    model, failed = (choose_model(primary, billig_kette(primary))
                                      if IS_BILLIG_SLOT else choose_model(primary))
                 except TypeError:
                     model, failed = choose_model()
@@ -4542,6 +4578,9 @@ def main() -> int:
                     hinweis = bezahltes_ausweichen(primary, model)
                     if hinweis:
                         log(hinweis)
+                    abo_hinweis = abo_ausweichen(primary, model)
+                    if abo_hinweis:
+                        log(abo_hinweis)
                 # Nur die Primärprobe cachen: Ein bezahltes Ausweichmodell beantwortet die Frage
                 # nicht, ob das Primärmodell antwortet.
                 if model == primary:
