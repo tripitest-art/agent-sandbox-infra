@@ -78,8 +78,12 @@ def _repo_workdir(monkeypatch, tmp_path):
     # #183: verwaiste_melden fragt GitHub (issue list, pr list). Im Test nie ins echte GitHub;
     # Tests, die den Aufruf in main prüfen, setzen `_ECHTE_VERWAISTE_MELDEN` bzw. einen Recorder.
     monkeypatch.setattr(w, "verwaiste_melden", lambda state, now=None: [])
+    # #409: ablage_vorbereiten schreibt `/.agent/` in info/exclude von WORKDIR, in Tests dieses Repo.
+    # Tests der Funktion selbst nutzen `_ECHTE_ABLAGE_VORBEREITEN` mit einem Repo unter tmp_path.
+    monkeypatch.setattr(w, "ablage_vorbereiten", lambda *a, **k: True)
 
 
+_ECHTE_ABLAGE_VORBEREITEN = w.ablage_vorbereiten  # vor dem Autouse-Fixture gesichert (#409)
 _ECHTE_GIT_HOOKS_DIR = w.git_hooks_dir    # vor dem Autouse-Fixture gesichert (#68)
 _ECHTE_PREPARE_ISSUE_BRANCH = w.prepare_issue_branch  # vor dem Autouse-Fixture gesichert (#171)
 _ECHTE_PREPARE_ISSUE_FRAME = w.prepare_issue_frame  # vor dem Autouse-Fixture gesichert (#234)
@@ -3844,7 +3848,7 @@ def test_issue_auftrag_uebergibt_die_rueckfrage_dem_takt(monkeypatch):
     _, task, _, _ = w.issue_job()
 
     assert "gh issue comment" not in task
-    assert "`.git/frage.md`" in task
+    assert "`.agent/frage.md`" in task
     assert "the tick posts it" in task
 
 
@@ -3988,3 +3992,119 @@ def test_rework_job_freigabe_der_app_loest_keine_nacharbeit_aus(monkeypatch):
                           "author": {"login": "sandbox-agent-reviewer-app[bot]"}, "commit": {"oid": "3373e35"}})
     monkeypatch.setattr(w, "gh", FakeGH(prs=[pr]))
     assert w.rework_job() is None
+
+
+# --- #409: Ablage .agent/ ---
+
+def _git_repo(pfad):
+    import subprocess as sp
+    sp.run(["git", "init", "-q", str(pfad)], check=True)
+    return pfad
+
+
+def test_ablage_vorbereiten_traegt_exclude_genau_einmal_ein(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path / "repo")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.write_text("# vorhanden\n*.tmp", encoding="utf-8")   # ohne Zeilenende am Schluss
+    monkeypatch.setattr(w, "ENV", dict(os.environ))
+    assert _ECHTE_ABLAGE_VORBEREITEN(str(repo)) is True
+    assert _ECHTE_ABLAGE_VORBEREITEN(str(repo)) is True
+    zeilen = exclude.read_text(encoding="utf-8").splitlines()
+    assert zeilen == ["# vorhanden", "*.tmp", "/.agent/"]
+
+
+def test_ablage_vorbereiten_leert_reste_und_ist_im_status_unsichtbar(tmp_path, monkeypatch):
+    import subprocess as sp
+    repo = _git_repo(tmp_path / "repo")
+    monkeypatch.setattr(w, "ENV", dict(os.environ))
+    alt = repo / ".agent"
+    alt.mkdir()
+    (alt / "frage.md").write_text("alte Frage", encoding="utf-8")
+    assert _ECHTE_ABLAGE_VORBEREITEN(str(repo)) is True
+    assert not alt.exists()
+    alt.mkdir()
+    (alt / "frage.md").write_text("neu", encoding="utf-8")
+    status = sp.run(["git", "status", "--porcelain", "--ignored=no"], cwd=repo, capture_output=True,
+                    text=True, check=True).stdout
+    assert ".agent" not in status
+
+
+def test_ablage_vorbereiten_im_worktree_nutzt_das_gemeinsame_git_verzeichnis(tmp_path, monkeypatch):
+    import subprocess as sp
+    repo = _git_repo(tmp_path / "repo")
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+               GIT_COMMITTER_EMAIL="t@t")
+    sp.run(["git", "commit", "-q", "--allow-empty", "-m", "x"], cwd=repo, env=env, check=True)
+    wt = tmp_path / "w1"
+    sp.run(["git", "worktree", "add", "-q", "--detach", str(wt)], cwd=repo, env=env, check=True)
+    assert (wt / ".git").is_file()
+    monkeypatch.setattr(w, "ENV", env)
+    assert _ECHTE_ABLAGE_VORBEREITEN(str(wt)) is True
+    assert "/.agent/" in (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8").splitlines()
+
+
+def test_ablage_vorbereiten_ohne_git_warnt_und_wirft_nicht(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(w, "ENV", dict(os.environ))
+    assert _ECHTE_ABLAGE_VORBEREITEN(str(tmp_path / "kein-repo")) is False
+    assert "Warnung: Ablage .agent nicht vorbereitet (" in capsys.readouterr().out
+
+
+def _main_bis_agent(monkeypatch, tmp_path, workdir, schritte):
+    monkeypatch.setattr(w, "STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(w, "CLAIM_DIR", str(tmp_path / "claims"))
+    monkeypatch.setattr(w, "PREFIX", "")
+    monkeypatch.setattr(w, "BACKEND", "litellm")
+    monkeypatch.setattr(w, "litellm_ready", lambda: None)
+    monkeypatch.setattr(w, "WORKDIR", str(workdir))
+    monkeypatch.setattr(w, "pick_job", lambda state: ("issue7", "Auftrag", None, None))
+    monkeypatch.setattr(w, "choose_model", lambda: ("coder", []))
+    monkeypatch.setattr(w, "ACTIVE_MODEL", "coder")
+    monkeypatch.setattr(w, "claim_issue", lambda n: True)
+    monkeypatch.setattr(w, "slot_status", lambda *a, **k: None)
+    monkeypatch.setattr(w, "check_issue_result", lambda k: None)
+    monkeypatch.setattr(w, "auto_commit_uncommitted_changes", lambda *a, **k: None)
+    monkeypatch.setattr(w, "prepare_workdir", lambda: schritte.append("workdir"))
+    monkeypatch.setattr(w, "ensure_pre_push_hook", lambda: schritte.append("hook"))
+    monkeypatch.setattr(w, "ablage_vorbereiten", lambda *a, **k: schritte.append("ablage") or True)
+    monkeypatch.setattr(w, "prepare_issue_frame", lambda n: schritte.append("frame") or tmp_path / "t.py")
+    monkeypatch.setattr(w, "run_agent", lambda prompt: schritte.append("agent") or 0)
+
+
+def test_main_bereitet_die_ablage_nach_dem_hook_vor(monkeypatch, tmp_path):
+    schritte = []
+    _main_bis_agent(monkeypatch, tmp_path, tmp_path, schritte)
+    assert w.main() == 0
+    assert schritte == ["workdir", "hook", "ablage", "frame", "agent"]
+
+
+def test_main_ohne_workdir_bereitet_keine_ablage_vor(monkeypatch, tmp_path):
+    schritte = []
+    _main_bis_agent(monkeypatch, tmp_path, tmp_path / "fehlt", schritte)
+    w.main()
+    assert "ablage" not in schritte and schritte[:2] == ["workdir", "hook"]
+
+
+def test_frage_postet_ablage_vor_rueckfall_und_loescht_nur_diese(tmp_path, monkeypatch):
+    (tmp_path / ".agent").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".agent" / "frage.md").write_text("neu", encoding="utf-8")
+    (tmp_path / ".git" / "frage.md").write_text("alt", encoding="utf-8")
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    aufrufe = []
+    monkeypatch.setattr(w, "gh", lambda *a, **k: aufrufe.append(a))
+    assert w.frage_des_agenten_posten(5) is True
+    assert aufrufe == [("issue", "comment", "5", "--body-file", str(tmp_path / ".agent" / "frage.md"))]
+    assert not (tmp_path / ".agent" / "frage.md").exists()
+    assert (tmp_path / ".git" / "frage.md").exists()
+
+
+def test_frage_leere_ablage_faellt_auf_git_frage_zurueck(tmp_path, monkeypatch):
+    (tmp_path / ".agent").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".agent" / "frage.md").write_text("  \n", encoding="utf-8")
+    (tmp_path / ".git" / "frage.md").write_text("alt", encoding="utf-8")
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    aufrufe = []
+    monkeypatch.setattr(w, "gh", lambda *a, **k: aufrufe.append(a[-1]))
+    assert w.frage_des_agenten_posten(5) is True
+    assert aufrufe == [str(tmp_path / ".git" / "frage.md")]
