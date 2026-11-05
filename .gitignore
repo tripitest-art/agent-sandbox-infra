@@ -7,3 +7,7 @@ __pycache__/
 .pytest_cache/
 .vscode/
 .idea/
+# Zustand des Auto-Deploys (sandbox/autodeploy.py), entsteht im Server-Klon. Ohne den Eintrag nahm ein
+# `git add -A` (Test-Leck #413) die Datei in einen Commit auf, und jeder weitere Deploy galt als
+# „lokale Änderungen im Klon“ (05.11.2026).
+.deploy-state.json
