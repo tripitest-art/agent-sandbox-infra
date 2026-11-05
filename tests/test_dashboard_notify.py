@@ -1,6 +1,7 @@
 """Tests für sandbox/dashboard_notify.py (Push über ntfy), ohne Netzwerk."""
 
 import importlib.util
+import json
 import sys
 import urllib.error
 from datetime import datetime, timedelta
@@ -255,3 +256,117 @@ def test_send_test_rueckgabewerte(capsys):
     assert n.send_test(bad) == 1
     out = capsys.readouterr()
     assert URL not in out.out + out.err
+
+
+# --- Herzschlag / Pipeline-Stillstand -----------------------------------------------------------
+
+def test_konstanten():
+    assert n.HEARTBEAT_AFTER_S == 4 * 3600
+    assert n.AKTIV_EVENTS == frozenset({"run_started", "run_finished", "agent_run_finished",
+                                        "pr_opened", "review_posted", "pr_merged"})
+
+
+def test_letzte_aktivitaet_erkennt_aktive_ereignisse(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    log.write_text(
+        '{"ts": "2026-10-16T08:00:00", "event": "run_started"}\n'
+        '{"ts": "2026-10-16T12:00:00", "event": "stephan_alarm"}\n'
+        '{"ts": "2026-10-16T10:00:00", "event": "pr_merged"}\n',
+        encoding="utf-8",
+    )
+    assert n.letzte_aktivitaet(str(log)) == datetime(2026, 10, 16, 10, 0)
+
+
+def test_letzte_aktivitaet_ignoriert_beschaedigte_zeilen(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    log.write_text("kaputt\n[]\n" + '{"ts": "2026-10-16T11:00:00", "event": "run_finished"}\n', encoding="utf-8")
+    assert n.letzte_aktivitaet(str(log)) == datetime(2026, 10, 16, 11, 0)
+    leer = tmp_path / "leer.jsonl"
+    leer.write_text("", encoding="utf-8")
+    assert n.letzte_aktivitaet(str(leer)) is None
+
+
+def test_herzschlag_meldet_einmal_je_stillstand():
+    wa = n.Watcher()
+    letzte = NOW - timedelta(hours=5, minutes=30)
+    ev = wa.herzschlag({"projekte": [{"issues": {"bereit": 2}}]}, letzte, NOW)
+    assert ev is not None
+    assert ev.key == "herzschlag" and ev.title == "⚠ Stephan: Pipeline steht"
+    assert "Seit 5 h" in ev.message and "2 Issues bereit" in ev.message
+    assert wa.herzschlag({"projekte": [{"issues": {"bereit": 2}}]}, letzte, NOW + timedelta(hours=1)) is None
+    wieder = NOW + timedelta(hours=1)
+    assert wa.herzschlag({"projekte": [{"issues": {"bereit": 2}}]}, wieder, wieder + timedelta(minutes=5)) is None
+    spaeter = wieder + timedelta(hours=4)
+    assert wa.herzschlag({"projekte": [{"issues": {"bereit": 2}}]}, wieder, spaeter) is not None
+
+
+def test_herzschlag_schweigt_ohne_grund():
+    wa = n.Watcher()
+    assert wa.herzschlag({"projekte": [{"issues": {"bereit": 0}}]}, NOW - timedelta(hours=10), NOW) is None
+    assert wa.herzschlag({"projekte": [{"issues": {"bereit": 3}}]}, NOW - timedelta(hours=3, minutes=59), NOW) is None
+    assert wa.herzschlag({"projekte": [{"issues": {"bereit": 3}}]}, None, NOW) is None
+    assert wa.herzschlag({}, NOW - timedelta(hours=10), NOW) is None
+
+
+def test_herzschlag_nennt_die_pause():
+    ev = n.Watcher(heartbeat_after_s=3600).herzschlag({"projekte": [{"issues": {"bereit": 1}}], "pausiert": True},
+                                                      NOW - timedelta(hours=2), NOW)
+    assert ev.message.endswith(" Die Pipeline ist pausiert (Dashboard).")
+    assert ev.message.startswith("Seit 2 h ")
+
+
+def test_watcher_akzeptiert_heartbeat_parameter():
+    w = n.Watcher(heartbeat_after_s=7200)
+    assert w.heartbeat_after_s == 7200
+
+
+class _LogBuf2:
+    seq = 0
+
+    def poll(self):
+        pass
+
+    def since(self, seq):
+        return []
+
+
+class _Dash2:
+    def __init__(self, state):
+        self.logbuf, self.current, self.aufrufe = _LogBuf2(), state, 0
+
+    def state(self):
+        self.aufrufe += 1
+        return self.current
+
+
+class _Note2:
+    last_error = ""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, event):
+        self.sent.append(event)
+        return True
+
+
+def test_notify_loop_schickt_den_herzschlag(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    letzte_ts = (NOW - timedelta(hours=5)).isoformat()
+    log.write_text(json.dumps({"ts": letzte_ts, "event": "run_finished"}) + "\n", encoding="utf-8")
+    state = {"projekte": [{"issues": {"bereit": 2}}]}
+    dash, note = _Dash2(state), _Note2()
+    loop = n.NotifyLoop(dash, note, clock=lambda: NOW, audit_path=str(log))
+    loop.step()
+    assert [e.key for e in note.sent] == ["herzschlag"]
+    assert dash.aufrufe == 1
+    loop.step()
+    assert [e.key for e in note.sent] == ["herzschlag"]
+
+
+def test_notify_loop_ohne_audit_log_bleibt_still(tmp_path):
+    state = {"projekte": [{"issues": {"bereit": 2}}]}
+    dash, note = _Dash2(state), _Note2()
+    loop = n.NotifyLoop(dash, note, clock=lambda: NOW, audit_path=str(tmp_path / "fehlt.jsonl"))
+    loop.step()
+    assert note.sent == []
