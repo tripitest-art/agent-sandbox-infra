@@ -81,3 +81,19 @@ def test_value_litellm_model(datei, monkeypatch):
     agent_settings.save({"LITELLM_MODEL": "coder-qwen"})
     assert agent_settings.value("LITELLM_MODEL", "coder") == "coder-qwen"
 
+
+
+def test_validate_litellm_model_go_aliase():
+    for alias in ("coder-go", "coder-kimi-go", "coder-pro-go"):
+        assert agent_settings.validate("LITELLM_MODEL", alias) == alias
+    for falsch in ("reviewer-go", "coder-qwen-go", "coder-mimo", "coder-go "):
+        with pytest.raises(agent_settings.SettingError):
+            agent_settings.validate("LITELLM_MODEL", falsch)
+
+
+def test_value_und_save_litellm_model_coder_go(datei):
+    agent_settings.save({"LITELLM_MODEL": "coder-go"})
+    assert agent_settings.value("LITELLM_MODEL", "coder") == "coder-go"
+    assert agent_settings.aktuelle_werte()["LITELLM_MODEL"] == {"wert": "coder-go", "quelle": "datei"}
+    agent_settings.save({"LITELLM_MODEL": "coder-kimi-go"})
+    assert agent_settings.value("LITELLM_MODEL", "coder") == "coder-kimi-go"
