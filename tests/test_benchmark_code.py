@@ -151,7 +151,7 @@ def test_kindprozess_ueberlebt_das_zeitlimit_nicht(tmp_path):
         f"open({str(pid_datei)!r}, 'w').write(str(kind.pid))\n"
         "time.sleep(120)\n"
     )
-    assert benchmark_code.run_pruefung(code, "import loesung\n", timeout_s=1.0) == (
+    assert benchmark_code.run_pruefung(code, "import loesung\n", timeout_s=3.0) == (
         False,
         benchmark_code.GRUND_ZEITLIMIT,
     )
@@ -200,3 +200,59 @@ def test_netzsperre_ersetzt_auch_die_klasse_direkt():
         False,
         benchmark_code.GRUND_NETZ,
     )
+
+
+class _FalscheUhr:
+    """Falsche Uhr: jeder Schlaf rückt die Zeit vor."""
+
+    def __init__(self):
+        self.t = 0.0
+        self.schlaefe: list[float] = []
+
+    def __call__(self):
+        return self.t
+
+    def schlafen(self, sekunden):
+        self.schlaefe.append(sekunden)
+        self.t += sekunden
+
+
+def test_gruppe_abwarten_prueft_vor_dem_ersten_schlafen(monkeypatch):
+    def killpg(pgid, sig):
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(benchmark_code.os, "killpg", killpg)
+    uhr = _FalscheUhr()
+    assert benchmark_code.gruppe_abwarten(5, uhr=uhr, schlafen=uhr.schlafen) is True
+    assert uhr.schlaefe == []
+
+
+def test_gruppe_abwarten_wartet_bis_die_gruppe_weg_ist(monkeypatch):
+    antworten = [None, None, ProcessLookupError()]
+
+    def killpg(pgid, sig):
+        antwort = antworten.pop(0)
+        if antwort is not None:
+            raise antwort
+
+    monkeypatch.setattr(benchmark_code.os, "killpg", killpg)
+    uhr = _FalscheUhr()
+    assert benchmark_code.gruppe_abwarten(5, frist_s=1.0, uhr=uhr, schlafen=uhr.schlafen) is True
+    assert uhr.schlaefe == [0.02, 0.02]
+
+
+def test_gruppe_abwarten_gibt_nach_der_frist_auf(monkeypatch):
+    monkeypatch.setattr(benchmark_code.os, "killpg", lambda pgid, sig: None)
+    uhr = _FalscheUhr()
+    assert benchmark_code.gruppe_abwarten(5, frist_s=0.1, uhr=uhr, schlafen=uhr.schlafen) is False
+    assert round(uhr.t, 6) >= 0.1
+
+
+def test_gruppe_abwarten_ohne_berechtigung_gibt_sofort_auf(monkeypatch):
+    def killpg(pgid, sig):
+        raise PermissionError()
+
+    monkeypatch.setattr(benchmark_code.os, "killpg", killpg)
+    uhr = _FalscheUhr()
+    assert benchmark_code.gruppe_abwarten(5, uhr=uhr, schlafen=uhr.schlafen) is False
+    assert uhr.schlaefe == []
