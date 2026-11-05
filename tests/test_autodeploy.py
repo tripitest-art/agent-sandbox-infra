@@ -256,3 +256,10 @@ def test_main_loggt_nicht_isolierte_ausfuehrung_nur_bei_neuem_stand(monkeypatch)
     assert ret == 0
     assert logs == []
 
+
+
+def test_deploy_zustand_ist_in_gitignore():
+    """Regression 05.11.2026: Ein `git add -A` im Server-Klon checkte `.deploy-state.json` ein; danach
+    meldete jeder Deploy „lokale Änderungen im Klon“. Die Datei muss ignoriert sein."""
+    zeilen = (SANDBOX.parent / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ad.STATE_FILE in [z.strip() for z in zeilen]
