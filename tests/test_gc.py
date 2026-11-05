@@ -203,3 +203,94 @@ def test_run_gc_faengt_fehlendes_git_bei_jedem_repo(tmp_path):
         raise FileNotFoundError("git fehlt")
 
     assert gc.run_gc(claims, [repo], run=fake_run) == {"claims": 0, "branches": 0, "repos": 1}
+
+
+# ---- cleanup_squashed_branches ----
+
+def test_cleanup_squashed_branches_loescht_nur_vollstaendig_enthaltene():
+    geloescht = []
+
+    def fake_run(cmd):
+        if cmd[3] == "fetch":
+            return _ok(cmd)
+        if cmd[3] == "for-each-ref":
+            return _ok(cmd, "main\nfeature/fertig\nfeature/offen\nfeature/leer\n")
+        if cmd[3] == "worktree":
+            return _ok(cmd, "worktree /x\nHEAD abc\nbranch refs/heads/feature/im-worktree\n\n")
+        if cmd[3] == "merge-base":
+            return _ok(cmd, "basis\n")
+        if cmd[3] == "diff" and "--name-only" in cmd:
+            return _ok(cmd, "" if cmd[-1] == "feature/leer" else "a.txt\n")
+        if cmd[3] == "diff" and "--quiet" in cmd:
+            return _ok(cmd) if "feature/fertig" in cmd else _fehler(cmd, 1)
+        if cmd[3] == "branch":
+            geloescht.append(cmd[-1])
+            return _ok(cmd)
+        return _ok(cmd)
+
+    assert gc.cleanup_squashed_branches("/tmp/repo", run=fake_run) == ["feature/fertig"]
+    assert geloescht == ["feature/fertig"]
+
+
+def test_cleanup_squashed_branches_fetch_fehler_loescht_nichts():
+    def fake_run(cmd):
+        return _fehler(cmd, 1)
+
+    assert gc.cleanup_squashed_branches("/tmp/repo", run=fake_run) == []
+
+
+def test_cleanup_squashed_branches_faengt_fehler():
+    def fake_run(cmd):
+        raise subprocess.SubprocessError("kaputt")
+
+    assert gc.cleanup_squashed_branches("/tmp/repo", run=fake_run) == []
+
+
+# ---- streukopien ----
+
+def test_streukopien_ignoriert_bekannte_pfade_und_unterpfade(tmp_path):
+    now = 1000.0
+    ort = tmp_path / "ort"
+    ort.mkdir()
+    (ort / "sc-digger" / ".git").mkdir(parents=True)
+    os.utime(ort / "sc-digger", (100.0, 100.0))
+
+    assert gc.streukopien(orte=[str(ort)], bekannt=[str(ort)], now=now) == []
+
+
+def test_streukopien_fehlender_ort_ist_kein_fehler(tmp_path):
+    assert gc.streukopien(orte=[str(tmp_path / "fehlt")], now=1000.0) == []
+
+
+# ---- neue_streukopien ----
+
+def test_neue_streukopien_schreibfehler_wirft_nicht(tmp_path):
+    marke = str(tmp_path / "fehlt" / "marke.json")
+
+    assert gc.neue_streukopien(["/tmp/a"], marke) == ["/tmp/a"]
+
+
+# ---- run_gc mit Squash-Branches ----
+
+def test_run_gc_zaehlt_squash_branches_in_derselben_zeile(tmp_path, capsys):
+    claims = tmp_path / "claims"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def fake_run(cmd):
+        if cmd[3] == "branch" and "--merged" in cmd:
+            return _ok(cmd, "* main\n")
+        if cmd[3] == "for-each-ref":
+            return _ok(cmd, "main\nfeature/fertig\n")
+        if cmd[3] == "merge-base":
+            return _ok(cmd, "basis\n")
+        if cmd[3] == "diff" and "--name-only" in cmd:
+            return _ok(cmd, "a.txt\n")
+        if cmd[3] == "diff" and "--quiet" in cmd:
+            return _ok(cmd)
+        return _ok(cmd)
+
+    stats = gc.run_gc(claims, [repo], run=fake_run)
+    assert stats == {"claims": 0, "branches": 1, "repos": 1}
+    zeilen = [z for z in capsys.readouterr().out.splitlines() if "gemergte Branches" in z]
+    assert len(zeilen) == 1 and "feature/fertig" in zeilen[0]
