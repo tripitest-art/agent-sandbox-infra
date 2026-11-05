@@ -308,3 +308,86 @@ def test_aufruf_ohne_plan_funktioniert_unveraendert(lage, capsys):
 
     assert ws.main(["claude", "demo", "aufgabe-1"], env=env) == 0
     assert "feature/aufgabe-1" in capsys.readouterr().out
+
+
+def _squash_merge(lage: dict[str, Path], name: str, text: str) -> None:
+    """Spielt einen Squash-Merge auf origin/main nach: gleicher Inhalt, neuer Commit."""
+    git("pull", "-q", "origin", "main", cwd=lage["seed"])
+    (lage["seed"] / name).write_text(text, encoding="utf-8")
+    git("add", name, cwd=lage["seed"])
+    git("commit", "-m", f"{name} per Squash", cwd=lage["seed"])
+    git("push", "origin", "main", cwd=lage["seed"])
+
+
+def _aufraeum_lage(lage: dict[str, Path]) -> dict[str, Path]:
+    wt = {k: ws.create("claude", "demo", k, lage["projects"], lage["work"]) for k in ("fertig", "offen", "dreckig", "leer")}
+    for k, inhalt in (("fertig", "a\n"), ("offen", "b\n"), ("dreckig", "c\n")):
+        commit_file(wt[k], f"{k}.txt", inhalt)
+        git("push", "-u", "origin", f"feature/{k}", cwd=wt[k])
+    _squash_merge(lage, "fertig.txt", "a\n")
+    _squash_merge(lage, "dreckig.txt", "c\n")
+    (wt["dreckig"] / "notiz.md").write_text("ungesichert\n", encoding="utf-8")
+    plan, _ = ws.plan("claude", "demo", lage["projects"], lage["work"])
+    return {**wt, "plan": plan}
+
+
+def test_aufraeum_kandidaten_bewertet_squash_merge_und_gruende(lage):
+    wt = _aufraeum_lage(lage)
+
+    k = {p: (b, ok, g) for p, b, ok, g in ws.aufraeum_kandidaten(lage["projects"], lage["work"])}
+
+    assert k[wt["fertig"]] == ("feature/fertig", True, "in origin/main")
+    assert k[wt["offen"]] == ("feature/offen", False, "nicht in origin/main")
+    assert k[wt["dreckig"]] == ("feature/dreckig", False, "ungesicherte Änderungen")
+    assert k[wt["leer"]] == ("feature/leer", False, "noch nichts committet")
+    assert k[wt["plan"]] == ("", False, "ohne Branch")
+    assert lage["projects"] / "demo" not in k
+    pfade = [p for p, *_ in ws.aufraeum_kandidaten(lage["projects"], lage["work"])]
+    assert pfade == sorted(pfade)
+
+
+def test_aufraeumen_ohne_ja_aendert_nichts(lage):
+    wt = _aufraeum_lage(lage)
+
+    assert ws.aufraeumen(lage["projects"], lage["work"]) == []
+
+    assert all(p.exists() for p in wt.values())
+    assert "feature/fertig" in git("branch", "--list", "feature/fertig", cwd=lage["projects"] / "demo")
+
+
+def test_aufraeumen_mit_ja_entfernt_nur_erledigte(lage):
+    wt = _aufraeum_lage(lage)
+
+    entfernt = ws.aufraeumen(lage["projects"], lage["work"], ja=True)
+
+    assert entfernt == [wt["fertig"]]
+    assert not wt["fertig"].exists()
+    assert git("branch", "--list", "feature/fertig", cwd=lage["projects"] / "demo") == ""
+    for k in ("offen", "dreckig", "leer", "plan"):
+        assert wt[k].exists(), k
+    assert (wt["dreckig"] / "notiz.md").read_text(encoding="utf-8") == "ungesichert\n"
+    assert "feature/fertig" in git("ls-remote", "--heads", "origin", cwd=lage["projects"] / "demo")
+
+
+def test_aufraeum_kandidaten_ueberspringt_klon_ohne_erreichbares_origin(lage):
+    _aufraeum_lage(lage)
+    git("remote", "set-url", "origin", str(lage["projects"] / "gibt-es-nicht.git"), cwd=lage["projects"] / "demo")
+
+    assert ws.aufraeum_kandidaten(lage["projects"], lage["work"]) == []
+
+
+def test_main_aufraeumen_meldet_und_entfernt(lage, capsys):
+    wt = _aufraeum_lage(lage)
+    env = {"WS_PROJECTS": str(lage["projects"]), "WS_WORK": str(lage["work"])}
+
+    assert ws.main(["aufraeumen"], env=env) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert f"würde entfernen: {wt['fertig']} (feature/fertig, in origin/main)" in out
+    assert f"bleibt: {wt['plan']} (-, ohne Branch)" in out
+    assert out[-1] == "Nichts geändert. Mit --ja entfernen."
+    assert wt["fertig"].exists()
+
+    assert ws.main(["aufraeumen", "--ja"], env=env) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert f"entfernt: {wt['fertig']} (feature/fertig, in origin/main)" in out
+    assert not wt["fertig"].exists()
