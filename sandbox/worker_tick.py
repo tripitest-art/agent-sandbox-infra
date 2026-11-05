@@ -2960,6 +2960,10 @@ def run_agent(prompt: str) -> int:
     start = jetzt_s()
     cmd = ["timeout", "-k", "30", str(RUN_TIMEOUT + 60), *agent_cmd(prompt)]
     env = agent_env(ENV)
+    # #417: Die Unit startet den Takt über das Bash-Skript gh-worker-token, und Bash exportiert
+    # PWD=/. OpenCode nimmt process.env.PWD vor process.cwd() und arbeitete deshalb in /, nicht im
+    # Worktree („not a git repository“, Arbeit in alten Kopien, kein PR). PWD muss zu cwd passen.
+    env["PWD"] = WORKDIR
     user, home = agent_identitaet()
     if user:
         # gh und qwen suchen ihre Konfiguration im Home des laufenden Nutzers, nicht in /root.

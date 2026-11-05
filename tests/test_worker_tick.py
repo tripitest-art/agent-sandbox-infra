@@ -4108,3 +4108,30 @@ def test_frage_leere_ablage_faellt_auf_git_frage_zurueck(tmp_path, monkeypatch):
     monkeypatch.setattr(w, "gh", lambda *a, **k: aufrufe.append(a[-1]))
     assert w.frage_des_agenten_posten(5) is True
     assert aufrufe == [str(tmp_path / ".git" / "frage.md")]
+
+
+# --- #417: PWD des Agenten ---
+
+def test_run_agent_pwd_folgt_einem_geaenderten_workdir(monkeypatch, tmp_path):
+    """Slot-Wechsel: PWD kommt aus WORKDIR zur Aufrufzeit, nicht aus einem Wert beim Import."""
+    kw = {}
+
+    class Proc:
+        returncode = 0
+        stdout: list[str] = []
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(w.subprocess, "Popen", lambda cmd, **kwargs: kw.update(kwargs) or Proc())
+    monkeypatch.setattr(w, "agent_identitaet", lambda: ("worker", str(tmp_path / "home")))
+    monkeypatch.setattr(w, "ENV", {"PATH": "/usr/bin", "PWD": "/", "HOME": "/root"})
+    monkeypatch.setattr(w, "RUN_TIMEOUT", 60)
+    for slot in ("w1", "w2"):
+        wd = tmp_path / slot
+        wd.mkdir()
+        monkeypatch.setattr(w, "WORKDIR", str(wd))
+        assert w.run_agent("prompt") == 0
+        assert kw["cwd"] == str(wd) and kw["env"]["PWD"] == str(wd)
+        assert kw["env"]["HOME"] == str(tmp_path / "home")
