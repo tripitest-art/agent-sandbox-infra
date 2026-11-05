@@ -146,6 +146,8 @@ DeepSeek berechnet zu Spitzenzeiten (Mo–Fr) einen Aufschlag (1,20 \$ statt 0,6
 
 Die meiste manuelle Vorbereitungszeit fließt in das Ausformulieren präziser Schnittstellen und Akzeptanztests, die den strengen Vorgaben des `acceptance-guard` genügen.
 
+*(✅ Gemergt in #401; Ablauf: [`docs/planer-ablauf.md`](docs/planer-ablauf.md), Schritt 6)*
+
 #### Kernpunkte:
 1. **Lokales Pre-Flight Tooling (`scripts/issuecheck.py`):**
    - Prüft vor dem Einstellen eines Issues:
@@ -200,7 +202,7 @@ Empirische Bewertung der angebundenen Modelle unter realen Homelab-Bedingungen (
 
 #### Die 4 Phasen:
 - **Phase A (Mess-Basis & Runner):** Standardisierte, isolierte Testaufgaben für Codierung (`benchmark_code.py`) und Review-Qualität (`benchmark_review.py`) ohne Netzabhängigkeit. CLI-Runner `sandbox/benchmark.py` mit Append-only-Ergebnisablage (`/root/benchmark-ergebnisse.jsonl`). *(✅ Gemergt in #335, #336, #337)*
-- **Phase B (Automatisierung & Kollisionsschutz):** Schalter `--wenn-frei` (prüft Worker-Slot-Locks `/run/qwen-worker-w*.lock` und überspringt leise bei aktiver Arbeit) sowie systemd-Timer für wöchentlichen Hintergrundlauf. *(🟡 In Umsetzung in #388)*
+- **Phase B (Automatisierung & Kollisionsschutz):** Schalter `--wenn-frei` (prüft Worker-Slot-Locks `/run/qwen-worker-w*.lock` und überspringt leise bei aktiver Arbeit) sowie systemd-Timer für wöchentlichen Hintergrundlauf. *(✅ Gemergt in #400)*
 - **Phase C (Dashboard-Integration):** Visuelle Auswertung im Web-Dashboard (`sandbox/dashboard.py`): Vergleichstabelle mit Erfolgsquote (%), Tokenverbrauch, Latenzen und Kosten je Modell/Alias. *(🔵 Geplant)*
 - **Phase D (Dynamisches Routing):** Nutzung der Benchmark-Ergebnisse zur automatischen Anpassung der Modell- und Fallback-Prioritäten in `worker_tick.py`. *(⚪ Offen)*
 
@@ -214,9 +216,9 @@ Empirische Bewertung der angebundenen Modelle unter realen Homelab-Bedingungen (
 | **Stufe 2** | Strukturierte Slot-Telemetrie & Web-Dashboard | ⭐⭐⭐⭐ | ✅ **Gemergt (#48, #114)** |
 | **Stufe 3** | Continuous Deployment (`autodeploy.py`, Pull-Timer auf CT 112) | ⭐⭐⭐⭐ | ✅ **Gemergt (#15)** |
 | **Stufe 4** | Prime-Time- & Budget-Scheduling | ⭐⭐⭐ | 🔵 **Geplant** |
-| **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | 🟡 **In Umsetzung (#17)** |
+| **Stufe 5** | Planer-Beschleunigung & Issue-Preflight | ⭐⭐⭐ | ✅ **Gemergt (#401)** |
 | **Stufe 6** | Agentenharness & Pipeline-Optimierung (laufend, kein Enddatum) | ⭐⭐⭐⭐⭐ | 🔁 **Laufend (#270, #271, #282, #293)** |
-| **Stufe 7** | Modell- & Review-Benchmark (Phasen A–D) | ⭐⭐⭐⭐ | 🟡 **In Umsetzung (Phase A gemergt, Phase B in #388)** |
+| **Stufe 7** | Modell- & Review-Benchmark (Phasen A–D) | ⭐⭐⭐⭐ | 🟡 **Phasen A und B gemergt (#335–#337, #400), C geplant** |
 | **Baustein** | Web-Dashboard (`sandbox/dashboard.py`, Dienst `agent-dashboard`) | ⭐⭐⭐⭐ | ✅ **Gemergt (#104, #105, #114, #286)**; Steuerbuttons, Merge-Statistik und Kosten pro Modell offen |
 | **Baustein** | Mehrere Projekte (Projektliste, Infra-Repo als zweites Projekt) | ⭐⭐⭐⭐ | ✅ **Gemergt (#18, #19, #20)**; Inbetriebnahme auf dem Server: siehe [`docs/mehrere-projekte.md`](docs/mehrere-projekte.md) |
 | **Baustein** | Repomap-Symbolkarte (`sandbox/repomap.py`, #227) | ⭐⭐⭐⭐ | ✅ **Gemergt (#227)**; reduziert Orientierungs-Tokens im Worker-Slot |
@@ -237,3 +239,10 @@ Aktuelle Schwerpunkte für neue Ideen (Stand 23.10.2026, siehe Abschnitt 0 und S
 Agentenharness-Werkzeuge und harness-übergreifende Kostenvergleiche, Ausnutzung mehrerer
 Free-Tier-Kontingente im Wechsel, sowie laufende Pipeline-Optimierung (Scheduling, Fehlertoleranz,
 Kostentransparenz). Ideen rund um einen eigenen lokalen LLM-Host werden nicht mehr aufgenommen.
+
+**Stillstand seit 31.10.2026 (Stand 05.11.2026):** Seit #378 (Reviews durch die Reviewer-App) und #380
+(kein `gh` mehr im Agenten) kam kaum noch etwas auf `main`. Drei Ursachen sind als Issues erfasst:
+Reviews der App lösten keine Nacharbeit aus (#408, gemergt in #412), Rückfragen kamen in den
+Slot-Worktrees nie an, weil `.git` dort eine Datei ist (#409), und Nacharbeit und PR-Text verlangten
+noch `gh` und `git push` vom Agenten (#410). Damit ein solcher stiller Stillstand künftig auffällt,
+meldet das Dashboard ihn nach 4 Stunden per Push (#411).
