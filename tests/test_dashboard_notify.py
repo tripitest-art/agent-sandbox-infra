@@ -370,3 +370,58 @@ def test_notify_loop_ohne_audit_log_bleibt_still(tmp_path):
     loop = n.NotifyLoop(dash, note, clock=lambda: NOW, audit_path=str(tmp_path / "fehlt.jsonl"))
     loop.step()
     assert note.sent == []
+
+
+def _audit(path, zeilen):
+    path.write_text("".join(json.dumps(z) + "\n" for z in zeilen), encoding="utf-8")
+
+
+def _agentenlauf(minuten_vorher, slot, modell, event="agent_run_finished"):
+    return {"ts": (NOW - timedelta(minutes=minuten_vorher)).isoformat(), "event": event,
+            "slot": slot, "active_model": modell}
+
+
+def test_bezahlte_slots_zaehlt_nur_bezahlte_agentenlaeufe_im_fenster(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    _audit(log, [
+        _agentenlauf(50, "1", "coder-or"), _agentenlauf(10, "1", "coder-or"),
+        _agentenlauf(40, "2", "coder"), _agentenlauf(5, "2", "coder-go"),
+        _agentenlauf(30, "3", "coder"), _agentenlauf(20, "3", "coder-or"),
+        _agentenlauf(90, "4", "coder-or"),
+        _agentenlauf(15, "5", "coder-or", event="run_finished"),
+        {"ts": (NOW - timedelta(minutes=5)).isoformat(), "event": "agent_run_finished",
+         "active_model": "coder"},
+    ])
+    assert n.bezahlte_slots(str(log), NOW) == {"1": "coder-or", "3": "coder-or"}
+
+
+def test_bezahlte_slots_ohne_datei_ist_leer(tmp_path):
+    assert n.bezahlte_slots(str(tmp_path / "fehlt.jsonl"), NOW) == {}
+
+
+def test_modelle_meldet_bezahlt_je_slot_modell_und_tag():
+    wa = n.Watcher()
+    assert [e.key for e in wa.modelle({"2": "coder-or", "1": "coder"}, [], NOW)] == ["bezahlt-1", "bezahlt-2"]
+    assert wa.modelle({"2": "coder-or", "1": "coder"}, [], NOW + timedelta(hours=2)) == []
+    assert [e.key for e in wa.modelle({"1": "coder-or"}, [], NOW + timedelta(hours=2))] == ["bezahlt-1"]
+    assert [e.key for e in wa.modelle({"1": "coder"}, [], NOW + timedelta(days=1))] == ["bezahlt-1"]
+
+
+def test_modelle_meldet_4xx_aus_der_logzeile_einmal_je_slot_und_tag():
+    wa = n.Watcher()
+    zeile = ("2026-11-05 13:57:39 [w2] issue453: kein Modell antwortet "
+             "(coder-deepseek-free: HTTP 403), warte. Versuch zählt nicht.")
+    ev = wa.modelle({}, [zeile], NOW)
+    assert [(e.key, e.priority, e.tags, e.message) for e in ev] == [
+        ("modelle-2", "high", "no_entry", "coder-deepseek-free: HTTP 403")]
+    assert wa.modelle({}, [zeile], NOW + timedelta(hours=1)) == []
+    assert [e.key for e in wa.modelle({}, [zeile], NOW + timedelta(days=1))] == ["modelle-2"]
+
+
+def test_modelle_ignoriert_nicht_4xx_und_kuerzt_langen_grund():
+    wa = n.Watcher()
+    timeout = "2026-11-05 13:50:00 [w1] issue5: kein Modell antwortet (coder-go: TimeoutError), warte."
+    assert wa.modelle({}, [timeout], NOW) == []
+    grund = "; ".join(f"coder-{i}-free: HTTP 429" for i in range(40))
+    ev = wa.modelle({}, [f"2026-11-05 13:50:00 [w3] issue5: kein Modell antwortet ({grund}), warte."], NOW)
+    assert ev[0].message == grund[:300]

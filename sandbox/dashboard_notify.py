@@ -8,7 +8,9 @@ NOTIFY_INTERVAL Sekunden den Stand prüft und bei folgenden Ereignissen eine Mel
 - ein Slot meldet „laufend“, aber sein Prozess lebt nicht mehr,
 - ein LiteLLM-Key erreicht 90 % seines Limits (einmal je Key und Tag),
  - GitHub-/Budgetdaten sind länger als 10 Minuten veraltet.
- - die Pipeline steht (trotz bereiter Issues kein Agentenlauf, Review oder Merge innerhalb von 4 Stunden).
+ - die Pipeline steht (trotz bereiter Issues kein Agentenlauf, Review oder Merge innerhalb von 4 Stunden),
+ - alle Agentenläufe eines Slots der letzten Stunde über ein bezahltes Modell liefen,
+ - ein Slot „kein Modell antwortet (…)“ mit einem HTTP-4xx-Grund loggt.
 
 Eingerichtet wird es mit `NTFY_URL` (volle URL samt Topic, z. B. https://ntfy.sh/<Topic>; das
 Topic ist das Geheimnis) und optional `NTFY_TOKEN` in `/etc/agent-dashboard.env` (Modus 600).
@@ -21,12 +23,13 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable
 
 ENV_FILE: str = "/etc/agent-dashboard.env"   # systemd lädt sie; --notify-test liest sie selbst
@@ -37,6 +40,8 @@ MAX_QUEUE = 20             # mehr offene Meldungen werden verworfen (älteste zu
 MAX_LINES = 5              # Logzeilen je Meldung
 MAX_BODY = 1000            # Zeichen je Meldung
 HEARTBEAT_AFTER_S = 4 * 3600   # so lange darf die Pipeline bei bereiten Issues ohne Lebenszeichen sein
+BEZAHLTE_ALIASE: frozenset[str] = frozenset({"coder", "coder-or"})   # wie worker_tick.BEZAHLTE_MODELLE
+BEZAHLT_FENSTER_S: int = 3600   # so weit zurück gelten Agentenläufe als „alle Läufe der letzten Stunde“
 AKTIV_EVENTS = frozenset({"run_started", "run_finished", "agent_run_finished",
                            "pr_opened", "review_posted", "pr_merged"})
 AUDIT_LOG: str = os.environ.get("AUDIT_LOG", "/root/audit.jsonl")
@@ -92,6 +97,70 @@ def letzte_aktivitaet(path: str, max_bytes: int = 512 * 1024) -> datetime | None
         if newest is None or dt > newest:
             newest = dt
     return newest
+
+
+def bezahlte_slots(path: str, now: datetime, fenster_s: float = BEZAHLT_FENSTER_S,
+                   max_bytes: int = 512 * 1024) -> dict[str, str]:
+    """{slot: alias} für jeden Slot, dessen `agent_run_finished` im Fenster (now - fenster_s, now]
+    ALLE ein `active_model` aus BEZAHLTE_ALIASE haben (mindestens eines im Fenster).
+
+    alias = `active_model` des jüngsten dieser Ereignisse. slot = str(Feld "slot"); Ereignisse ohne
+    "slot" zählen nicht. Gelesen wird wie in `letzte_aktivitaet()`: nur die letzten `max_bytes`, die
+    erste angeschnittene Zeile entfällt, kaputte Zeilen werden übersprungen, `ts` mit Zeitzone wird
+    naive Ortszeit. Fehlende oder unlesbare Datei ergibt {}. Wirft nie.
+    """
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            if size <= max_bytes:
+                fh.seek(0)
+                data = fh.read()
+            else:
+                fh.seek(size - max_bytes)
+                data = fh.read()
+                first_newline = data.find(b"\n")
+                if first_newline >= 0:
+                    data = data[first_newline + 1:]
+            text = data.decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return {}
+    start = now - timedelta(seconds=fenster_s)
+    juengste: dict[str, tuple[datetime, str]] = {}
+    alle_bezahlt: dict[str, bool] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict) or obj.get("event") != "agent_run_finished":
+            continue
+        slot = obj.get("slot")
+        if slot is None:
+            continue
+        slot = str(slot)
+        ts = obj.get("ts")
+        if not ts or not isinstance(ts, str):
+            continue
+        try:
+            dt = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            continue
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        if dt <= start or dt > now:
+            continue
+        model = obj.get("active_model")
+        bezahlt = isinstance(model, str) and model in BEZAHLTE_ALIASE
+        alle_bezahlt[slot] = alle_bezahlt.get(slot, True) and bezahlt
+        prev = juengste.get(slot)
+        if prev is None or dt > prev[0]:
+            juengste[slot] = (dt, model if isinstance(model, str) else "")
+    return {slot: alias for slot, (_, alias) in juengste.items()
+            if alle_bezahlt.get(slot) and alias}
 
 
 @dataclass(frozen=True)
@@ -208,6 +277,8 @@ class Watcher:
         self.stale_since: datetime | None = None
         self.stale_sent = False
         self._herzschlag_letzte: datetime | None = None
+        self._bezahlt_sent: set[tuple[str, str, str]] = set()   # slot, alias, Tag
+        self._modelle_sent: set[tuple[str, str]] = set()        # slot, Tag
 
     def events(self, state: dict, stephan_lines: list[str], now: datetime) -> list[Event]:
         out: list[Event] = []
@@ -273,6 +344,43 @@ class Watcher:
         self._herzschlag_letzte = letzte
         return Event("herzschlag", "⚠ Stephan: Pipeline steht", msg, "high", "zzz")
 
+    def modelle(self, bezahlt: dict[str, str], lines: list[str], now: datetime) -> list[Event]:
+        """Events für (a) bezahlter Dauerbetrieb und (b) „kein Modell antwortet“ mit HTTP-4xx.
+
+        (a) je (slot, alias) aus `bezahlt` einmal je Tag; (b) je passender Logzeile einmal je Slot
+        und Tag. Alte Tage werden vergessen. Reihenfolge: (a) nach Slot sortiert, dann (b) in
+        Zeilenreihenfolge. Wirft nie.
+        """
+        out: list[Event] = []
+        try:
+            today = now.date().isoformat()
+            self._bezahlt_sent = {k for k in self._bezahlt_sent if k[2] == today}
+            self._modelle_sent = {k for k in self._modelle_sent if k[1] == today}
+            for slot in sorted(bezahlt):
+                alias = bezahlt[slot]
+                key = (slot, alias, today)
+                if key in self._bezahlt_sent:
+                    continue
+                self._bezahlt_sent.add(key)
+                out.append(Event(
+                    f"bezahlt-{slot}", f"Slot {slot}: bezahltes Modell {alias}",
+                    f"Alle Agentenläufe der letzten 60 Minuten liefen über {alias} "
+                    f"(Guthaben statt Abo oder frei).", "default", "moneybag"))
+            for line in lines:
+                m = re.search(r"\[w(\d+)\] .*kein Modell antwortet \((.*)\)", line)
+                if not m or not re.search(r"HTTP 4\d\d", m.group(2)):
+                    continue
+                slot, grund = m.group(1), m.group(2)
+                key = (slot, today)
+                if key in self._modelle_sent:
+                    continue
+                self._modelle_sent.add(key)
+                out.append(Event(f"modelle-{slot}", f"Slot {slot}: kein Modell antwortet",
+                                 grund[:300], "high", "no_entry"))
+        except Exception:   # noqa: BLE001 — der Meldepfad darf nie den Faden abbrechen
+            pass
+        return out
+
 
 class NotifyLoop:
     """Prüft regelmäßig und stellt Meldungen zu; offene Meldungen bleiben bis zum Erfolg liegen."""
@@ -299,6 +407,8 @@ class NotifyLoop:
         herz = self.watcher.herzschlag(state, letzte_aktivitaet(self.audit_path or AUDIT_LOG), now)
         if herz is not None:
             self.queue.append(herz)
+        self.queue += self.watcher.modelle(
+            bezahlte_slots(self.audit_path or AUDIT_LOG, now), [ln for _, ln in new], now)
         del self.queue[:-MAX_QUEUE]
         while self.queue:
             event = self.queue[0]

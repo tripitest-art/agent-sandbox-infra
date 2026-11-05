@@ -3981,6 +3981,36 @@ def main_sha(repo_dir: str) -> str | None:
     return sha or None
 
 
+LETZTE_ROTE_TESTS: list[str] = []
+# Von check_main_health() gesetzt: nach einem roten Testlauf die Namen aus rote_tests(stdout)
+# (kann [] sein), nach jedem anderen Ausgang (grün, Cache-Treffer, unbekannt) [].
+
+
+def rote_tests(output: str, limit: int = 5) -> list[str]:
+    r"""Namen der roten Tests aus der pytest-Ausgabe, dieselbe Regel wie autodeploy.failed_tests():
+    Zeilen, die mit „FAILED “ oder „ERROR “ beginnen; der Name ist der Text bis zum ersten „ - “
+    (die Meldung wird verworfen, sie kann Werte enthalten). Nur Namen, die vollständig auf
+    ^[\w./\[\]:,\-]+$ passen. Reihenfolge wie in der Ausgabe, jeder Name einmal, höchstens
+    `limit`; leere Ausgabe oder limit <= 0 -> []. Reine Funktion, wirft nie."""
+    if not output or limit <= 0:
+        return []
+    muster = re.compile(r"^[\w./\[\]:,\-]+$")
+    namen: list[str] = []
+    for zeile in output.splitlines():
+        for praefix in ("FAILED ", "ERROR "):
+            if zeile.startswith(praefix):
+                name = zeile[len(praefix):].split(" - ", 1)[0]
+                break
+        else:
+            continue
+        if not muster.match(name) or name in namen:
+            continue
+        namen.append(name)
+        if len(namen) >= limit:
+            break
+    return namen
+
+
 def check_main_health(repo_dir: str) -> bool:
     """Lokaler Pre-Flight-Check: True = origin/main besteht die lokalen Tests oder der Zustand
     ist unbekannt; False = erwiesenermaßen rot. Wirft nie.
@@ -3994,6 +4024,8 @@ def check_main_health(repo_dir: str) -> bool:
     ein nicht schreibbarer Cache darf die Pipeline nicht stilllegen. CLAIM_DIR und TEST_CMD
     werden beim Aufruf aus den Modulglobalen gelesen, damit Tests sie ersetzen können.
     """
+    global LETZTE_ROTE_TESTS
+    LETZTE_ROTE_TESTS = []
     try:
         fetch = subprocess.run(["git", "-C", repo_dir, "fetch", "-q", "origin"],
                                capture_output=True, text=True, check=False, env=ENV,
@@ -4030,7 +4062,10 @@ def check_main_health(repo_dir: str) -> bool:
             log(f"Warnung: Lokaler Gesundheitscheck: Testlauf fehlgeschlagen ({type(e).__name__}).")
             return True
         if res.returncode != 0:
+            LETZTE_ROTE_TESTS = rote_tests(res.stdout)
             log(f"Warnung: Lokale Tests auf origin/main ({sha[:7]}) rot (Exit {res.returncode}).")
+            if LETZTE_ROTE_TESTS:
+                log(f"Lokale Tests auf origin/main ({sha[:7]}): rot sind {', '.join(LETZTE_ROTE_TESTS)}.")
             return False
         try:
             os.makedirs(CLAIM_DIR, exist_ok=True)
@@ -4070,8 +4105,9 @@ def main_is_red_local(state: dict) -> bool:
     if not check_main_health(BASE_WORKDIR):
         sha = main_sha(BASE_WORKDIR)
         kurz = sha[:7] if sha else "unbekannt"
-        log_on_change(state, key, sha or "rot",
-                      f"⚠ Stephan: Lokale Tests auf origin/main ({kurz}) rot; keine neuen Issue-Aufträge.")
+        zeile = (f"⚠ Stephan: Lokale Tests auf origin/main ({kurz}) rot; keine neuen Issue-Aufträge."
+                 + (f" Rot: {', '.join(LETZTE_ROTE_TESTS)}." if LETZTE_ROTE_TESTS else ""))
+        log_on_change(state, key, sha or "rot", zeile)
         return True
     if state.pop(key, None) is not None:
         save_state(state)
