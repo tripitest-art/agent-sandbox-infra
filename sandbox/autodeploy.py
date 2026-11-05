@@ -31,6 +31,8 @@ COMMAND_TIMEOUT: int = 3600
 # #353: Vorrang-Marke. Ist der Takt beschäftigt und liegt ein neuer Stand auf origin/main, hält
 # sie den Worker-Takt von neuen Issue-Aufträgen ab, bis der Deploy gelaufen ist.
 PENDING_FILE: str = os.environ.get("DEPLOY_PENDING_FILE", "/run/agent-deploy-pending")
+# Ort des Wegwerf-Worktrees für den Pre-Flight; außerhalb des Klons und außerhalb von BLOCKED_PATHS.
+PREFLIGHT_DIR: str = os.environ.get("DEPLOY_PREFLIGHT_DIR", "/var/tmp/agent-deploy-preflight")
 BUSY_DETAIL: str = "Worker oder Review aktiv, Deploy wartet"   # derselbe Text wie in deploy_once()
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess]
@@ -225,6 +227,7 @@ def deploy_once(
     test_cmd: Sequence[str] = ("python", "-m", "pytest", "-q"),
     install_cmd: Sequence[str] = ("bash", "sandbox/install.sh"),
     now: Callable[[], str] = lambda: time.strftime("%Y-%m-%dT%H:%M:%S"),
+    preflight_dir: str | None = None,
 ) -> DeployResult:
     """Führt einen Deploy-Prüfzyklus aus:
     1. is_busy() aktiv -> 'uebersprungen' (kein Eingriff in laufende Worker/Reviews).
@@ -232,9 +235,12 @@ def deploy_once(
     3. git fetch origin main -> bei Fehler 'fehler'.
     4. Ziel-Commit ermitteln; ist new == old -> 'unveraendert'.
     5. Ist new in state['bad'] -> 'uebersprungen' (fehlerhafter Stand wird nicht wiederholt).
-    6. git pull --ff-only origin main; Vorab-Test test_cmd ausführen.
+    6. Ohne `preflight_dir`: git pull --ff-only origin main; Vorab-Test test_cmd im Klon.
        - Scheitert test_cmd: git reset --hard old, state['bad'] = new, '⚠ Stephan:'-Meldung,
          Rückgabe 'zurueckgerollt'.
+    6'. Mit `preflight_dir`: Pre-Flight-Test in einem detached Wegwerf-Worktree von `new`,
+       damit kein Test den Klon verändern kann. Worktree immer aufräumen; erst bei grünem Test
+       `git pull --ff-only origin main`. Rot -> state['bad'] = new, kein pull, kein reset.
     7. install_cmd ausführen.
        - Scheitert install_cmd: git reset --hard old + install_cmd (Rollback),
          state['bad'] = new, '⚠ Stephan:'-Meldung, Rückgabe 'zurueckgerollt'.
@@ -285,10 +291,6 @@ def deploy_once(
         return DeployResult("uebersprungen", old, new,
                             f"Stand {new} ist als fehlerhaft vermerkt, nicht wiederholt")
 
-    pull = run(["git", "pull", "--ff-only", "origin", "main"])
-    if pull.returncode != 0:
-        return fehler(old, new, f"git pull --ff-only fehlgeschlagen (Exit {pull.returncode})")
-
     def verwerfen(detail: str) -> DeployResult:
         # Zurück auf den letzten laufenden Stand und diesen Commit nicht erneut versuchen.
         reset = run(["git", "reset", "--hard", old])
@@ -303,36 +305,68 @@ def deploy_once(
         notify(f"⚠ Stephan: Auto-Deploy {old} -> {new} zurückgerollt: {detail}")
         return DeployResult("zurueckgerollt", old, new, detail)
 
-    tests = run(list(test_cmd))
-    if tests.returncode != 0:
-        failed = failed_tests(tests.stdout or "")
+    def test_detail(rc: int, output: str) -> str:
+        failed = failed_tests(output)
         if failed:
-            detail = f"Tests fehlgeschlagen (Exit {tests.returncode}): {', '.join(failed)}"
-        else:
-            detail = f"Tests fehlgeschlagen (Exit {tests.returncode})"
-        return verwerfen(detail)
+            return f"Tests fehlgeschlagen (Exit {rc}): {', '.join(failed)}"
+        return f"Tests fehlgeschlagen (Exit {rc})"
 
-    install = run(list(install_cmd))
-    if install.returncode != 0:
-        detail = f"install.sh fehlgeschlagen (Exit {install.returncode})"
-        # Der halb installierte Stand muss wieder zum alten Code passen.
-        run(["git", "reset", "--hard", old])
-        again = run(list(install_cmd))
-        if again.returncode != 0:
-            detail += f"; erneutes install.sh auf {old} ebenfalls (Exit {again.returncode})"
+    def installieren() -> DeployResult:
+        install = run(list(install_cmd))
+        if install.returncode != 0:
+            detail = f"install.sh fehlgeschlagen (Exit {install.returncode})"
+            # Der halb installierte Stand muss wieder zum alten Code passen.
+            run(["git", "reset", "--hard", old])
+            again = run(list(install_cmd))
+            if again.returncode != 0:
+                detail += f"; erneutes install.sh auf {old} ebenfalls (Exit {again.returncode})"
+            state["bad"] = new
+            state["last_error"] = None
+            save_state(repo, state)
+            return finish(detail)
+
+        state["last_good"] = new
+        state["last_good_at"] = now()
+        state["bad"] = None
+        state["last_error"] = None
+        state["dirty_notified"] = None
+        save_state(repo, state)
+        notify(f"Auto-Deploy: {old} -> {new} ausgerollt")
+        return DeployResult("ausgerollt", old, new, f"{old} -> {new} ausgerollt")
+
+    if preflight_dir is None:
+        pull = run(["git", "pull", "--ff-only", "origin", "main"])
+        if pull.returncode != 0:
+            return fehler(old, new, f"git pull --ff-only fehlgeschlagen (Exit {pull.returncode})")
+        tests = run(list(test_cmd))
+        if tests.returncode != 0:
+            return verwerfen(test_detail(tests.returncode, tests.stdout or ""))
+        return installieren()
+
+    # Reste eines abgebrochenen Laufs entfernen; der Exit-Code ist hier egal.
+    run(["git", "worktree", "remove", "--force", preflight_dir])
+    run(["git", "worktree", "prune"])
+    add = run(["git", "worktree", "add", "--detach", preflight_dir, new])
+    if add.returncode != 0:
+        return fehler(old, new, f"Pre-Flight-Worktree nicht anlegbar (Exit {add.returncode})")
+    try:
+        tests = run(["env", "-C", preflight_dir, *test_cmd])
+    finally:
+        # Immer aufräumen, auch bei rotem Test oder Ausnahme.
+        run(["git", "worktree", "remove", "--force", preflight_dir])
+        run(["git", "worktree", "prune"])
+
+    if tests.returncode != 0:
+        # Der Klon bleibt auf `old`: kein pull, kein reset.
         state["bad"] = new
         state["last_error"] = None
         save_state(repo, state)
-        return finish(detail)
+        return finish(test_detail(tests.returncode, tests.stdout or ""))
 
-    state["last_good"] = new
-    state["last_good_at"] = now()
-    state["bad"] = None
-    state["last_error"] = None
-    state["dirty_notified"] = None
-    save_state(repo, state)
-    notify(f"Auto-Deploy: {old} -> {new} ausgerollt")
-    return DeployResult("ausgerollt", old, new, f"{old} -> {new} ausgerollt")
+    pull = run(["git", "pull", "--ff-only", "origin", "main"])
+    if pull.returncode != 0:
+        return fehler(old, new, f"git pull --ff-only fehlgeschlagen (Exit {pull.returncode})")
+    return installieren()
 
 
 def _log(msg: str) -> None:
@@ -360,8 +394,8 @@ def main(
     os.environ["SKIP_TESTS"] = "1"
     venv_python = "/root/venv/bin/python"
     python = venv_python if os.path.exists(venv_python) else sys.executable
-    test_cmd, isoliert = choose_test_cmd(python, repo, runner)
-    result = deploy_once(repo, runner, logger, test_cmd=test_cmd)
+    test_cmd, isoliert = choose_test_cmd(python, PREFLIGHT_DIR, runner)
+    result = deploy_once(repo, runner, logger, test_cmd=test_cmd, preflight_dir=PREFLIGHT_DIR)
     mark_pending(repo, runner, result)
     if not isoliert and result.status in ("ausgerollt", "zurueckgerollt"):
         logger("Pre-Flight lief ohne Isolation (systemd-run nicht nutzbar)")

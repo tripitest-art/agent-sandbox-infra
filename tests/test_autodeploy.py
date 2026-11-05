@@ -263,3 +263,51 @@ def test_deploy_zustand_ist_in_gitignore():
     meldete jeder Deploy „lokale Änderungen im Klon“. Die Datei muss ignoriert sein."""
     zeilen = (SANDBOX.parent / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert ad.STATE_FILE in [z.strip() for z in zeilen]
+
+
+# ---- Pre-Flight im Wegwerf-Worktree (#429) ----
+
+def test_preflight_vorgabe_liegt_ausserhalb_des_klons():
+    assert ad.PREFLIGHT_DIR
+    assert not ad.PREFLIGHT_DIR.startswith(ad.INFRA_DIR)
+    assert all(not ad.PREFLIGHT_DIR.startswith(p) for p in ad.BLOCKED_PATHS)
+
+
+def test_preflight_gruen_testet_im_worktree_und_zieht_erst_danach(tmp_path):
+    wt = str(tmp_path / "wt")
+    git = Git()
+    res, notes = deploy(tmp_path, git, preflight_dir=wt)
+    assert res.status == "ausgerollt"
+    assert ["git", "worktree", "add", "--detach", wt, "2222222"] in git.commands
+    i_add = git.commands.index(["git", "worktree", "add", "--detach", wt, "2222222"])
+    i_test = git.commands.index(["env", "-C", wt, "tests"])
+    i_pull = git.commands.index(["git", "pull", "--ff-only", "origin", "main"])
+    assert i_add < i_test < i_pull
+    assert ["tests"] not in git.commands
+    assert ad.load_state(tmp_path)["last_good"] == "2222222"
+
+
+def test_preflight_rot_laesst_den_klon_unberuehrt(tmp_path):
+    wt = str(tmp_path / "wt")
+    git = Git(fails=[("env", "-C", wt, "tests")])
+    res, notes = deploy(tmp_path, git, preflight_dir=wt)
+    assert res.status == "zurueckgerollt"
+    assert git.count("git", "pull") == 0
+    assert git.count("git", "reset") == 0
+    assert ["install"] not in git.commands
+    assert ["git", "worktree", "remove", "--force", wt] in git.commands
+    state = ad.load_state(tmp_path)
+    assert state["bad"] == "2222222" and state.get("last_good") is None
+    assert len(notes) == 1 and notes[0].startswith("⚠ Stephan:")
+
+
+def test_preflight_worktree_nicht_anlegbar(tmp_path):
+    wt = str(tmp_path / "wt")
+    git = Git(fails=[("git", "worktree", "add")])
+    res, notes = deploy(tmp_path, git, preflight_dir=wt)
+    assert res.status == "fehler"
+    assert "Pre-Flight-Worktree nicht anlegbar (Exit 1)" == res.detail
+    assert git.count("git", "pull") == 0
+    assert git.count("env") == 0
+    assert ad.load_state(tmp_path).get("bad") is None
+    assert len(notes) == 1 and notes[0].startswith("⚠ Stephan:")
