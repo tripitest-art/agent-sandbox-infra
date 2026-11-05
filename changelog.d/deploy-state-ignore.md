@@ -1,1 +1,1 @@
-- Betrieb: `.deploy-state.json` steht in `.gitignore`. Der Pre-Flight des Auto-Deploys lässt pytest im Server-Klon laufen; das Test-Leck aus #413 committete dabei die Zustandsdatei, und jeder weitere Deploy wurde als „lokale Änderungen im Klon“ übersprungen (#PR).
+- Betrieb: `.deploy-state.json` steht in `.gitignore`. Der Pre-Flight des Auto-Deploys lässt pytest im Server-Klon laufen; das Test-Leck aus #413 committete dabei die Zustandsdatei, und jeder weitere Deploy wurde als „lokale Änderungen im Klon“ übersprungen (#428).
