@@ -3950,3 +3950,41 @@ def test_pipeline_pausiert_sperrt_neue_issue_auftraege(tmp_path, monkeypatch, ca
     assert w.pipeline_pausiert(state, pause_file=str(pause_datei)) is False
     assert w.find_job(state) == ("issue100", "task", None, None)
 
+
+
+# --- #408: Reviews der Reviewer-App lösen Nacharbeit aus ---
+
+@pytest.mark.parametrize("review", [
+    {}, {"author": None}, {"author": {}}, {"author": {"login": None}}, {"author": {"login": 7}},
+    {"author": "sandbox-agent-reviewer-app"},
+])
+def test_review_author_ok_unvollstaendige_eintraege(review):
+    assert w.review_author_ok(review) is False
+
+
+@pytest.mark.parametrize("login", [
+    "Sandbox-Agent-Reviewer-App[bot]", "sandbox-agent-reviewer-app[bot] ", "app/sandbox-agent-worker-tripitest",
+    "dependabot[bot]", "copilot-pull-request-reviewer[bot]", "TRIPITEST-ART",
+])
+def test_review_author_ok_fremde_und_abweichende_logins(login):
+    assert w.review_author_ok({"author": {"login": login}}) is False
+
+
+def test_rework_job_neuestes_review_der_app_verdraengt_aelteres_von_stephan(monkeypatch):
+    # Stephan gab frei, danach verlangt die App Änderungen: das neueste zulässige Review gilt.
+    pr = _pr()
+    pr["reviews"][0]["body"] = "**Freigegeben**"
+    pr["reviews"].append({"submittedAt": "2026-09-29T23:00:00Z", "body": REVIEW_CHANGES,
+                          "author": {"login": "sandbox-agent-reviewer-app"}, "commit": {"oid": "3373e35"}})
+    monkeypatch.setattr(w, "gh", FakeGH(prs=[pr]))
+    key, task, _, _ = w.rework_job()
+    assert key == "pr103@2026-09-29T23:00:00Z"
+    assert REVIEW_CHANGES in task
+
+
+def test_rework_job_freigabe_der_app_loest_keine_nacharbeit_aus(monkeypatch):
+    pr = _pr()
+    pr["reviews"].append({"submittedAt": "2026-09-29T23:00:00Z", "body": "**Freigegeben**",
+                          "author": {"login": "sandbox-agent-reviewer-app[bot]"}, "commit": {"oid": "3373e35"}})
+    monkeypatch.setattr(w, "gh", FakeGH(prs=[pr]))
+    assert w.rework_job() is None

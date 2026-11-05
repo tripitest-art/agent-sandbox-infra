@@ -91,6 +91,28 @@ LABEL = "agent-qwen"
 # öffentlich; jeder könnte sonst per Review Befehle in einen Auftrag mit Schreibrecht schieben.
 OWNER = "tripitest-art"
 ALLOWED_ISSUE_AUTHORS = (OWNER, "app/sandbox-agent-worker-tripitest", "app/hermes-agent-696969")
+# Wessen Review eine Nacharbeit auslöst (#408): Stephan und seit #378 die Reviewer-App. GraphQL
+# (`gh pr list --json reviews`) nennt eine App ohne „[bot]“, REST mit, `gh` in manchen Ausgaben als
+# „app/<name>“. Alle drei Schreibweisen derselben App zählen, keine andere App und kein anderer Bot,
+# denn der Review-Text kommt wörtlich in einen Auftrag mit Schreibrecht (Regel 9).
+REVIEW_AUTHORS: frozenset[str] = frozenset({
+    OWNER,
+    "sandbox-agent-reviewer-app",
+    "sandbox-agent-reviewer-app[bot]",
+    "app/sandbox-agent-reviewer-app",
+})
+
+
+def review_author_ok(review: dict) -> bool:
+    """True, wenn `review["author"]["login"]` in REVIEW_AUTHORS steht.
+
+    Fehlt `author`, ist er None oder fehlt `login`: False. Groß-/Kleinschreibung zählt (GitHub-Logins
+    werden exakt verglichen). Wirft nie."""
+    try:
+        login = (review.get("author") or {}).get("login")
+    except AttributeError:
+        return False
+    return isinstance(login, str) and login in REVIEW_AUTHORS
 BACKEND = os.environ.get("BACKEND", "ollama")   # oder "litellm"
 LITELLM = os.environ.get("LITELLM", "http://192.168.0.211:4000")
 LITELLM_MODEL = agent_settings.value("LITELLM_MODEL", os.environ.get("LITELLM_MODEL", "coder"))
@@ -1072,7 +1094,7 @@ def rework_job(done=frozenset(), skip: Callable[[str], bool] | None = None):
         m = re.match(r"feature/issue-(\d+)", pr["headRefName"])
         if not m or pr.get("isCrossRepository") or not pr["commits"]:
             continue  # Fork-PRs nie: Branch-Name und Inhalt bestimmt dort ein Fremder
-        reviews = [r for r in pr["reviews"] if (r.get("author") or {}).get("login") == OWNER]
+        reviews = [r for r in pr["reviews"] if review_author_ok(r)]
         if not reviews:
             continue
         issue_no = m.group(1)
