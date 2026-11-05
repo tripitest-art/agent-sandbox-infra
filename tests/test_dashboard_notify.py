@@ -1,6 +1,7 @@
 """Tests für sandbox/dashboard_notify.py (Push über ntfy), ohne Netzwerk."""
 
 import importlib.util
+import json
 import sys
 import urllib.error
 from datetime import datetime, timedelta
@@ -268,18 +269,18 @@ def test_konstanten():
 def test_letzte_aktivitaet_erkennt_aktive_ereignisse(tmp_path):
     log = tmp_path / "audit.jsonl"
     log.write_text(
-        '{"ts": "2026-11-05T08:00:00", "event": "run_started"}\n'
-        '{"ts": "2026-11-05T12:00:00", "event": "stephan_alarm"}\n'
-        '{"ts": "2026-11-05T10:00:00", "event": "pr_merged"}\n',
+        '{"ts": "2026-10-16T08:00:00", "event": "run_started"}\n'
+        '{"ts": "2026-10-16T12:00:00", "event": "stephan_alarm"}\n'
+        '{"ts": "2026-10-16T10:00:00", "event": "pr_merged"}\n',
         encoding="utf-8",
     )
-    assert n.letzte_aktivitaet(str(log)) == datetime(2026, 11, 5, 10, 0)
+    assert n.letzte_aktivitaet(str(log)) == datetime(2026, 10, 16, 10, 0)
 
 
 def test_letzte_aktivitaet_ignoriert_beschaedigte_zeilen(tmp_path):
     log = tmp_path / "audit.jsonl"
-    log.write_text("kaputt\n[]\n" + '{"ts": "2026-11-05T11:00:00", "event": "run_finished"}\n', encoding="utf-8")
-    assert n.letzte_aktivitaet(str(log)) == datetime(2026, 11, 5, 11, 0)
+    log.write_text("kaputt\n[]\n" + '{"ts": "2026-10-16T11:00:00", "event": "run_finished"}\n', encoding="utf-8")
+    assert n.letzte_aktivitaet(str(log)) == datetime(2026, 10, 16, 11, 0)
     leer = tmp_path / "leer.jsonl"
     leer.write_text("", encoding="utf-8")
     assert n.letzte_aktivitaet(str(leer)) is None
@@ -351,7 +352,8 @@ class _Note2:
 
 def test_notify_loop_schickt_den_herzschlag(tmp_path):
     log = tmp_path / "audit.jsonl"
-    log.write_text('{"ts": "2026-11-05T07:00:00", "event": "run_finished"}\n', encoding="utf-8")
+    letzte_ts = (NOW - timedelta(hours=5)).isoformat()
+    log.write_text(json.dumps({"ts": letzte_ts, "event": "run_finished"}) + "\n", encoding="utf-8")
     state = {"projekte": [{"issues": {"bereit": 2}}]}
     dash, note = _Dash2(state), _Note2()
     loop = n.NotifyLoop(dash, note, clock=lambda: NOW, audit_path=str(log))
