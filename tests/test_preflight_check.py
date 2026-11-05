@@ -28,12 +28,13 @@ JOB = ("issue5", "Auftragstext", None, None)
 class FakeRun:
     """subprocess.run-Ersatz: je Befehl ein eigener Exit-Code oder eine Ausnahme."""
 
-    def __init__(self, fetch_rc=0, add_rc=0, pytest_rc=0, sha=SHA, raises=()):
+    def __init__(self, fetch_rc=0, add_rc=0, pytest_rc=0, sha=SHA, raises=(), pytest_out=""):
         self.fetch_rc = fetch_rc
         self.add_rc = add_rc
         self.pytest_rc = pytest_rc
         self.sha = sha
         self.raises = set(raises)
+        self.pytest_out = pytest_out
         self.calls = []
 
     def __call__(self, cmd, **kwargs):
@@ -57,7 +58,7 @@ class FakeRun:
         if "pytest" in cmd:
             if "pytest" in self.raises:
                 raise subprocess.TimeoutExpired(cmd, 600)
-            return subprocess.CompletedProcess(cmd, self.pytest_rc, stdout="", stderr="")
+            return subprocess.CompletedProcess(cmd, self.pytest_rc, stdout=self.pytest_out, stderr="")
         raise AssertionError(f"unerwarteter Befehl: {cmd}")
 
     def cmds(self):
@@ -287,3 +288,55 @@ def test_testlauf_bekommt_die_saubere_umgebung_git_aufrufe_nicht(monkeypatch, tm
     assert "LITELLM_MODEL" not in env and "LITELLM_API_KEY" not in env
     git_aufrufe = [kw for cmd, kw in fake.calls if "pytest" not in cmd]
     assert git_aufrufe and all(kw.get("env") == w.ENV for kw in git_aufrufe), "git braucht die gewohnte Umgebung"
+
+
+ROTE_AUSGABE = (
+    "..F.E\n"
+    "=========================== short test summary info ============================\n"
+    "FAILED tests/test_a.py::test_eins - assert 'geheim' == 'x'\n"
+    "ERROR tests/test_b.py::test_zwei[p1] - ModuleNotFoundError: No module named 'psutil'\n"
+    "FAILED tests/test_a.py::test_eins - doppelt\n"
+    "FAILED kaputt name mit leerzeichen\n"
+    "2 failed, 1 error in 3.1s\n"
+)
+
+
+def test_rote_tests_nimmt_failed_und_error_ohne_meldung():
+    """#431: FAILED und ERROR, Name bis „ - “, nur saubere Namen, einmal, höchstens fünf."""
+    assert w.rote_tests(ROTE_AUSGABE) == [
+        "tests/test_a.py::test_eins", "tests/test_b.py::test_zwei[p1]"]
+    assert w.rote_tests(ROTE_AUSGABE, limit=1) == ["tests/test_a.py::test_eins"]
+    assert w.rote_tests("") == [] and w.rote_tests(ROTE_AUSGABE, limit=0) == []
+    viele = "".join(f"FAILED tests/t.py::test_{i} - x\n" for i in range(9))
+    assert len(w.rote_tests(viele)) == 5
+
+
+def test_roter_lauf_setzt_letzte_rote_tests_und_loggt_namen(monkeypatch, tmp_path, capsys):
+    fake = FakeRun(pytest_rc=1, pytest_out=ROTE_AUSGABE)
+    _mount(monkeypatch, tmp_path, fake)
+    assert w.check_main_health(str(tmp_path / "repo")) is False
+    assert w.LETZTE_ROTE_TESTS == [
+        "tests/test_a.py::test_eins", "tests/test_b.py::test_zwei[p1]"]
+    out = capsys.readouterr().out
+    assert f"Lokale Tests auf origin/main ({KURZ}) rot (Exit 1)." in out
+    assert (f"Lokale Tests auf origin/main ({KURZ}): rot sind "
+            "tests/test_a.py::test_eins, tests/test_b.py::test_zwei[p1].") in out
+    assert "geheim" not in out and "psutil" not in out
+
+
+def test_gruener_lauf_leert_letzte_rote_tests(monkeypatch, tmp_path):
+    fake = FakeRun(pytest_rc=1, pytest_out=ROTE_AUSGABE)
+    _mount(monkeypatch, tmp_path, fake)
+    assert w.check_main_health(str(tmp_path / "repo")) is False
+    fake.pytest_rc = 0
+    fake.pytest_out = "3 passed\n"
+    assert w.check_main_health(str(tmp_path / "repo")) is True
+    assert w.LETZTE_ROTE_TESTS == []
+
+
+def test_roter_lauf_ohne_namen_schreibt_keine_zusatzzeile(monkeypatch, tmp_path, capsys):
+    fake = FakeRun(pytest_rc=1, pytest_out="Interrupted: 1 error during collection\n")
+    _mount(monkeypatch, tmp_path, fake)
+    assert w.check_main_health(str(tmp_path / "repo")) is False
+    assert w.LETZTE_ROTE_TESTS == []
+    assert "rot sind" not in capsys.readouterr().out
