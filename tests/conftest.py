@@ -44,6 +44,10 @@ os.environ["AUDIT_LOG"] = os.path.join(_lauf, "audit.jsonl")
 os.environ["STATE"] = os.path.join(_lauf, "worker-state.json")
 os.environ["REVIEW_STATE"] = os.path.join(_lauf, "review-state.json")
 os.environ["REVIEW_DRAFTS"] = os.path.join(_lauf, "reviews")
+# Vorrang-Marke des Auto-Deploys (#353, #416). Liegt auf dem Server eine frische Marke, meldet `find_job()`
+# „keine Arbeit“ und 17 Tests werden rot; Gesundheitscheck und Pre-Flight hielten `main` dann für rot, und der
+# Deploy scheiterte an seiner eigenen Marke (05.11.2026). Die Datei hier wird nie angelegt.
+os.environ["DEPLOY_PENDING_FILE"] = os.path.join(_lauf, "agent-deploy-pending")
 
 # Ersatz für `gh` (Goldene Regel 3: Tests laufen offline, ohne `gh`). Ohne ihn rufen die `main()`-Tests, die `w.gh`
 # nicht durchgehend faken, das echte `gh` auf: Auf einem Rechner mit angemeldetem `gh` setzt `claim_issue()` dann
