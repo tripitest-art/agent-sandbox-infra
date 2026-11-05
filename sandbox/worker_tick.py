@@ -340,7 +340,7 @@ _CLAIM_UNSAFE_RE = re.compile(r"[^A-Za-z0-9.@-]")
 ERROR_RULE = (
     "If a command prints an error (e.g. „GraphQL: …“, „error“, exit code not 0), the step is NOT\n"
     "done, even if nothing follows. Fix it and repeat; if that is impossible, do not report\n"
-    "„done“, but write the error verbatim as a comment {where} and stop.")
+    "„done“, but write the error verbatim to `.agent/frage.md` and stop; the tick posts it as a comment {where}.")
 
 # Steht im Issue-Auftrag direkt nach Schritt 6 (#68). Der pre-push-Hook lehnt einen Push mit roten
 # Tests ab; nur die Eskalation (Draft-PR nach drei Fehlschlägen, AGENTS.md Worker 6) darf ihn
@@ -357,9 +357,9 @@ RUN_RULES = (
     "IMPORTANT RULES FOR THIS RUN:\n"
     "1. BRANCH CHECK: Verify with `git branch` that you are on the target branch before changing anything.\n"
     "2. PRECISE CHANGES: Never overwrite whole files! Use small Python scripts (e.g. with `open()`, `.replace()`) or `sed` to replace only the affected lines.\n"
-    "3. ESCALATION: Work without asking back. If you get stuck, write the problem as a comment on the issue or PR and stop.\n"
+    "3. ESCALATION: Work without asking back. If you get stuck, write the problem to `.agent/frage.md` and stop; the tick posts it.\n"
     "4. COMMIT WHEN GREEN: When tests pass, you MUST stage and commit your changes with `git add -A && git commit -m '...'` before finishing.\n\n"
-    "Use gh for all GitHub steps.")
+    "You have no GitHub access: never call gh. Push, pull request and comments are done by the tick.")
 
 
 def agent_test_cmd(acceptance: str | None = None) -> str:
@@ -1778,23 +1778,81 @@ def rote_tests_aus_push_ausgabe(ausgabe: str, limit: int = 3) -> list[str]:
     return rote
 
 
+AGENT_ABLAGE = ".agent"   # Ordner im Arbeitsbaum: Dateien, die der Agent dem Takt übergibt
+
+
+def agent_ablage(name: str, workdir: str | None = None) -> str:
+    """Pfad `<workdir>/.agent/<name>`; `workdir=None` heißt WORKDIR (zur Aufrufzeit gelesen).
+
+    Reine Pfadfunktion: legt nichts an, prüft nichts, wirft nie."""
+    return os.path.join(WORKDIR if workdir is None else workdir, AGENT_ABLAGE, name)
+
+
+def ablage_vorbereiten(workdir: str | None = None) -> bool:
+    """Vor jedem Agentenlauf (nach prepare_workdir()); `workdir=None` heißt WORKDIR.
+
+    In den Slot-Worktrees ist `.git` eine Datei, `.git/frage.md` lässt sich dort nicht anlegen (#409).
+    Deshalb übergibt der Agent Dateien in `.agent/`. Der Ordner wird vorher geleert, denn `git clean -fd`
+    entfernt ignorierte Dateien nicht, und eine alte Rückfrage darf nie an einem fremden Auftrag landen.
+    Über `info/exclude` im gemeinsamen Git-Verzeichnis taucht er nie in `git status` oder einem Commit
+    auf, ohne `.gitignore` der Projekte anzufassen. Den Ordner selbst legt der Agent an (er gehört dann
+    dem Agentennutzer). Jeder Fehler: eine Warnung und False. Wirft nie."""
+    wd = WORKDIR if workdir is None else workdir
+    try:
+        ordner = os.path.join(wd, AGENT_ABLAGE)
+        if os.path.lexists(ordner):
+            if os.path.isdir(ordner) and not os.path.islink(ordner):
+                shutil.rmtree(ordner)
+            else:
+                os.remove(ordner)
+        res = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=wd, env=ENV, check=True,
+                             capture_output=True, text=True)
+        common = (res.stdout or "").strip()
+        if not common:
+            raise ValueError("leeres --git-common-dir")
+        if not os.path.isabs(common):
+            common = os.path.join(wd, common)
+        info = os.path.join(common, "info")
+        os.makedirs(info, exist_ok=True)
+        exclude = os.path.join(info, "exclude")
+        try:
+            with open(exclude, encoding="utf-8") as f:
+                inhalt = f.read()
+        except FileNotFoundError:
+            inhalt = ""
+        if "/.agent/" not in inhalt.splitlines():
+            with open(exclude, "a", encoding="utf-8") as f:
+                if inhalt and not inhalt.endswith("\n"):
+                    f.write("\n")
+                f.write("/.agent/\n")
+        return True
+    except Exception as e:
+        log(f"Warnung: Ablage .agent nicht vorbereitet ({type(e).__name__}).")
+        return False
+
+
 def frage_des_agenten_posten(n: int) -> bool:
     """Postet die Rückfrage des Agenten als Kommentar am Issue, wenn es eine gibt.
 
     Seit #380 hat der Agent keinen gh-Zugang mehr; die Rückfrage liegt nur noch als Datei
-    `.git/frage.md` im Arbeitsordner. Fehlt sie oder ist sie leer, passiert nichts (False, kein
-    gh-Aufruf). Ein gescheiterter Aufruf lässt die Datei liegen, damit der nächste Lauf sie
-    erneut posten kann, und bricht den Takt nie ab (Regel 7)."""
-    pfad = os.path.join(WORKDIR, ".git", "frage.md")
-    try:
-        with open(pfad, encoding="utf-8") as f:
-            inhalt = f.read()
-    except FileNotFoundError:
-        return False
-    except OSError as e:
-        log(f"issue{n}: Rückfrage nicht gelesen ({type(e).__name__}).")
-        return False
-    if not inhalt.strip():
+    `.agent/frage.md` im Arbeitsordner (#409), als Rückfall `.git/frage.md`. Gepostet wird genau
+    die erste vorhandene, nicht leere Datei, danach wird genau diese gelöscht. Fehlen beide oder
+    sind sie leer, passiert nichts (False, kein gh-Aufruf). Ein gescheiterter Aufruf lässt die Datei
+    liegen, damit der nächste Lauf sie erneut posten kann, und bricht den Takt nie ab (Regel 7)."""
+    pfad = None
+    for kandidat in (agent_ablage("frage.md"), os.path.join(WORKDIR, ".git", "frage.md")):
+        try:
+            with open(kandidat, encoding="utf-8") as f:
+                inhalt = f.read()
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            log(f"issue{n}: Rückfrage nicht gelesen ({type(e).__name__}).")
+            continue
+        if inhalt.strip():
+            pfad = kandidat
+            break
+    if pfad is None:
         return False
     try:
         gh("issue", "comment", str(n), "--body-file", pfad)
@@ -2226,7 +2284,7 @@ Run these steps sequentially and execute each one as a command:
    message describes what changed and why (it becomes the PR text), then stop.
    Push und Pull Request legt der Takt an; du pushst nicht und legst keinen PR an.
    {PUSH_RULE}
-If you think an acceptance test is wrong: write the reason to `.git/frage.md` and stop;
+If you think an acceptance test is wrong: write the reason to `.agent/frage.md` and stop;
 the tick posts it. Never make the test fit.
 {ERROR_RULE.format(where=f"on issue #{n}")}
 
@@ -4533,6 +4591,8 @@ def main() -> int:
         # Jeder Lauf startet auf sauberem main; Reste eines abgebrochenen Laufs stören sonst.
         prepare_workdir()
         ensure_pre_push_hook()   # #68: vor dem Agenten, damit schon sein erster Push geprüft wird
+        if os.path.isdir(WORKDIR):
+            ablage_vorbereiten()   # #409: leere Ablage .agent/, nie in git status
         if n is not None and os.path.isdir(WORKDIR):
             # #234: Branch und Akzeptanztest-Commit legt der deterministische Rahmen aus
             # worker_frame.py an; ohne Akzeptanztest-Block startet kein Agent. Gibt es WORKDIR
