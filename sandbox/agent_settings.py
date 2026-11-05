@@ -54,6 +54,7 @@ SPECS: dict[str, dict] = {
         "erlaubt": [
             "coder", "coder-pro", "coder-fast", "coder-or",
             "coder-free", "coder-glm", "coder-qwen", "coder-nvidia",
+            "coder-go", "coder-kimi-go", "coder-pro-go",
         ],
         "umgebung": True,
     },
