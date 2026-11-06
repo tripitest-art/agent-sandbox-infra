@@ -129,6 +129,9 @@ REQUIRED_CHECKS = ("tests", "acceptance-guard")
 # Runner-Warteschlange). Bis zu dieser Zeit nach dem ersten Start gilt er als laufend, danach als
 # fehlend/rot — sonst prüfte der Takt einen PR, dessen Pflicht-Check Sekunden später grün war.
 MISSING_CHECK_GRACE_S = agent_settings.value("MISSING_CHECK_GRACE_S", 600)
+# Zustandsliste der Schlüssel „pr<N>@<sha>“, je Commit höchstens ein Neustart eines abgebrochenen
+# Pflicht-Checks. Eigener Schlüssel, damit die übrigen Zustandseinträge unverändert bleiben.
+NEUSTART_KEY = "neu_gestartet"
 
 # Modellfamilien: Worker und Reviewer dürfen nie aus derselben stammen (AGENTS.md). Die Reihenfolge
 # zählt: „Qwen3-Coder“ und „coder-glm“ enthalten „coder“, gehören aber nicht zu DeepSeek. Die
@@ -571,6 +574,66 @@ def checks_summary(rollup: list[dict], now: datetime | None = None,
                 rows.append((name, "FEHLT"))
                 red.append(name)
     return done, rows, red
+
+
+def abgebrochene_pflichtchecks(rollup: list[dict]) -> dict[str, str]:
+    """{Name: Lauf-ID} für jeden Check aus REQUIRED_CHECKS, dessen neuester Eintrag im Rollup (dieselbe Auswahl wie
+    checks_summary, also _neuerer_lauf) `conclusion` "CANCELLED" (Groß/Klein egal) hat und dessen `detailsUrl` auf
+    r"/actions/runs/(\\d+)" passt; die Lauf-ID ist diese Zahl als Text. Andere Checks, andere Ergebnisse und Einträge
+    ohne passende URL fehlen. Reine Funktion."""
+    gewaehlt: dict[str, dict] = {}
+    order: list[str] = []
+    for c in rollup or []:
+        name = c.get("name") or c.get("context") or "?"
+        if name not in gewaehlt:
+            order.append(name)
+            gewaehlt[name] = c
+        elif _neuerer_lauf(c, gewaehlt[name]):
+            gewaehlt[name] = c
+    abgebrochen: dict[str, str] = {}
+    for name in order:
+        if name not in REQUIRED_CHECKS:
+            continue
+        c = gewaehlt[name]
+        if (c.get("conclusion") or "").upper() != "CANCELLED":
+            continue
+        m = re.search(r"/actions/runs/(\d+)", c.get("detailsUrl") or "")
+        if m:
+            abgebrochen[name] = m.group(1)
+    return abgebrochen
+
+
+def abgebrochene_neu_starten(n: int, key: str, red: list[str], rollup: list[dict], state: dict) -> bool:
+    """True: Lauf neu gestartet, der Takt wartet (kein Review, keine Runde). Sonst False, dann läuft alles wie bisher.
+
+    - red leer, oder nicht jeder Name aus `red` steht in abgebrochene_pflichtchecks(rollup) -> False, kein gh-Aufruf.
+    - key steht schon in state[NEUSTART_KEY] -> False, kein gh-Aufruf (je Commit nur einmal).
+    - sonst key an state[NEUSTART_KEY] anhängen (höchstens die letzten 200 behalten) und save_state(state);
+      je Lauf-ID der roten Checks (aufsteigend, jede einmal) gh_text("run", "rerun", lauf_id, "--failed").
+      Scheitert ein Aufruf (subprocess.CalledProcessError): genau
+      log(f"PR #{n}: Neustart des abgebrochenen Laufs {lauf_id} fehlgeschlagen ({safe_snippet(exc.stderr, 120)}).")
+      und Rückgabe False.
+      Alle erfolgreich: genau log(f"PR #{n}: Pflicht-Check {', '.join(red)} abgebrochen, Lauf einmal neu gestartet; warte."),
+      audit("checks_neu_gestartet", pr=n, checks=list(red)), Rückgabe True."""
+    abgebrochen = abgebrochene_pflichtchecks(rollup)
+    if not red or not all(name in abgebrochen for name in red):
+        return False
+    neustarts = state.setdefault(NEUSTART_KEY, [])
+    if key in neustarts:
+        return False
+    neustarts.append(key)
+    del neustarts[:-200]
+    save_state(state)
+    lauf_ids = sorted({abgebrochen[name] for name in red}, key=int)
+    for lauf_id in lauf_ids:
+        try:
+            gh_text("run", "rerun", lauf_id, "--failed")
+        except subprocess.CalledProcessError as exc:
+            log(f"PR #{n}: Neustart des abgebrochenen Laufs {lauf_id} fehlgeschlagen ({safe_snippet(exc.stderr, 120)}).")
+            return False
+    log(f"PR #{n}: Pflicht-Check {', '.join(red)} abgebrochen, Lauf einmal neu gestartet; warte.")
+    audit("checks_neu_gestartet", pr=n, checks=list(red))
+    return True
 
 
 def review_is_current(review: dict, pr: dict) -> bool:
@@ -1209,6 +1272,9 @@ def _run_pr_review() -> int:
         if not pr:
             return 0
         n, key = pr["number"], f"pr{pr['number']}@{pr['headRefOid']}"
+
+    if abgebrochene_neu_starten(n, key, red, pr.get("statusCheckRollup") or [], state):
+        return 0
 
     issue: dict | None = None
     no_model = False   # True: rote Checks, das Review kam ohne Modellaufruf zustande

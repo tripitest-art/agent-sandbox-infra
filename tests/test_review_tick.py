@@ -2039,3 +2039,78 @@ def test_checks_summary_naives_seit_gilt_als_utc_und_ohne_seit_wie_bisher(monkey
                             seit=naiv)[2] == []
     done, rows, red = r.checks_summary(nur_status, now=datetime(2026, 11, 5, 14, 4, 37, tzinfo=timezone.utc))
     assert done is True and red == ["tests", "acceptance-guard"]
+
+
+_URL = "https://github.com/tripitest-art/sc-digger/actions/runs/{}/job/99"
+
+
+def _lauf(name, conclusion, started, run_id=None):
+    c = {"name": name, "status": "COMPLETED", "conclusion": conclusion, "startedAt": started}
+    if run_id:
+        c["detailsUrl"] = _URL.format(run_id)
+    return c
+
+
+_ABGEBROCHEN = [_lauf("tests", "CANCELLED", "2026-11-05T15:07:41Z", "42051776176"),
+                _lauf("acceptance-guard", "SUCCESS", "2026-11-05T15:07:40Z", "42051776100")]
+
+
+@pytest.fixture
+def neustart(monkeypatch):
+    seen = {"text": [], "logs": [], "audit": [], "saved": []}
+    monkeypatch.setattr(r, "REQUIRED_CHECKS", ("tests", "acceptance-guard"))
+    monkeypatch.setattr(r, "gh_text", lambda *a, **k: seen["text"].append(list(a)) or "")
+    monkeypatch.setattr(r, "log", seen["logs"].append)
+    monkeypatch.setattr(r, "audit", lambda event, **f: seen["audit"].append((event, f)))
+    monkeypatch.setattr(r, "save_state", seen["saved"].append)
+    return seen
+
+
+def test_abgebrochene_pflichtchecks_nehmen_den_neuesten_lauf(neustart):
+    """Je Pflicht-Check zählt der neueste Lauf; ein älterer Abbruch neben einem neuen grünen Lauf
+    ist kein Grund für einen Neustart, fremde Checks und Einträge ohne Lauf-ID fehlen (Issue #445)."""
+    rollup = _ABGEBROCHEN + [_lauf("CodeQL", "CANCELLED", "2026-11-05T15:07:42Z", "1"),
+                             _lauf("acceptance-guard", "cancelled", "2026-11-05T15:00:00Z", "2")]
+    assert r.abgebrochene_pflichtchecks(rollup) == {"tests": "42051776176"}
+    assert r.abgebrochene_pflichtchecks(
+        _ABGEBROCHEN + [_lauf("tests", "SUCCESS", "2026-11-05T18:40:00Z", "42051776176")]) == {}
+    assert r.abgebrochene_pflichtchecks([_lauf("tests", "CANCELLED", "2026-11-05T15:07:41Z")]) == {}
+    assert r.abgebrochene_pflichtchecks([]) == {}
+
+
+def test_abgebrochene_neu_starten_je_commit_nur_einmal(neustart):
+    """Der erste Abbruch startet den Lauf neu und lässt den Takt warten; derselbe Commit wird nicht
+    ein zweites Mal neu gestartet (Issue #445)."""
+    state = {}
+    key = f"pr7@{SHA}"
+    assert r.abgebrochene_neu_starten(7, key, ["tests"], _ABGEBROCHEN, state) is True
+    assert neustart["text"] == [["run", "rerun", "42051776176", "--failed"]]
+    assert state[r.NEUSTART_KEY] == [key] and neustart["saved"] == [state]
+    assert "PR #7: Pflicht-Check tests abgebrochen, Lauf einmal neu gestartet; warte." in neustart["logs"]
+    assert ("checks_neu_gestartet", {"pr": 7, "checks": ["tests"]}) in neustart["audit"]
+    assert r.abgebrochene_neu_starten(7, key, ["tests"], _ABGEBROCHEN, state) is False
+    assert len(neustart["text"]) == 1
+
+
+def test_abgebrochene_neu_starten_nur_wenn_alle_rot_abgebrochen(neustart):
+    """Ein echter Fehler oder eine leere rote Liste führt zu keinem gh-Aufruf: nur CANCELLED wird
+    neu gestartet (Issue #445)."""
+    rollup = _ABGEBROCHEN + [_lauf("acceptance-guard", "FAILURE", "2026-11-05T15:08:00Z", "5")]
+    assert r.abgebrochene_neu_starten(7, f"pr7@{SHA}", ["tests", "acceptance-guard"], rollup, {}) is False
+    assert r.abgebrochene_neu_starten(7, f"pr7@{SHA}", [], _ABGEBROCHEN, {}) is False
+    assert neustart["text"] == []
+
+
+def test_abgebrochene_neu_starten_fehler_vormerkt_den_commit(monkeypatch, neustart):
+    """Scheitert der Neustart (etwa fehlendes Actions-write-Recht), bleibt der Commit vorgemerkt,
+    damit kein Takt in eine Schleife gerät; der Takt fällt auf das bisherige Verhalten zurück."""
+    def kaputt(*a, **k):
+        raise r.subprocess.CalledProcessError(1, ["gh"], output="", stderr="HTTP 403: Resource not accessible")
+
+    monkeypatch.setattr(r, "gh_text", kaputt)
+    state = {}
+    key = f"pr7@{SHA}"
+    assert r.abgebrochene_neu_starten(7, key, ["tests"], _ABGEBROCHEN, state) is False
+    assert state[r.NEUSTART_KEY] == [key]
+    assert any(z.startswith("PR #7: Neustart des abgebrochenen Laufs 42051776176 fehlgeschlagen (")
+               for z in neustart["logs"])
