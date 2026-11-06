@@ -2004,6 +2004,61 @@ def open_pr(n: int) -> bool:
     antwort = gh("pr", "create", "--title", title, "--body", body, "--head", branch)
     treffer = re.search(r"/pull/(\d+)", str(antwort or ""))
     LAST_OPENED_PR = int(treffer.group(1)) if treffer else None
+    if LAST_OPENED_PR is not None:
+        changelog_pr_nummer(n, LAST_OPENED_PR)
+    return True
+
+
+def changelog_pr_nummer(n: int, pr_no: int) -> bool:
+    """Stellt im Fragment WORKDIR/changelog.d/<n>.md jedes „(#<n>)“ auf „(#<pr_no>)“ um, committet und pusht.
+    True nur, wenn alle drei git-Befehle gelungen sind.
+
+    - n == pr_no, Datei fehlt oder ist unlesbar, oder „(#<n>)“ kommt nicht vor: False, nichts geändert,
+      kein git-Aufruf, keine Logzeile. Nur die exakte Zeichenfolge „(#<n>)“ zählt („(#4380)“ bleibt bei n=438).
+    - sonst Datei schreiben, dann nacheinander (cwd=WORKDIR, check=False, capture_output=True, text=True):
+        ["git", "add", "changelog.d/<n>.md"]                                         env=ENV
+        ["git", "commit", "-m", f"changelog: PR-Nummer #{pr_no} statt Issue-Nummer #{n}"]  env=ENV
+        ["git", "push", "origin", issue_branch(n)]                                   env=push_env()
+      Exit != 0: genau eine Logzeile f"issue{n}: PR-Nummer im Changelog nicht nachgetragen (git <add|commit|push>, Exit <rc>)."
+      und False; die folgenden Befehle laufen nicht. Ausgaben der Befehle kommen nie ins Log (Regel 5). Kein alarm().
+    - Erfolg: Logzeile f"issue{n}: Changelog auf PR #{pr_no} umgestellt." und True.
+    Wirft nie; OSError beim Schreiben oder Starten von git -> Logzeile
+    f"issue{n}: PR-Nummer im Changelog nicht nachgetragen (<Klassenname>)." und False.
+    """
+    if n == pr_no:
+        return False
+    datei = Path(WORKDIR) / "changelog.d" / f"{n}.md"
+    try:
+        inhalt = datei.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    alt = f"(#{n})"
+    if alt not in inhalt:
+        return False
+
+    befehle = [
+        ("add", ["git", "add", f"changelog.d/{n}.md"], ENV),
+        ("commit", ["git", "commit", "-m", f"changelog: PR-Nummer #{pr_no} statt Issue-Nummer #{n}"], ENV),
+        ("push", ["git", "push", "origin", issue_branch(n)], push_env()),
+    ]
+    try:
+        datei.write_text(inhalt.replace(alt, f"(#{pr_no})"), encoding="utf-8")
+        for schritt, cmd, env in befehle:
+            res = subprocess.run(
+                cmd,
+                cwd=WORKDIR,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode != 0:
+                log(f"issue{n}: PR-Nummer im Changelog nicht nachgetragen (git {schritt}, Exit {res.returncode}).")
+                return False
+    except OSError as e:
+        log(f"issue{n}: PR-Nummer im Changelog nicht nachgetragen ({type(e).__name__}).")
+        return False
+    log(f"issue{n}: Changelog auf PR #{pr_no} umgestellt.")
     return True
 
 
