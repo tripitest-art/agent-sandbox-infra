@@ -38,6 +38,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 
 try:  # Ressourcengrenzen gibt es nur auf POSIX-Systemen.
@@ -428,6 +429,34 @@ def _gruppe_toeten(pid: int) -> None:
         pass
 
 
+def gruppe_abwarten(
+    pgid: int,
+    frist_s: float = 2.0,
+    uhr: Callable[[], float] = time.monotonic,
+    schlafen: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Wartet, bis die Prozessgruppe `pgid` keine Mitglieder mehr hat; True, wenn sie weg ist.
+
+    Prüft mit os.killpg(pgid, 0): ProcessLookupError -> sofort True. Sonst schlafen(0.02) und erneut,
+    bis uhr() - start >= frist_s; dann False. PermissionError oder jede andere OSError -> False ohne
+    weiteres Warten. Die erste Prüfung erfolgt vor dem ersten Schlafen. Wirft nie.
+    """
+    try:
+        start = uhr()
+        while True:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return True
+            except OSError:
+                return False
+            if uhr() - start >= frist_s:
+                return False
+            schlafen(0.02)
+    except Exception:
+        return False
+
+
 def _lies(pfad: str) -> bytes:
     with open(pfad, "rb") as datei:
         return datei.read()
@@ -466,6 +495,7 @@ def run_pruefung(code: str, pruefung: str, timeout_s: float = 10.0) -> tuple[boo
             except subprocess.TimeoutExpired:
                 _gruppe_toeten(prozess.pid)
                 prozess.wait()
+                gruppe_abwarten(prozess.pid)
                 return False, GRUND_ZEITLIMIT
             _gruppe_toeten(prozess.pid)
             if prozess.returncode != 0:
