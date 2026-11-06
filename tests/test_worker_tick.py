@@ -4135,3 +4135,104 @@ def test_run_agent_pwd_folgt_einem_geaenderten_workdir(monkeypatch, tmp_path):
         assert w.run_agent("prompt") == 0
         assert kw["cwd"] == str(wd) and kw["env"]["PWD"] == str(wd)
         assert kw["env"]["HOME"] == str(tmp_path / "home")
+
+
+# --- #447: PR-Nummer im Changelog-Fragment nachtragen ---
+
+def _changelog_lage(monkeypatch, tmp_path):
+    (tmp_path / "changelog.d").mkdir()
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    monkeypatch.setattr(w, "push_env", lambda: {"PUSH": "1"})
+    monkeypatch.setattr(w, "alarm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("kein Alarm")))
+    aufrufe, exits = [], {}
+
+    def fake_run(cmd, **kw):
+        aufrufe.append((list(cmd), kw.get("env"), kw.get("cwd")))
+        return subprocess.CompletedProcess(cmd, exits.get(cmd[1], 0), "AUSGABE-GEHEIM", "FEHLER-GEHEIM")
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    return tmp_path / "changelog.d" / "438.md", aufrufe, exits
+
+
+def test_changelog_pr_nummer_stellt_um_committet_und_pusht(monkeypatch, tmp_path, capsys):
+    datei, aufrufe, _ = _changelog_lage(monkeypatch, tmp_path)
+    datei.write_text("- benchmark_code: wartet (#438), siehe auch (#4380).\n", encoding="utf-8")
+    assert w.changelog_pr_nummer(438, 439) is True
+    assert datei.read_text(encoding="utf-8") == "- benchmark_code: wartet (#439), siehe auch (#4380).\n"
+    assert [a[0] for a in aufrufe] == [
+        ["git", "add", "changelog.d/438.md"],
+        ["git", "commit", "-m", "changelog: PR-Nummer #439 statt Issue-Nummer #438"],
+        ["git", "push", "origin", "feature/issue-438"],
+    ]
+    assert [a[1] for a in aufrufe] == [w.ENV, w.ENV, {"PUSH": "1"}]
+    assert all(a[2] == str(tmp_path) for a in aufrufe)
+    assert "issue438: Changelog auf PR #439 umgestellt." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("inhalt", [None, "- ohne Verweis\n", "- schon richtig (#439)\n", "- fast (#4380)\n"])
+def test_changelog_pr_nummer_nichts_zu_tun(monkeypatch, tmp_path, capsys, inhalt):
+    datei, aufrufe, _ = _changelog_lage(monkeypatch, tmp_path)
+    if inhalt is not None:
+        datei.write_text(inhalt, encoding="utf-8")
+    assert w.changelog_pr_nummer(438, 439) is False
+    assert aufrufe == []
+    assert capsys.readouterr().out == ""
+    if inhalt is not None:
+        assert datei.read_text(encoding="utf-8") == inhalt
+
+
+def test_changelog_pr_nummer_gleiche_nummer(monkeypatch, tmp_path):
+    datei, aufrufe, _ = _changelog_lage(monkeypatch, tmp_path)
+    datei.write_text("- x (#438)\n", encoding="utf-8")
+    assert w.changelog_pr_nummer(438, 438) is False
+    assert aufrufe == []
+
+
+@pytest.mark.parametrize("schritt, anzahl", [("add", 1), ("commit", 2), ("push", 3)])
+def test_changelog_pr_nummer_fehlschlag_bricht_ab(monkeypatch, tmp_path, capsys, schritt, anzahl):
+    datei, aufrufe, exits = _changelog_lage(monkeypatch, tmp_path)
+    datei.write_text("- x (#438)\n", encoding="utf-8")
+    exits[schritt] = 1
+    assert w.changelog_pr_nummer(438, 439) is False
+    assert len(aufrufe) == anzahl
+    out = capsys.readouterr().out
+    assert f"issue438: PR-Nummer im Changelog nicht nachgetragen (git {schritt}, Exit 1)." in out
+    assert "GEHEIM" not in out
+
+
+def test_changelog_pr_nummer_wirft_nie(monkeypatch, tmp_path, capsys):
+    datei, _, _ = _changelog_lage(monkeypatch, tmp_path)
+    datei.write_text("- x (#438)\n", encoding="utf-8")
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **kw: (_ for _ in ()).throw(FileNotFoundError("git")))
+    assert w.changelog_pr_nummer(438, 439) is False
+    assert "issue438: PR-Nummer im Changelog nicht nachgetragen (FileNotFoundError)." in capsys.readouterr().out
+
+
+def test_open_pr_traegt_changelog_nummer_nach(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "open_pr", _ECHTE_OPEN_PR)
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    monkeypatch.setattr(w, "_TEMPLATE_CACHE", "## Vorlage\n")
+    monkeypatch.setattr(w, "push_env", lambda: {"PUSH": "1"})
+    gerufen = []
+
+    def fake_gh(*args):
+        if args[:2] == ("pr", "list"):
+            return []
+        if args[:2] == ("issue", "view"):
+            return {"title": "Titel"}
+        if args[:2] == ("pr", "create"):
+            return "https://github.com/tripitest-art/agent-sandbox-infra/pull/439\n"
+        raise AssertionError(args)
+
+    def fake_run(cmd, **kw):
+        if list(cmd[:3]) == ["git", "rev-list", "--count"]:
+            return subprocess.CompletedProcess(cmd, 0, "3\n", "")
+        if list(cmd[:2]) == ["git", "log"]:
+            return subprocess.CompletedProcess(cmd, 0, "test\x00Umsetzung\x00", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(w, "gh", fake_gh)
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    monkeypatch.setattr(w, "changelog_pr_nummer", lambda n, pr_no: gerufen.append((n, pr_no)) or False)
+    assert w.open_pr(438) is True
+    assert gerufen == [(438, 439)]
