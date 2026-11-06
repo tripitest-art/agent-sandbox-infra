@@ -311,3 +311,71 @@ def test_preflight_worktree_nicht_anlegbar(tmp_path):
     assert git.count("env") == 0
     assert ad.load_state(tmp_path).get("bad") is None
     assert len(notes) == 1 and notes[0].startswith("⚠ Stephan:")
+
+
+# ---- pip-Fehler in der Rollback-Meldung (#433) ----
+
+PIP = (
+    "Collecting numpy>=2.5.4\n"
+    "  ERROR: Ignored the following versions that require a different python version: 2.5.4 Requires-Python >=3.12\n"
+    "ERROR: Could not find a version that satisfies the requirement numpy>=2.5.4 (from versions: 1.0, 2.4.1)\n"
+    "ERROR: No matching distribution found for numpy>=2.5.4\n"
+    "ERROR: No matching distribution found for numpy>=2.5.4\n"
+    "ERROR: Could not install from https://user:pw@example.invalid/simple\n"
+)
+
+
+def test_install_fehler_nur_pip_fehler_dedupliziert_und_begrenzt():
+    assert ad.install_fehler(PIP) == [
+        "ERROR: Ignored the following versions that require a different python version: 2.5.4 Requires-Python >=3.12",
+        "ERROR: Could not find a version that satisfies the requirement numpy>=2.5.4 (from versions: 1.0, 2.4.1)",
+        "ERROR: No matching distribution found for numpy>=2.5.4",
+    ]
+    assert ad.install_fehler(PIP, limit=1) == [ad.install_fehler(PIP)[0]]
+    assert ad.install_fehler("") == [] and ad.install_fehler(PIP, limit=0) == []
+
+
+def test_install_fehler_laesst_urls_und_at_weg_und_kuerzt():
+    assert ad.install_fehler("ERROR: x https://a.invalid/simple\nERROR: token@host\n") == []
+    lang = "ERROR: " + "y" * 300
+    assert ad.install_fehler(lang) == [lang[:160]]
+
+
+def test_rollback_nennt_pip_fehler_aus_stdout_und_stderr(tmp_path):
+    def run(cmd):
+        c = list(cmd)
+        if c[:3] == ["git", "rev-parse", "--short"]:
+            return cp(cmd, out=("1111111" if "HEAD" in c else "2222222") + "\n")
+        if c == ["install"]:
+            return subprocess.CompletedProcess(cmd, 1, "Einrichtung …\n", PIP)
+        return cp(cmd)
+
+    ad.save_state(tmp_path, {"last_good": "1111111"})
+    notes: list[str] = []
+    res = ad.deploy_once(tmp_path, run, notes.append, is_busy=lambda: False,
+                         test_cmd=["tests"], install_cmd=["install"])
+    assert res.status == "zurueckgerollt"
+    assert res.detail == (
+        "install.sh fehlgeschlagen (Exit 1): "
+        "ERROR: Ignored the following versions that require a different python version: 2.5.4 Requires-Python >=3.12; "
+        "ERROR: Could not find a version that satisfies the requirement numpy>=2.5.4 (from versions: 1.0, 2.4.1); "
+        "ERROR: No matching distribution found for numpy>=2.5.4"
+        "; erneutes install.sh auf 1111111 ebenfalls (Exit 1)"
+    )
+    assert any(n.startswith("⚠ Stephan:") and "numpy>=2.5.4" in n for n in notes)
+    assert "pw" not in " ".join(notes)
+
+
+def test_rollback_ohne_pip_fehler_bleibt_die_meldung_wie_bisher(tmp_path):
+    def run(cmd):
+        c = list(cmd)
+        if c[:3] == ["git", "rev-parse", "--short"]:
+            return cp(cmd, out=("1111111" if "HEAD" in c else "2222222") + "\n")
+        if c == ["install"]:
+            return subprocess.CompletedProcess(cmd, 2, "irgendwas\n", "kaputt\n")
+        return cp(cmd)
+
+    ad.save_state(tmp_path, {"last_good": "1111111"})
+    res = ad.deploy_once(tmp_path, run, lambda m: None, is_busy=lambda: False,
+                         test_cmd=["tests"], install_cmd=["install"])
+    assert res.detail == "install.sh fehlgeschlagen (Exit 2); erneutes install.sh auf 1111111 ebenfalls (Exit 2)"

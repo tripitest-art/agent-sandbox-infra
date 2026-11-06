@@ -98,6 +98,35 @@ def failed_tests(output: str, limit: int = 5) -> list[str]:
     return res
 
 
+def install_fehler(output: str, limit: int = 3) -> list[str]:
+    """Fehlerzeilen aus der Ausgabe von install.sh (stdout und stderr zusammen).
+
+    - Nur Zeilen, die nach strip() mit "ERROR: " beginnen (so schreibt pip).
+    - Zeilen mit "://" oder "@" entfallen ganz (Index-URLs können Zugangsdaten tragen, Regel 5).
+    - Jede Zeile wird auf höchstens 160 Zeichen gekürzt (die ersten 160 Zeichen, ohne Zusatz).
+    - Jede Zeile einmal, Reihenfolge wie in der Ausgabe, höchstens `limit`; leere Ausgabe oder
+      limit <= 0 -> [].
+    Reine Funktion, wirft nie."""
+    if not output or limit <= 0:
+        return []
+    res: list[str] = []
+    seen: set[str] = set()
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line.startswith("ERROR: "):
+            continue
+        if "://" in line or "@" in line:
+            continue
+        line = line[:160]
+        if line in seen:
+            continue
+        seen.add(line)
+        res.append(line)
+        if len(res) >= limit:
+            break
+    return res
+
+
 @dataclass
 class DeployResult:
     """Ergebnis eines Auto-Deploy-Laufs."""
@@ -315,6 +344,9 @@ def deploy_once(
         install = run(list(install_cmd))
         if install.returncode != 0:
             detail = f"install.sh fehlgeschlagen (Exit {install.returncode})"
+            fehler = install_fehler((install.stdout or "") + "\n" + (install.stderr or ""))
+            if fehler:
+                detail += ": " + "; ".join(fehler)
             # Der halb installierte Stand muss wieder zum alten Code passen.
             run(["git", "reset", "--hard", old])
             again = run(list(install_cmd))
