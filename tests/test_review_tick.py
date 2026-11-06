@@ -1311,7 +1311,7 @@ def test_failed_merge_is_retried_next_tick(monkeypatch, tmp_path):
     r.run_once()
     assert calls["merged"] == ["7"]
     st = json.loads((tmp_path / "state.json").read_text())
-    assert st["merge_offen"] == {"7": {"sha": SHA, "versuche": 0}}
+    assert st["merge_offen"] == {"7": {"sha": SHA, "versuche": 0, "issue": 5}}
     # nächster Takt: jetzt mergebar
     calls2 = _github_with_merge(monkeypatch, merge_ok=True,
                                 pr_view={"state": "OPEN", "headRefOid": SHA, "mergeStateStatus": "CLEAN"})
@@ -1903,3 +1903,86 @@ def test_zwei_dateien_im_diff_nur_der_akzeptanztest_faellt_weg():
     diff = vorher + _akz_datei(12) + nachher
     assert r.drop_acceptance_from_diff(diff, 12, _AKZ_ISSUE) == (
         vorher + r.ACCEPTANCE_OMITTED.format(n=12) + "\n" + nachher)
+
+
+# --- Worker-Issue nach dem eigenen Merge schließen (Issue #430) ---
+
+def _issue_gh(monkeypatch, zustand="OPEN", close_fehler=None):
+    seen = {"json": [], "text": [], "logs": [], "audit": []}
+
+    def gh_json(*args, **kw):
+        seen["json"].append(list(args))
+        if args[:2] == ("issue", "view"):
+            return {"state": zustand}
+        if args[:2] == ("pr", "view"):
+            return {"state": "OPEN", "headRefOid": SHA, "mergeStateStatus": "CLEAN"}
+        raise AssertionError(args)
+
+    def gh_text(*args, **kw):
+        seen["text"].append(list(args))
+        if close_fehler is not None and args[:2] == ("issue", "close"):
+            raise close_fehler
+        return ""
+
+    monkeypatch.setattr(r, "gh_json", gh_json)
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    monkeypatch.setattr(r, "log", seen["logs"].append)
+    monkeypatch.setattr(r, "audit", lambda event, **f: seen["audit"].append((event, f)))
+    monkeypatch.setattr(r, "save_state", lambda state: None)
+    return seen
+
+
+def test_close_merged_issue_schliesst_nur_offene_issues(monkeypatch):
+    seen = _issue_gh(monkeypatch, zustand="OPEN")
+    assert r.close_merged_issue(7, 5) is True
+    assert seen["text"] == [["issue", "close", "5", "--comment",
+                             "Umgesetzt in #7 (Merge durch den Review-Takt)."]]
+    assert ("issue_closed", {"issue": 5, "pr": 7}) in seen["audit"]
+
+    zu = _issue_gh(monkeypatch, zustand="CLOSED")
+    assert r.close_merged_issue(7, 5) is False
+    assert zu["text"] == []
+
+
+def test_close_merged_issue_ohne_issue_ruft_gh_nicht_auf(monkeypatch):
+    seen = _issue_gh(monkeypatch)
+    assert r.close_merged_issue(7, None) is False
+    assert seen["json"] == [] and seen["text"] == []
+
+
+def test_close_merged_issue_fehler_wird_geloggt_und_wirft_nie(monkeypatch):
+    fehler = r.subprocess.CalledProcessError(1, "gh", stderr="geheim")
+    seen = _issue_gh(monkeypatch, close_fehler=fehler)
+    assert r.close_merged_issue(7, 5) is False
+    assert seen["logs"] == [
+        "Issue #5: Schließen nach Merge von PR #7 fehlgeschlagen (CalledProcessError)."]
+
+
+def test_merge_or_queue_schliesst_nach_dem_merge_und_merkt_sich_das_issue(monkeypatch):
+    seen = _issue_gh(monkeypatch)
+    monkeypatch.setattr(r, "merge_pr", lambda n, sha: True)
+    assert r.merge_or_queue(7, SHA, {}, issue_no=5) is True
+    assert seen["text"] == [["issue", "close", "5", "--comment",
+                             "Umgesetzt in #7 (Merge durch den Review-Takt)."]]
+
+    state = {}
+    monkeypatch.setattr(r, "merge_pr", lambda n, sha: False)
+    assert r.merge_or_queue(7, SHA, state, issue_no=5) is False
+    assert state["merge_offen"]["7"] == {"sha": SHA, "versuche": 0, "issue": 5}
+
+
+def test_merge_or_queue_ohne_issue_bleibt_wie_bisher(monkeypatch):
+    seen = _issue_gh(monkeypatch)
+    monkeypatch.setattr(r, "merge_pr", lambda n, sha: True)
+    assert r.merge_or_queue(7, SHA, {}) is True
+    assert seen["json"] == [] and seen["text"] == []
+
+
+def test_retry_merges_schliesst_das_issue_nach_spaetem_merge(monkeypatch):
+    seen = _issue_gh(monkeypatch)
+    monkeypatch.setattr(r, "merge_pr", lambda n, sha: True)
+    state = {"merge_offen": {"7": {"sha": SHA, "versuche": 0, "issue": 5}}}
+    r.retry_merges(state)
+    assert state["merge_offen"] == {}
+    assert seen["text"] == [["issue", "close", "5", "--comment",
+                             "Umgesetzt in #7 (Merge durch den Review-Takt)."]]

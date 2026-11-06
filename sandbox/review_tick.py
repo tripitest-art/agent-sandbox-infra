@@ -890,6 +890,28 @@ def merge_pr(number: int, sha: str) -> bool:
         return False
 
 
+def close_merged_issue(pr_no: int, issue_no: int | None) -> bool:
+    """Schließt das Worker-Issue nach dem Merge von PR `pr_no`; True, wenn es geschlossen wurde.
+
+    Ein Squash-Merge des Takts schließt das über „Closes #N“ verknüpfte Issue nicht selbst
+    (Befund vom 05.11.2026); deshalb räumt der Takt nach einem erlaubten Merge auf. Fehler beim
+    Schließen werden nur geloggt: Der Merge bleibt gültig."""
+    if issue_no is None:
+        return False
+    try:
+        issue = gh_json("issue", "view", str(issue_no), "--json", "state") or {}
+        if issue.get("state") != "OPEN":
+            return False
+        gh_text("issue", "close", str(issue_no), "--comment",
+                f"Umgesetzt in #{pr_no} (Merge durch den Review-Takt).")
+        log(f"Issue #{issue_no}: nach Merge von PR #{pr_no} geschlossen.")
+        audit("issue_closed", issue=issue_no, pr=pr_no)
+        return True
+    except Exception as exc:
+        log(f"Issue #{issue_no}: Schließen nach Merge von PR #{pr_no} fehlgeschlagen ({type(exc).__name__}).")
+        return False
+
+
 def to_stephan(n: int, key: str, reason: str, state: dict) -> None:
     """PR liegt bei Stephan: einmal je Commit melden (Log, mit REVIEW_POST=1 auch Label und Kommentar)."""
     log(f"PR #{n}: ⚠ Stephan: {reason}")
@@ -923,12 +945,19 @@ def to_stephan(n: int, key: str, reason: str, state: dict) -> None:
     save_state(state)
 
 
-def merge_or_queue(n: int, sha: str, state: dict) -> bool:
-    """Mergen; scheitert es, für die nächsten Takte vormerken (retry_merges)."""
+def merge_or_queue(n: int, sha: str, state: dict, issue_no: int | None = None) -> bool:
+    """Mergen; scheitert es, für die nächsten Takte vormerken (retry_merges).
+
+    Nach einem gelungenen Merge wird das Worker-Issue geschlossen. Ohne issue_no bleibt alles
+    wie bisher (keine weiteren gh-Aufrufe)."""
     if merge_pr(n, sha):
         state.get("merge_offen", {}).pop(str(n), None)
+        close_merged_issue(n, issue_no)
         return True
-    state.setdefault("merge_offen", {}).setdefault(str(n), {"sha": sha, "versuche": 0})
+    eintrag: dict = {"sha": sha, "versuche": 0}
+    if issue_no is not None:
+        eintrag["issue"] = issue_no
+    state.setdefault("merge_offen", {}).setdefault(str(n), eintrag)
     return False
 
 
@@ -946,6 +975,7 @@ def retry_merges(state: dict) -> None:
             continue
         if pr.get("mergeStateStatus") in ("CLEAN", "HAS_HOOKS", "UNSTABLE") and merge_pr(n, info["sha"]):
             offen.pop(n_str)
+            close_merged_issue(n, info.get("issue"))
             continue
         info["versuche"] = info.get("versuche", 0) + 1
         if info["versuche"] >= MERGE_RETRIES:
@@ -1396,7 +1426,7 @@ def _run_pr_review() -> int:
                                f"({', '.join(hits[:3])}): bitte prüfen und mergen.", state)
                     return 0
             if darf_selbst_mergen(verdict, REVIEW_APPROVE, AUTO_MERGE):
-                merge_or_queue(n, pr["headRefOid"], state)
+                merge_or_queue(n, pr["headRefOid"], state, issue_no=pr["issue_no"])
                 save_state(state)
         else:
             log(f"PR #{n}: Freigegeben, aber Merge-Modus manuell; liegt bei Stephan.")
