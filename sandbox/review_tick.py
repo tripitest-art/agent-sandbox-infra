@@ -491,7 +491,27 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def checks_summary(rollup: list[dict], now: datetime | None = None) -> tuple[bool, list[tuple[str, str]], list[str]]:
+def letzter_commit_zeit(pr: dict) -> datetime | None:
+    """Jüngstes `committedDate` aus pr["commits"] als zeitzonenbehaftete UTC-Zeit ("Z" = UTC, naive Werte gelten als UTC).
+    Fehlende Liste, leere Liste oder kein lesbares Datum -> None. Unlesbare Einträge werden übersprungen. Wirft nie."""
+    try:
+        zeiten = []
+        for c in (pr.get("commits") if isinstance(pr, dict) else None) or []:
+            try:
+                roh = c.get("committedDate")
+                if not roh:
+                    continue
+                t = datetime.fromisoformat(str(roh).replace("Z", "+00:00"))
+                zeiten.append(t if t.tzinfo else t.replace(tzinfo=timezone.utc))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return max(zeiten, default=None)
+    except Exception:
+        return None
+
+
+def checks_summary(rollup: list[dict], now: datetime | None = None,
+                   seit: datetime | None = None) -> tuple[bool, list[tuple[str, str]], list[str]]:
     """(alle fertig, [(Name, Ergebnis)], Namen roter Pflicht-Checks).
 
     Je Check-Name (`name`, bei Statuseinträgen `context`) zählt nur der neueste Lauf: Ein
@@ -502,8 +522,10 @@ def checks_summary(rollup: list[dict], now: datetime | None = None) -> tuple[boo
 
     Ein Pflicht-Check, der noch nicht im Rollup steht, startet manchmal verspätet: Bis
     MISSING_CHECK_GRACE_S nach dem frühesten `startedAt` gilt er als laufend (`done` False, kein
-    Eintrag in `rows`/`red`), danach als fehlend und rot (`FEHLT`). Ohne Eintrag mit `startedAt`
-    gibt es keine Kulanzzeit — Statuseinträge zählen dafür nicht."""
+    Eintrag in `rows`/`red`), danach als fehlend und rot (`FEHLT`). Der Beginn der Kulanzzeit ist
+    der spätere Wert aus dem frühesten `startedAt` und `seit` (dem neuesten Commit); fehlt einer,
+    gilt der andere; fehlen beide, gibt es keine Kulanzzeit — Statuseinträge zählen dafür nicht.
+    `seit=None` verhält sich wie bisher; ein naives `seit` gilt als UTC."""
     gewaehlt: dict[str, dict] = {}
     order: list[str] = []
     for c in rollup or []:
@@ -536,6 +558,9 @@ def checks_summary(rollup: list[dict], now: datetime | None = None) -> tuple[boo
                 continue
             startzeiten.append(t if t.tzinfo else t.replace(tzinfo=timezone.utc))
         beginn = min(startzeiten, default=None)
+        if seit is not None:
+            seit_utc = seit if seit.tzinfo else seit.replace(tzinfo=timezone.utc)
+            beginn = max(beginn, seit_utc) if beginn is not None else seit_utc
         jetzt = now if now is not None else _now()
         if jetzt.tzinfo is None:
             jetzt = jetzt.replace(tzinfo=timezone.utc)
@@ -1162,7 +1187,8 @@ def _run_pr_review() -> int:
     # `skip`; der Takt nimmt den nächsten Kandidaten, statt den jüngeren PRs den Takt zu sperren.
     skip = frozenset()
     while True:
-        done, checks, red = checks_summary(pr.get("statusCheckRollup") or [], now=_now())
+        done, checks, red = checks_summary(pr.get("statusCheckRollup") or [], now=_now(),
+                                           seit=letzter_commit_zeit(pr))
         if not done or not checks:
             log(f"PR #{n}: Checks laufen noch, warte.")
         else:

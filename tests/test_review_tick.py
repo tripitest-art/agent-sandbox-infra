@@ -1986,3 +1986,56 @@ def test_retry_merges_schliesst_das_issue_nach_spaetem_merge(monkeypatch):
     assert state["merge_offen"] == {}
     assert seen["text"] == [["issue", "close", "5", "--comment",
                              "Umgesetzt in #7 (Merge durch den Review-Takt)."]]
+
+
+def test_letzter_commit_zeit_liest_das_juengste_datum_als_utc():
+    """Der Beginn der Kulanzzeit kommt aus dem neuesten Commit des PRs; unlesbare Einträge
+    werden übersprungen, "Z" und naive Werte gelten as UTC (Issue #440)."""
+    pr = {"commits": [{"committedDate": "2026-11-05T13:52:20Z"},
+                      {"committedDate": "2026-11-05T14:01:49Z"},
+                      {"committedDate": "kaputt"}, {}]}
+    assert r.letzter_commit_zeit(pr) == datetime(2026, 11, 5, 14, 1, 49, tzinfo=timezone.utc)
+    assert r.letzter_commit_zeit(
+        {"commits": [{"committedDate": "2026-11-05T14:01:49"}]}
+    ) == datetime(2026, 11, 5, 14, 1, 49, tzinfo=timezone.utc)
+    assert r.letzter_commit_zeit({}) is None
+    assert r.letzter_commit_zeit({"commits": []}) is None
+    assert r.letzter_commit_zeit({"commits": [{"committedDate": None}]}) is None
+
+
+def test_checks_summary_kulanzzeit_ab_dem_neuesten_commit(monkeypatch):
+    """Ohne `startedAt` im Rollup beginnt die Kulanzzeit am Commit, nicht sofort `FEHLT`; ein
+    älterer Lauf zählt nicht vor den Commit, ein späterer Start verschiebt den Beginn (Issue #440)."""
+    monkeypatch.setattr(r, "REQUIRED_CHECKS", ("tests", "acceptance-guard"))
+    monkeypatch.setattr(r, "MISSING_CHECK_GRACE_S", 600)
+    nur_status = [{"context": "review", "state": "SUCCESS"}]
+    seit = datetime(2026, 11, 5, 14, 1, 49, tzinfo=timezone.utc)
+
+    done, rows, red = r.checks_summary(nur_status, now=datetime(2026, 11, 5, 14, 4, 37, tzinfo=timezone.utc), seit=seit)
+    assert done is False and red == [] and not any(ergebnis == "FEHLT" for _, ergebnis in rows)
+    assert r.checks_summary(nur_status, now=datetime(2026, 11, 5, 14, 11, 50, tzinfo=timezone.utc),
+                            seit=seit)[2] == ["tests", "acceptance-guard"]
+
+    alt = [{"name": "merge-nach-freigabe", "status": "COMPLETED", "conclusion": "SUCCESS",
+            "startedAt": "2026-11-05T13:50:00Z"}]
+    done, _, red = r.checks_summary(alt, now=datetime(2026, 11, 5, 14, 4, 37, tzinfo=timezone.utc), seit=seit)
+    assert done is False and red == [], "Beginn ist der spätere Wert: der Commit"
+
+    spaet = [{"name": "acceptance-guard", "status": "COMPLETED", "conclusion": "SUCCESS",
+              "startedAt": "2026-11-05T14:05:00Z"}]
+    assert r.checks_summary(spaet, now=datetime(2026, 11, 5, 14, 14, 59, tzinfo=timezone.utc),
+                            seit=seit)[2] == []
+    assert r.checks_summary(spaet, now=datetime(2026, 11, 5, 14, 15, 1, tzinfo=timezone.utc),
+                            seit=seit)[2] == ["tests"]
+
+
+def test_checks_summary_naives_seit_gilt_als_utc_und_ohne_seit_wie_bisher(monkeypatch):
+    """Ein naives `seit` gilt als UTC; ohne `seit` bleibt das bisherige Verhalten unverändert."""
+    monkeypatch.setattr(r, "REQUIRED_CHECKS", ("tests", "acceptance-guard"))
+    monkeypatch.setattr(r, "MISSING_CHECK_GRACE_S", 600)
+    nur_status = [{"context": "review", "state": "SUCCESS"}]
+    naiv = datetime(2026, 11, 5, 14, 1, 49)
+    assert r.checks_summary(nur_status, now=datetime(2026, 11, 5, 14, 4, 37, tzinfo=timezone.utc),
+                            seit=naiv)[2] == []
+    done, rows, red = r.checks_summary(nur_status, now=datetime(2026, 11, 5, 14, 4, 37, tzinfo=timezone.utc))
+    assert done is True and red == ["tests", "acceptance-guard"]
