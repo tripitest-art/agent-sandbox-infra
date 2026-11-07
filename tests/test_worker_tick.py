@@ -81,6 +81,10 @@ def _repo_workdir(monkeypatch, tmp_path):
     # #409: ablage_vorbereiten schreibt `/.agent/` in info/exclude von WORKDIR, in Tests dieses Repo.
     # Tests der Funktion selbst nutzen `_ECHTE_ABLAGE_VORBEREITEN` mit einem Repo unter tmp_path.
     monkeypatch.setattr(w, "ablage_vorbereiten", lambda *a, **k: True)
+    # #410: prepare_pr_frame checkt den PR-Branch in WORKDIR (in Tests dieses Repo) aus, finish_pr_frame
+    # pusht und setzt den PR-Text. Nie echter git- oder GitHub-Verkehr aus einem Test heraus.
+    monkeypatch.setattr(w, "prepare_pr_frame", lambda pr_no: "feature/issue-100-camelot-distance")
+    monkeypatch.setattr(w, "finish_pr_frame", lambda *a: True)
 
 
 _ECHTE_ABLAGE_VORBEREITEN = w.ablage_vorbereiten  # vor dem Autouse-Fixture gesichert (#409)
@@ -88,6 +92,8 @@ _ECHTE_GIT_HOOKS_DIR = w.git_hooks_dir    # vor dem Autouse-Fixture gesichert (#
 _ECHTE_PREPARE_ISSUE_BRANCH = w.prepare_issue_branch  # vor dem Autouse-Fixture gesichert (#171)
 _ECHTE_PREPARE_ISSUE_FRAME = w.prepare_issue_frame  # vor dem Autouse-Fixture gesichert (#234)
 _ECHTE_SYNC_ISSUE_BRANCH = w.sync_issue_branch_with_main  # vor dem Autouse-Fixture gesichert (#208)
+_ECHTE_PREPARE_PR_FRAME = w.prepare_pr_frame  # vor dem Autouse-Fixture gesichert (#410)
+_ECHTE_FINISH_PR_FRAME = w.finish_pr_frame  # vor dem Autouse-Fixture gesichert (#410)
 _ECHTE_OPEN_PR = w.open_pr  # vor dem Autouse-Fixture gesichert (#172)
 _ECHTE_VERWAISTE_MELDEN = w.verwaiste_melden  # vor dem Autouse-Fixture gesichert (#183)
 
@@ -147,16 +153,16 @@ def test_rework_job_embeds_review_and_checkout(monkeypatch):
     assert key == "pr103@2026-09-29T21:39:23Z"
     assert pr_no == 103 and before[0] == "3373e35"
     # Ohne diese drei Stellen lief Qwen auf main, las das Review nie und gab sich selbst frei.
-    assert "gh pr checkout 103" in task
+    assert "feature/issue-100-camelot-distance" in task   # der Takt hat den Branch schon ausgecheckt
     assert REVIEW_CHANGES in task
     assert "Closes #100" in task and f"Worker: {w.WORKER}" in task
     assert "/tmp/" not in task  # OpenCode lehnt Schreiben außerhalb des Projekts ab
     # Titel nicht einsetzen: ein Anführungszeichen darin bräche den Befehl.
     assert "Titel von Issue" not in task
-    assert '--title "$(gh issue view 100 --json title -q .title)"' in task
+    assert "`.agent/pr-body.md`" in task and "gh pr" not in task and "git push" not in task
     # Mit gh 2.23 schlug `gh pr edit` mit „GraphQL: …“ fehl, Qwen meldete trotzdem Erfolg (#103).
     assert "GraphQL" in task and "NOT" in task
-    assert "gh pr view 103 --json title,body" in task
+    assert "git log -1 --oneline" in task
 
 
 @pytest.mark.parametrize("pr, labels", [
@@ -495,7 +501,7 @@ def _run_rework(monkeypatch, tmp_path, after: dict) -> list:
 
 def test_main_warns_when_rework_changed_nothing(monkeypatch, tmp_path, capsys):
     prompts = _run_rework(monkeypatch, tmp_path, {})
-    assert len(prompts) == 1 and "gh pr checkout 103" in prompts[0]
+    assert len(prompts) == 1 and "feature/issue-100-camelot-distance" in prompts[0]
     assert "WARNUNG pr103@2026-09-29T21:39:23Z: weder Commit" in capsys.readouterr().out
     assert json.loads((tmp_path / "state.json").read_text())["pr103@2026-09-29T21:39:23Z"] == 1
 
@@ -582,7 +588,8 @@ def test_text_fix_job(monkeypatch):
     key, task, pr_no, before = w.text_fix_job()
     assert key == "text112@3373e35" and pr_no == 112 and before == w.pr_snapshot(pr)
     assert "„Closes #102“" in task and "no code" in task
-    assert "gh pr diff 112" in task and "--body-file .git/pr-body.md" in task
+    assert "git diff --stat origin/main...HEAD" in task and "`.agent/pr-body.md`" in task
+    assert "gh pr" not in task and "git push" not in task
     assert "## Umgesetzt von / Review durch" in task  # Vorlage wörtlich
     assert "NOT" in task
 
@@ -4236,3 +4243,96 @@ def test_open_pr_traegt_changelog_nummer_nach(monkeypatch, tmp_path):
     monkeypatch.setattr(w, "changelog_pr_nummer", lambda n, pr_no: gerufen.append((n, pr_no)) or False)
     assert w.open_pr(438) is True
     assert gerufen == [(438, 439)]
+
+
+# --- #410: der Takt checkt den PR-Branch aus, pusht und setzt den PR-Text -------------------------
+
+class _GitRecorder:
+    """Ersetzt subprocess.run: zeichnet Befehle auf, liefert `ahead` Commits vor origin."""
+
+    def __init__(self, ahead="0", push_rc=0):
+        self.ahead, self.push_rc, self.calls = ahead, push_rc, []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append((list(cmd), kw))
+        out = ""
+        rc = 0
+        if cmd[:2] == ["git", "rev-list"]:
+            out = f"{self.ahead}\n"
+        elif cmd[:2] == ["git", "push"]:
+            rc = self.push_rc
+        return subprocess.CompletedProcess(cmd, rc, stdout=out, stderr="")
+
+    def cmds(self):
+        return [c for c, _ in self.calls]
+
+
+def test_prepare_pr_frame_weist_fremde_branchnamen_ab(monkeypatch, tmp_path):
+    """Der Branchname kommt aus dem PR; nur feature/issue-<N>[-…] geht an git."""
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    git = _GitRecorder()
+    monkeypatch.setattr(w.subprocess, "run", git)
+    for name in ("main", "feature/issue-7/../../x", "feature/issue-x", "--upload-pack=evil"):
+        monkeypatch.setattr(w, "gh", lambda *a, n=name: {"headRefName": n})
+        assert _ECHTE_PREPARE_PR_FRAME(5) is None
+    assert git.calls == []
+
+
+def test_prepare_pr_frame_checkt_aus_und_nennt_den_branch(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    monkeypatch.setattr(w, "agent_run_kwargs", lambda: {})
+    git = _GitRecorder()
+    monkeypatch.setattr(w.subprocess, "run", git)
+    monkeypatch.setattr(w, "gh", lambda *a: {"headRefName": "feature/issue-7-kurz"})
+    assert _ECHTE_PREPARE_PR_FRAME(5) == "feature/issue-7-kurz"
+    assert git.cmds() == [["git", "fetch", "-q", "origin", "feature/issue-7-kurz"],
+                          ["git", "checkout", "-qfB", "feature/issue-7-kurz", "origin/feature/issue-7-kurz"]]
+
+
+def test_finish_pr_frame_sichert_mit_der_issue_nummer_aus_dem_branch(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    git = _GitRecorder(ahead="0")
+    monkeypatch.setattr(w.subprocess, "run", git)
+    nummern = []
+    monkeypatch.setattr(w, "auto_commit_uncommitted_changes", lambda wd, env, n: nummern.append(n))
+    assert _ECHTE_FINISH_PR_FRAME(5, "feature/issue-7-kurz") is True
+    assert nummern == [7]
+
+
+def test_finish_pr_frame_rueckfrage_scheitert_push_und_text_laufen_trotzdem(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    (tmp_path / ".agent").mkdir()
+    frage = tmp_path / ".agent" / "frage.md"
+    frage.write_text("Frage", encoding="utf-8")
+    (tmp_path / ".agent" / "pr-body.md").write_text("Text", encoding="utf-8")
+    aufrufe = []
+
+    def gh(*args):
+        aufrufe.append(args)
+        if args[:2] == ("pr", "comment"):
+            raise RuntimeError("geheimer Token ghp_abc")
+        return None
+
+    monkeypatch.setattr(w, "gh", gh)
+    monkeypatch.setattr(w, "push_env", lambda: {})
+    git = _GitRecorder(ahead="1")
+    monkeypatch.setattr(w.subprocess, "run", git)
+    monkeypatch.setattr(w, "auto_commit_uncommitted_changes", lambda *a: None)
+    assert _ECHTE_FINISH_PR_FRAME(5, "feature/issue-7") is False
+    assert frage.exists()   # nicht gepostet: bleibt für den nächsten Lauf liegen
+    assert ["git", "push", "origin", "HEAD:feature/issue-7"] in git.cmds()
+    assert any(a[:2] == ("pr", "edit") for a in aufrufe)
+    out = capsys.readouterr().out
+    assert "pr5: Rückfrage nicht gepostet (RuntimeError)." in out
+    assert "ghp_" not in out   # Regel 5: nie die Ausnahmemeldung ins Log
+
+
+def test_finish_pr_frame_leere_dateien_rufen_gh_nicht_auf(monkeypatch, tmp_path):
+    monkeypatch.setattr(w, "WORKDIR", str(tmp_path))
+    (tmp_path / ".agent").mkdir()
+    (tmp_path / ".agent" / "frage.md").write_text("  \n", encoding="utf-8")
+    (tmp_path / ".agent" / "pr-body.md").write_text("", encoding="utf-8")
+    monkeypatch.setattr(w, "gh", lambda *a: (_ for _ in ()).throw(AssertionError(a)))
+    monkeypatch.setattr(w.subprocess, "run", _GitRecorder(ahead="0"))
+    monkeypatch.setattr(w, "auto_commit_uncommitted_changes", lambda *a: None)
+    assert _ECHTE_FINISH_PR_FRAME(5, "feature/issue-7") is True

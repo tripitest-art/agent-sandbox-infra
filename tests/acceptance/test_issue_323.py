@@ -87,7 +87,7 @@ def test_nacharbeit_vorlage_nur_wenn_das_review_den_text_anspricht(monkeypatch):
     _, task, n, _ = w.rework_job()
     assert n == 103
     assert "MARKER-VORLAGE-91c2" not in task
-    assert "gh pr edit 103" in task
+    assert "`.agent/pr-body.md`" in task
     assert w.agent_test_cmd() in task
 
     mit_text = "**Änderungen nötig**\n\n### Muss\n- `Closes #100` fehlt im PR-Text."

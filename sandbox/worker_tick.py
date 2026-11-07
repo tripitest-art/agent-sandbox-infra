@@ -1118,17 +1118,15 @@ def rework_job(done=frozenset(), skip: Callable[[str], bool] | None = None):
             task = f"""Du arbeitest ein Review ab (AGENTS.md, Worker, Schritt 8). Du bist Worker: {WORKER}.
 Run these steps sequentially and execute each one as a command:
 
-1. `gh pr checkout {n}` (you are then on the PR branch, not on main).
+1. You are already on the PR branch `{pr['headRefName']}` (the tick checked it out), not on main.
 2. Read the review below. Implement every „Muss“ item. „Kann“ items only if they are within the
    scope of issue #{issue_no}. Never modify files under tests/acceptance/.
-3. If the review asks for the PR text: write it to .git/pr-body.md following the template below,
-   with „Closes #{issue_no}“ and „Worker: {WORKER}“, then run:
-   `gh pr edit {n} --title "$(gh issue view {issue_no} --json title -q .title)" --body-file .git/pr-body.md`
+3. If the review asks for the PR text: write it to `.agent/pr-body.md` following the template below,
+   with „Closes #{issue_no}“ and „Worker: {WORKER}“. The tick sets it as the PR text.
 4. `{agent_test_cmd()}` must be completely green.
-5. Put all code changes into one commit, then `git push`. If the review only asks for the PR text,
-   there is no commit.
-6. Check with `git log -1 --oneline` and `gh pr view {n} --json title,body` that commit and text
-   arrived: the output must show your new title and text.
+5. Put all code changes into one commit. Do not push; the tick pushes. If the review only asks for
+   the PR text, there is no commit.
+6. Check with `git log -1 --oneline` that your commit is there.
 {ERROR_RULE.format(where=f"on PR #{n}")}
 Never approve or merge the PR yourself; the reviewer does that.
 
@@ -1170,14 +1168,14 @@ def text_fix_job(skip: Callable[[str], bool] | None = None):
         log(f"PR #{n}: Autofix fehlgeschlagen, Agentenauftrag als Rückfall.")
         task = f"""Im Text von PR #{n} (Issue #{issue_no}) fehlt: {", ".join(missing)}.
 Du bist Worker: {WORKER}. You only change the PR text, no code, no commit.
+You are already on the PR branch `{pr['headRefName']}` (the tick checked it out).
 Run these steps sequentially and execute each one as a command:
 
-1. Read `gh pr diff {n}` and `gh issue view {issue_no}`: what really changed and what was tested?
-2. Rewrite the whole PR text into .git/pr-body.md, following the template below, with
+1. Read `git diff --stat origin/main...HEAD` and `git log origin/main..HEAD --oneline`: what really
+   changed and what was tested?
+2. Rewrite the whole PR text into `.agent/pr-body.md`, following the template below, with
    „Closes #{issue_no}“ under „Was und warum“ and „Worker: {WORKER}“ under
-   „Umgesetzt von / Review durch“.
-3. `gh pr edit {n} --title "$(gh issue view {issue_no} --json title -q .title)" --body-file .git/pr-body.md`
-4. Check with `gh pr view {n} --json title,body` that your new text is there.
+   „Umgesetzt von / Review durch“. The tick sets it as the PR text.
 {ERROR_RULE.format(where=f"on PR #{n}")}
 
 {template_rules()}"""
@@ -4545,6 +4543,109 @@ def prepare_issue_frame(issue_no: int) -> Path | None:
     return path
 
 
+_PR_BRANCH_RE = re.compile(r"feature/issue-\d+(-[A-Za-z0-9._-]+)?")
+
+
+def prepare_pr_frame(pr_no: int) -> str | None:
+    """Vor dem Agentenlauf einer Nacharbeit oder eines Text-Auftrags (nach prepare_workdir(),
+    ensure_pre_push_hook() und ablage_vorbereiten()): checkt den PR-Branch in WORKDIR aus (#410).
+
+    Der Agent hat seit #380 weder `gh` noch Push-Recht; also checkt der Takt aus, wie bei
+    `prepare_issue_frame`. Gibt es WORKDIR nicht, passiert nichts (None, kein gh- oder git-Aufruf).
+    Nur ein Worker-Branch wird ausgecheckt: der Name kommt aus dem PR und ginge sonst unge-
+    prüft als Argument an git. Rückgabe ist der Branchname, sonst None. Wirft nie."""
+    if not os.path.isdir(WORKDIR):
+        return None
+    try:
+        data = gh("pr", "view", str(pr_no), "--json", "headRefName")
+        branch = data["headRefName"] if isinstance(data, dict) else ""
+        if not isinstance(branch, str) or not _PR_BRANCH_RE.fullmatch(branch):
+            log(f"pr{pr_no}: kein Worker-Branch, Nacharbeit übersprungen.")
+            return None
+        subprocess.run(["git", "fetch", "-q", "origin", branch], cwd=WORKDIR, env=ENV, check=True)
+        subprocess.run(["git", "checkout", "-qfB", branch, f"origin/{branch}"], cwd=WORKDIR, env=ENV,
+                       check=True, **agent_run_kwargs())
+        return branch
+    except Exception as e:
+        log(f"pr{pr_no}: PR-Branch nicht ausgecheckt ({type(e).__name__}).")
+        return None
+
+
+def _ablage_inhalt_pfad(name: str) -> str | None:
+    """Pfad von `.agent/<name>`, wenn die Datei existiert und nicht leer ist, sonst None."""
+    pfad = agent_ablage(name)
+    try:
+        with open(pfad, encoding="utf-8") as f:
+            return pfad if f.read().strip() else None
+    except OSError:
+        return None
+
+
+def finish_pr_frame(pr_no: int, branch: str) -> bool:
+    """Nach dem Agentenlauf einer Nacharbeit oder eines Text-Auftrags (#410): der Takt übernimmt, was
+    der Agent nicht mehr selbst darf. Reihenfolge: Rückfrage als PR-Kommentar, uncommittete Änderungen
+    sichern, neue Commits pushen, PR-Text aus `.agent/pr-body.md` setzen.
+
+    Alle Schritte laufen, auch wenn ein früherer scheiterte (ein abgelehnter Push soll den PR-Text
+    nicht verhindern). Rückgabe True, wenn kein Schritt scheiterte; ein entfallender Schritt ist kein
+    Fehler. Die Ausgabe des Push-Befehls kommt nie ins Log (Regel 5), nur Namen roter Tests. Wirft nie."""
+    ok = True
+
+    pfad = _ablage_inhalt_pfad("frage.md")
+    if pfad:
+        try:
+            gh("pr", "comment", str(pr_no), "--body-file", pfad)
+        except Exception as e:
+            ok = False
+            log(f"pr{pr_no}: Rückfrage nicht gepostet ({type(e).__name__}).")
+        else:
+            try:
+                os.remove(pfad)
+            except OSError as e:
+                # Gepostet ist gepostet; ein zweiter Kommentar wäre schlimmer als eine liegen bleibende Datei.
+                log(f"pr{pr_no}: Rückfrage gepostet, Datei bleibt liegen ({type(e).__name__}).")
+
+    m = re.match(r"feature/issue-(\d+)", branch)
+    try:
+        auto_commit_uncommitted_changes(WORKDIR, ENV, int(m.group(1)) if m else 0)
+    except Exception as e:
+        ok = False
+        log(f"pr{pr_no}: uncommittete Änderungen nicht gesichert ({type(e).__name__}).")
+
+    try:
+        voraus = subprocess.run(["git", "rev-list", "--count", f"origin/{branch}..HEAD"], cwd=WORKDIR,
+                                env=ENV, check=True, capture_output=True, text=True)
+        if int((voraus.stdout or "0").strip() or 0) > 0:
+            res = subprocess.run(["git", "push", "origin", f"HEAD:{branch}"], cwd=WORKDIR, env=push_env(),
+                                 check=False, capture_output=True, text=True)
+            if res.returncode != 0:
+                ok = False
+                rote = rote_tests_aus_push_ausgabe((res.stdout or "") + (res.stderr or ""))
+                if rote:
+                    log(f"pr{pr_no}: Push abgelehnt, rote Tests: {', '.join(rote)}")
+                else:
+                    log(f"pr{pr_no}: Push abgelehnt, keine FAILED-Zeile in der Push-Ausgabe.")
+                alarm(f"pr{pr_no}", "Push abgelehnt (Tests rot oder GitHub-Fehler)")
+    except Exception as e:
+        ok = False
+        log(f"pr{pr_no}: Push fehlgeschlagen ({type(e).__name__}).")
+
+    pfad = _ablage_inhalt_pfad("pr-body.md")
+    if pfad:
+        try:
+            gh("pr", "edit", str(pr_no), "--body-file", pfad)
+        except Exception as e:
+            ok = False
+            log(f"pr{pr_no}: PR-Text nicht gesetzt ({type(e).__name__}).")
+        else:
+            log(f"PR #{pr_no}: PR-Text aus .agent/pr-body.md übernommen.")
+            try:
+                os.remove(pfad)
+            except OSError as e:
+                log(f"pr{pr_no}: PR-Text gesetzt, Datei bleibt liegen ({type(e).__name__}).")
+    return ok
+
+
 def main() -> int:
     global LAST_AGENT_ERROR, LAST_OPENED_PR
     global AGENT_INFRA_FEHLER
@@ -4727,6 +4828,17 @@ def main() -> int:
         ensure_pre_push_hook()   # #68: vor dem Agenten, damit schon sein erster Push geprüft wird
         if os.path.isdir(WORKDIR):
             ablage_vorbereiten()   # #409: leere Ablage .agent/, nie in git status
+        pr_branch = None
+        if pr_no is not None and os.path.isdir(WORKDIR):
+            # #410: Der Agent hat kein gh und kein Push-Recht; der Takt checkt den PR-Branch aus
+            # und pusht nach dem Lauf. Ohne Branch läuft kein Agent und der Versuch zählt nicht.
+            pr_branch = prepare_pr_frame(pr_no)
+            if pr_branch is None:
+                state[skey] = max(0, state.get(skey, 0) - 1)
+                save_state(state)
+                log(f"{skey}: PR-Branch nicht ausgecheckt, Versuch zählt nicht.")
+                slot_status("idle", project=PROJECT)
+                return 0
         if n is not None and os.path.isdir(WORKDIR):
             # #234: Branch und Akzeptanztest-Commit legt der deterministische Rahmen aus
             # worker_frame.py an; ohne Akzeptanztest-Block startet kein Agent. Gibt es WORKDIR
@@ -4847,6 +4959,8 @@ def main() -> int:
         # Nicht still scheitern (Regel 7): Das Modell meldet auch „fertig“, wenn es nichts getan hat.
         if key.startswith("issue"):
             check_issue_result(key)
+        if pr_no is not None and pr_branch is not None:
+            finish_pr_frame(pr_no, pr_branch)   # #410: Rückfrage, Push, PR-Text; wirft nie
         if pr_no is not None:
             view = gh("pr", "view", str(pr_no), "--json", "headRefOid,headRefName,title,body")
             after = pr_snapshot(view)
