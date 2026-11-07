@@ -85,6 +85,10 @@ def _repo_workdir(monkeypatch, tmp_path):
     # pusht und setzt den PR-Text. Nie echter git- oder GitHub-Verkehr aus einem Test heraus.
     monkeypatch.setattr(w, "prepare_pr_frame", lambda pr_no: "feature/issue-100-camelot-distance")
     monkeypatch.setattr(w, "finish_pr_frame", lambda *a: True)
+    # #413 / #391: auto_commit_uncommitted_changes committet in WORKDIR, in Tests dieses Repo.
+    # Der Fake verhindert echte Commits und Index-Änderungen; Tests der Funktion selbst nutzen
+    # `_ECHTE_AUTO_COMMIT` mit eigenem Fake für w.subprocess.run.
+    monkeypatch.setattr(w, "auto_commit_uncommitted_changes", lambda workdir, env, n: None)
 
 
 _ECHTE_ABLAGE_VORBEREITEN = w.ablage_vorbereiten  # vor dem Autouse-Fixture gesichert (#409)
@@ -96,6 +100,7 @@ _ECHTE_PREPARE_PR_FRAME = w.prepare_pr_frame  # vor dem Autouse-Fixture gesicher
 _ECHTE_FINISH_PR_FRAME = w.finish_pr_frame  # vor dem Autouse-Fixture gesichert (#410)
 _ECHTE_OPEN_PR = w.open_pr  # vor dem Autouse-Fixture gesichert (#172)
 _ECHTE_VERWAISTE_MELDEN = w.verwaiste_melden  # vor dem Autouse-Fixture gesichert (#183)
+_ECHTE_AUTO_COMMIT = w.auto_commit_uncommitted_changes  # vor dem Autouse-Fixture gesichert (#413)
 
 
 def _good_body(issue_no=100):
@@ -3891,7 +3896,7 @@ def test_auto_commit_uncommitted_changes_committet_bei_aenderungen(monkeypatch, 
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(w.subprocess, "run", fake_run)
-    w.auto_commit_uncommitted_changes("/fake/dir", {}, 391)
+    _ECHTE_AUTO_COMMIT("/fake/dir", {}, 391)
     assert ["git", "status", "--porcelain"] in commands
     assert ["git", "add", "-A"] in commands
     assert ["git", "commit", "-m", "Umsetzung Issue #391"] in commands
@@ -3908,7 +3913,7 @@ def test_auto_commit_uncommitted_changes_ueberspringt_bei_sauberem_tree(monkeypa
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(w.subprocess, "run", fake_run)
-    w.auto_commit_uncommitted_changes("/fake/dir", {}, 391)
+    _ECHTE_AUTO_COMMIT("/fake/dir", {}, 391)
     assert commands == [["git", "status", "--porcelain"]]
     out = capsys.readouterr().out
     assert out == ""
@@ -3924,7 +3929,7 @@ def test_auto_commit_uncommitted_changes_loggt_fehler_bei_git_crash(monkeypatch,
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(w.subprocess, "run", fake_run)
-    w.auto_commit_uncommitted_changes("/fake/dir", {}, 391)
+    _ECHTE_AUTO_COMMIT("/fake/dir", {}, 391)
     out = capsys.readouterr().out
     assert "git add fehlgeschlagen (Exit 1): error: unable to add" in out
 
@@ -3935,7 +3940,7 @@ def test_auto_commit_uncommitted_changes_loggt_os_error(monkeypatch, capsys):
         raise FileNotFoundError("No such file or directory: 'git'")
 
     monkeypatch.setattr(w.subprocess, "run", fake_run)
-    w.auto_commit_uncommitted_changes("/fake/dir", {}, 391)
+    _ECHTE_AUTO_COMMIT("/fake/dir", {}, 391)
     out = capsys.readouterr().out
     assert "Auto-Commit nicht ausführbar (FileNotFoundError)" in out
 
@@ -4336,3 +4341,13 @@ def test_finish_pr_frame_leere_dateien_rufen_gh_nicht_auf(monkeypatch, tmp_path)
     monkeypatch.setattr(w.subprocess, "run", _GitRecorder(ahead="0"))
     monkeypatch.setattr(w, "auto_commit_uncommitted_changes", lambda *a: None)
     assert _ECHTE_FINISH_PR_FRAME(5, "feature/issue-7") is True
+
+
+def test_autouse_fixture_ersetzt_auto_commit_ohne_subprocess(monkeypatch):
+    """#413: Im Fixture ist auto_commit_uncommitted_changes ein Fake; ein Aufruf berührt kein git."""
+    def kein_git(*a, **k):
+        pytest.fail("auto_commit_uncommitted_changes darf im Test kein subprocess.run aufrufen")
+
+    monkeypatch.setattr(w.subprocess, "run", kein_git)
+    assert w.auto_commit_uncommitted_changes is not _ECHTE_AUTO_COMMIT
+    assert w.auto_commit_uncommitted_changes("/gibt/es/nicht", {}, 7) is None
