@@ -36,7 +36,10 @@ Label `review-anfordern`, zu dem es kein Worker-Issue gibt, hat keinen Vertrag: 
 PR-Text („Merge-Modus: automatisch“), sonst liegt er nach dem Review bei Stephan.
 Nach dem geposteten Review setzt der Takt auf den geprüften Commit den Status `review`
 (success bei „Freigegeben“, failure bei „Änderungen nötig“), damit Stephan ihn in `main-schutz`
-als Pflicht-Check eintragen kann; ohne Review bleibt der Status aus.
+als Pflicht-Check eintragen kann; ohne Review bleibt der Status aus. Damit der Pflicht-Check
+nie fehlt, setzt review_status_abdecken() am Ende jedes Takts für jeden offenen PR-Head einen
+Status: `pending`, solange ein Kandidat noch geprüft wird (das blockiert den Merge bis zum
+Urteil), sonst `success` mit dem Grund im Text.
 Was der Takt nicht selbst lösen kann (Merge-Modus manuell, zu viele Runden, unbrauchbare Antworten,
 Diff zu groß, Merge scheitert dauerhaft), bekommt das Label `braucht-stephan` und einen Kommentar;
 im Log steht „⚠ Stephan:“ (HA kann darauf eine Benachrichtigung auslösen).
@@ -906,18 +909,14 @@ def gh_http_hinweis(code: int | None) -> str:
     return _HTTP_HINWEISE.get(code, "") if code is not None else ""
 
 
-def post_review_status(sha: str, verdict: str) -> bool:
-    """Setzt den Commit-Status 'review' für `sha`: `gh api repos/<REPO>/statuses/<sha>` mit
-    -f state=…, -f context=review, -f description=…. True, wenn gesetzt; ohne Status-Urteil
-    (review_status -> None) False ohne Aufruf. Ein Fehler bricht den Takt nie ab: Log-Zeile
-    '⚠ Stephan: Status review für <sha[:7]> nicht gesetzt (<ExceptionName>)', kennt der Fehler
-    einen HTTP-Statuscode aus dem gh-stderr, zusätzlich ', HTTP <Code>' und, wenn bekannt, ein
-    fester Hinweis zur Ursache (gh_http_hinweis); Rückgabe False.
+def post_status(sha: str, state: str, description: str) -> bool:
+    """Setzt den Commit-Status 'review' für `sha` auf `state` mit `description`: `gh api
+    repos/<REPO>/statuses/<sha>` mit -f state=…, -f context=review, -f description=….
+    True, wenn gesetzt. Ein Fehler bricht den Takt nie ab: Log-Zeile '⚠ Stephan: Status review für
+    <sha[:7]> nicht gesetzt (<ExceptionName>)', kennt der Fehler einen HTTP-Statuscode aus dem
+    gh-stderr, zusätzlich ', HTTP <Code>' und, wenn bekannt, ein fester Hinweis zur Ursache
+    (gh_http_hinweis); Rückgabe False.
     Die Meldung enthält nie den Fehlertext von gh (Regel 5: keine Zugangsdaten in Logs)."""
-    res = review_status(verdict)
-    if res is None:
-        return False
-    state, description = res
     try:
         gh_text("api", f"repos/{REPO}/statuses/{sha}", "-f", f"state={state}",
                 "-f", "context=review", "-f", f"description={description}", repo=False)
@@ -930,6 +929,69 @@ def post_review_status(sha: str, verdict: str) -> bool:
         log(f"⚠ Stephan: Status review für {sha[:7]} nicht gesetzt ({type(exc).__name__}{zusatz}){hinweis}")
         audit("stephan_alarm", pr="?", sha=sha[:7], reason=f"Status review nicht gesetzt: {type(exc).__name__}{zusatz}{hinweis}")
         return False
+
+
+def post_review_status(sha: str, verdict: str) -> bool:
+    """Setzt den Commit-Status 'review' für `sha` aus dem Urteil (siehe review_status);
+    ohne Status-Urteil (review_status -> None) False ohne Aufruf. Sonst wie post_status."""
+    res = review_status(verdict)
+    if res is None:
+        return False
+    return post_status(sha, *res)
+
+
+# Zeitgrenze für den Status `pending`: ohne Urteil bis dahin gilt der Head als „nicht geprüft“
+# und bekommt `success` mit Hinweis. Sonst sperrt ein hängender Review Merges dauerhaft.
+STATUS_WAIT_MIN = int(agent_settings.value("REVIEW_STATUS_WAIT_MIN", 120))
+REVIEW_CONTEXT = "review"   # Name des Commit-Status, der als Pflicht-Check eingetragen wird
+
+
+def review_status_abdecken(prs: list[dict], labels_of) -> int:
+    """Gibt jedem offenen PR-Head einen Commit-Status `review`; Rückgabe: Anzahl gesetzter Status.
+
+    Ein Kandidat, den der Takt noch prüfen wird, bekommt `pending`: das blockiert den Merge,
+    solange kein Urteil da ist — am 16.11. wurden #571, #577 und #578 vor bzw. während des Reviews
+    gemergt, weil ihr Head gar keinen Status hatte. Alles, was der Takt nicht prüft (Entwurf,
+    fremder Branch, Issue ohne Agenten-Label, aufgegeben, Zeitüberschreitung), bekommt `success`
+    mit dem Grund im Text: ein Pflicht-Check, der nie grün wird, sperrt Merges dauerhaft.
+    Idempotent: steht für den Head schon ein Status `review` (oder hat dieser Takt das Urteil
+    gerade gepostet), passiert nichts.
+
+    shortcut: nur die ersten PR_LIST_LIMIT offenen PRs bekommen einen Status; bei mehr offenen
+    PRs die Grenze erhöhen."""
+    state = load_state()
+    gesetzt = 0
+    for pr in prs:
+        sha = pr.get("headRefOid") or ""
+        n = pr.get("number")
+        if not sha or not n or pr.get("isCrossRepository"):
+            continue
+        key = f"pr{n}@{sha}"
+        if key in state.get("gepostet", []):
+            continue   # Urteil dieses Takts; der Rollup kann noch hinterherhinken
+        if any(e.get("context") == REVIEW_CONTEXT for e in pr.get("statusCheckRollup") or []):
+            continue   # dieser Head ist bereits bewertet
+        m = re.match(r"feature/issue-(\d+)", pr.get("headRefName") or "")
+        issue_no = int(m.group(1)) if m else None
+        requested = REVIEW_REQUEST_LABEL in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]
+        zeiten = letzter_commit_zeit(pr)
+        if pr.get("isDraft"):
+            zustand, text = "success", "Nicht geprüft: Entwurf"
+        elif not pr.get("commits") or (issue_no is None and not requested):
+            zustand, text = "success", "Nicht geprüft: kein Worker-PR (kein feature/issue-<N>, kein review-anfordern)"
+        elif issue_no is not None and not requested and not set(LABELS) & set(labels_of(issue_no)):
+            zustand, text = "success", "Nicht geprüft: Issue ohne Agenten-Label"
+        elif key in state.get("erledigt", []):
+            zustand, text = "success", "Nicht geprüft: Review abgeschlossen oder aufgegeben (siehe Kommentar)"
+        elif zeiten is not None and (_now() - zeiten) >= timedelta(minutes=STATUS_WAIT_MIN):
+            zustand, text = "success", f"Nicht geprüft: kein Urteil nach {STATUS_WAIT_MIN} Minuten"
+            log(f"PR #{n}: ⚠ Stephan: seit {STATUS_WAIT_MIN} Minuten kein Review-Urteil auf {sha[:7]}, "
+                f"Status review auf success gesetzt (bitte von Hand prüfen).")
+        else:
+            zustand, text = "pending", "Review läuft"
+        if post_status(sha, zustand, text):
+            gesetzt += 1
+    return gesetzt
 
 
 def is_auto_merge(issue_body: str | None) -> bool:
@@ -1218,6 +1280,10 @@ def drop_acceptance_from_diff(diff: str, issue_no: int | None, issue_body: str |
 
 
 def _run_pr_review() -> int:
+    """Ein Takt: erst höchstens ein Review, danach ein Status `review` für jeden offenen PR-Head.
+
+    Die Status-Abdeckung läuft auch dann, wenn das Review abgebrochen wird: ein Pflicht-Check,
+    den es für einen Head nie gibt, lässt sich nicht als Pflicht eintragen und blockiert nichts."""
     state = load_state()
     prs = gh_json("pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT), "--json",
                   "number,title,body,headRefName,headRefOid,isCrossRepository,isDraft,labels,reviews,commits,statusCheckRollup")
@@ -1228,7 +1294,19 @@ def _run_pr_review() -> int:
             cache[n] = [l["name"] for l in gh_json("issue", "view", str(n), "--json", "labels")["labels"]]
         return cache[n]
 
-    pr = pick_pr(prs or [], state, labels_of)
+    try:
+        return _review_ein_pr(prs or [], state, labels_of)
+    finally:
+        if POST:   # ohne Posten kein Status: der Entwurfsbetrieb schreibt nur Dateien
+            try:
+                review_status_abdecken(prs or [], labels_of)
+            except Exception as exc:   # die Abdeckung darf den Takt nie beenden
+                log(f"⚠ Stephan: Status review nicht für alle Heads gesetzt ({type(exc).__name__}).")
+
+
+def _review_ein_pr(prs: list[dict], state: dict, labels_of) -> int:
+    """Prüft höchstens einen PR aus `prs`; Fortsetzung siehe _run_pr_review."""
+    pr = pick_pr(prs, state, labels_of)
     if not pr:
         return 0
     n, key = pr["number"], f"pr{pr['number']}@{pr['headRefOid']}"

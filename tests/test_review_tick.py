@@ -2114,3 +2114,76 @@ def test_abgebrochene_neu_starten_fehler_vormerkt_den_commit(monkeypatch, neusta
     assert state[r.NEUSTART_KEY] == [key]
     assert any(z.startswith("PR #7: Neustart des abgebrochenen Laufs 42051776176 fehlgeschlagen (")
                for z in neustart["logs"])
+
+
+LAUFENDE_CHECKS = [{"name": "tests", "status": "IN_PROGRESS", "conclusion": None}]
+
+
+def _status_sammler(monkeypatch, prs):
+    """gh_json liefert `prs`; gh_text protokolliert jeden gesetzten Commit-Status."""
+    status = []
+
+    def gh_json(*args):
+        if args[:2] == ("pr", "list"):
+            return prs
+        if args[:2] == ("issue", "view") and "labels" in args:
+            return {"labels": [{"name": "agent-qwen"}]}
+        if args[:2] == ("issue", "view"):
+            return {"number": 5, "title": "Das Issue", "body": "Betroffene Dateien: a.py"}
+        if args[:2] == ("pr", "view"):
+            return {"files": [{"path": "a.py", "additions": 3, "deletions": 0}], "state": "OPEN", "headRefOid": SHA}
+        raise AssertionError(args)
+
+    def gh_text(*args, **kw):
+        if args[:1] == ("api",):
+            status.append(args)
+        return "diff --git a/a.py b/a.py\n+x\n"
+
+    monkeypatch.setattr(r, "gh_json", gh_json)
+    monkeypatch.setattr(r, "gh_text", gh_text)
+    monkeypatch.setattr(r, "post_review", lambda n, t, flag="--comment": None)
+    monkeypatch.setattr(r, "repo_file", lambda p: "")
+    return status
+
+
+def test_kandidat_ohne_urteil_bekommt_sofort_pending_status(monkeypatch):
+    """Ein PR, dessen Checks noch laufen, bekommt sofort einen Status `review` (pending). Ohne ihn
+    ließ sich der PR wie #571 und #578 vor dem Review mergen, weil kein Pflicht-Check existierte."""
+    monkeypatch.setattr(r, "POST", True)
+    frisch = [{"committedDate": r._now().strftime("%Y-%m-%dT%H:%M:%SZ")}]
+    status = _status_sammler(monkeypatch, [_pr(statusCheckRollup=LAUFENDE_CHECKS, commits=frisch)])
+    r.run_once()
+    assert len(status) == 1
+    assert "state=pending" in status[0] and "context=review" in status[0]
+    assert f"repos/{r.REPO}/statuses/{SHA}" in status[0]
+
+
+def test_pr_ohne_worker_bezug_bekommt_success_mit_hinweis(monkeypatch):
+    """Was der Takt nie prüft (hier ein docs/-Branch), bekommt success mit dem Grund im Text —
+    ein Pflicht-Check, der nie läuft, sperrt den Merge dauerhaft."""
+    monkeypatch.setattr(r, "POST", True)
+    status = _status_sammler(monkeypatch, [_pr(headRefName="docs/readme")])
+    r.run_once()
+    assert len(status) == 1
+    assert "state=success" in status[0]
+    assert "description=Nicht geprüft: kein Worker-PR (kein feature/issue-<N>, kein review-anfordern)" in status[0]
+
+
+def test_vorhandener_review_status_wird_nicht_doppelt_gesetzt(monkeypatch):
+    """Idempotent: steht für den Head schon ein Status `review`, postet der nächste Takt nichts."""
+    monkeypatch.setattr(r, "POST", True)
+    rollup = LAUFENDE_CHECKS + [{"__typename": "StatusContext", "context": "review", "state": "SUCCESS"}]
+    status = _status_sammler(monkeypatch, [_pr(statusCheckRollup=rollup)])
+    r.run_once()
+    assert status == []
+
+
+def test_haengender_kandidat_bekommt_nach_der_wartezeit_success(monkeypatch):
+    """Ohne Urteil nach STATUS_WAIT_MIN bekommt der Head success mit Hinweis: ein hängender Review
+    darf keine Merges dauerhaft sperren."""
+    monkeypatch.setattr(r, "POST", True)
+    alt = [{"committedDate": "2026-01-01T00:00:00Z"}]
+    status = _status_sammler(monkeypatch, [_pr(statusCheckRollup=LAUFENDE_CHECKS, commits=alt)])
+    r.run_once()
+    assert len(status) == 1 and "state=success" in status[0]
+    assert f"description=Nicht geprüft: kein Urteil nach {r.STATUS_WAIT_MIN} Minuten" in status[0]
