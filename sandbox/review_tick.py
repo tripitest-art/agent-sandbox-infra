@@ -985,7 +985,7 @@ def review_status_abdecken(prs: list[dict], labels_of) -> int:
             zustand, text = "success", "Nicht geprüft: Review abgeschlossen oder aufgegeben (siehe Kommentar)"
         elif zeiten is not None and (_now() - zeiten) >= timedelta(minutes=STATUS_WAIT_MIN):
             zustand, text = "success", f"Nicht geprüft: kein Urteil nach {STATUS_WAIT_MIN} Minuten"
-            log(f"PR #{n}: ⚠ Stephan: seit {STATUS_WAIT_MIN} Minuten kein Review-Urteil auf {sha[:7]}, "
+            log(f"⚠ Stephan: PR #{n} seit {STATUS_WAIT_MIN} Minuten ohne Urteil auf {sha[:7]}, "
                 f"Status review auf success gesetzt (bitte von Hand prüfen).")
         else:
             zustand, text = "pending", "Review läuft"
