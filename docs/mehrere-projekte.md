@@ -33,7 +33,7 @@ eine **Projektliste**. Das zweite Projekt ist diese Infrastruktur selbst
    "hotspot": "sandbox/worker_tick.py", "hotspot_label": "berührt-worker_tick.py",
    "review_skill": "skills/agent-sandbox-review/SKILL.md",
    "auto_merge": true,
-   "manual_paths": ["AGENTS.md", ".github/*", "tests/acceptance/*", "skills/*",
+   "manual_paths": ["AGENTS.md", ".github/*", ".claude/*", "tests/acceptance/*", "skills/*",
                     "docs/main-schutz.ruleset.json"]}
 ]}
 ```
@@ -125,8 +125,9 @@ Voraussetzung ist der Vertrag aus sc-digger:
 
 Die Skripte steuern die Agenten, die sie ändern. Deshalb gilt (siehe `AGENTS.md`, Regeln 4 und 6):
 
-- `auto_merge: true` mit `manual_paths` für die Aufsichtsdateien (`AGENTS.md`, `.github/*`,
-  `tests/acceptance/*`, `skills/*`, `docs/main-schutz.ruleset.json`): Der Takt mergt nach „Freigegeben“
+- `auto_merge: true` mit `manual_paths` für die Aufsichtsdateien (`AGENTS.md`, `.github/*`, `.claude/*`,
+  `tests/acceptance/*`, `skills/*`, `docs/main-schutz.ruleset.json`; `.claude/*` steuert Agenten, Skills
+  und Hooks der Claude-Sitzungen in diesem Repo, ist also Aufsicht): Der Takt mergt nach „Freigegeben“
   alle PRs ohne Treffer bei „Merge-Modus: automatisch“; Treffer gehen an Stephan. Mit `auto_merge: false`
   prüft und mergt Stephan jeden PR.
 - Kein Agent deployt oder führt `install.sh`, `systemctl` oder Befehle auf dem Server aus. Ein Merge
