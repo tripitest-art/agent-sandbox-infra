@@ -26,7 +26,9 @@ import json  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 
-_projekte = os.path.join(tempfile.mkdtemp(prefix="sandbox-tests-"), "agent-projects.json")
+_projekte_dir = tempfile.mkdtemp(prefix="sandbox-tests-")
+atexit.register(shutil.rmtree, _projekte_dir, ignore_errors=True)   # kein Verzeichnis je Testlauf in /tmp liegen lassen
+_projekte = os.path.join(_projekte_dir, "agent-projects.json")
 with open(_projekte, "w", encoding="utf-8") as _fh:
     json.dump({"projects": [{"name": "sc-digger", "repo": "tripitest-art/sc-digger",
                              "workdir": "/kein/klon/sc-digger"}]}, _fh)
@@ -38,6 +40,7 @@ os.environ["AGENT_PROJECTS"] = _projekte
 # „idle“, während `w1` arbeitete, und `/root/audit.jsonl` enthielt 172 Fake-Läufe von „Issue 7“). Darum ein
 # eigenes Verzeichnis je Testlauf, bevor die Skripte ihre Pfade beim Import lesen.
 _lauf = tempfile.mkdtemp(prefix="sandbox-run-")
+atexit.register(shutil.rmtree, _lauf, ignore_errors=True)   # wie sandbox-bin-*: beim Prozessende wieder entfernen
 os.environ["SLOT_DIR"] = os.path.join(_lauf, "slots")
 os.makedirs(os.environ["SLOT_DIR"])
 os.environ["AUDIT_LOG"] = os.path.join(_lauf, "audit.jsonl")
