@@ -639,6 +639,65 @@ def test_build_status_baut_vollstaendigen_zustand():
     assert res["budgets"]["worker"]["spend"] == 1.0
 
 
+def test_find_stuck_issue_ohne_pr_nach_schwelle():
+    now = d.datetime(2026, 11, 19, 12, 0, 0, tzinfo=d.timezone.utc)
+    issues = [
+        {"number": 1, "title": "alt", "labels": [{"name": "in-arbeit"}],
+         "updatedAt": "2026-11-18T11:00:00Z"},
+        {"number": 2, "title": "frisch", "labels": [{"name": "in-arbeit"}],
+         "updatedAt": "2026-11-19T02:00:00Z"},
+        {"number": 3, "title": "mit PR", "labels": [{"name": "in-arbeit"}],
+         "updatedAt": "2026-11-17T12:00:00Z"},
+        {"number": 4, "title": "kaputt", "labels": [{"name": "in-arbeit"}],
+         "updatedAt": "unlesbar"},
+    ]
+    prs = [{"number": 9, "headRefName": "feature/issue-3-thema"}]
+    assert d.find_stuck(issues, prs, now) == [
+        {"art": "in-arbeit-ohne-pr", "number": 1, "title": "alt", "seit_h": 25},
+    ]
+
+
+def test_find_stuck_pr_ohne_review_und_entwurf_ausgenommen():
+    now = d.datetime(2026, 11, 19, 12, 0, 0, tzinfo=d.timezone.utc)
+    prs = [
+        {"number": 40, "title": "offen", "url": "https://example.invalid/pull/40",
+         "createdAt": "2026-11-16T12:00:00Z", "reviews": [], "isDraft": False},
+        {"number": 41, "title": "reviewt", "createdAt": "2026-11-01T12:00:00Z",
+         "reviews": [{"state": "COMMENTED"}], "isDraft": False},
+        {"number": 42, "title": "entwurf", "createdAt": "2026-11-01T12:00:00Z",
+         "reviews": [], "isDraft": True},
+    ]
+    assert d.find_stuck([], prs, now) == [
+        {"art": "pr-ohne-review", "number": 40, "title": "offen",
+         "url": "https://example.invalid/pull/40", "seit_h": 72},
+    ]
+
+
+def test_find_stuck_naive_zeit_ist_utc_und_fehler_wirft_nicht():
+    now = d.datetime(2026, 11, 19, 12, 0, 0)
+    prs = [
+        {"number": 1, "title": "a", "url": "", "createdAt": "2026-11-16T12:00:00Z",
+         "reviews": [], "isDraft": False},
+        {"number": 2, "title": "b", "url": "", "createdAt": None, "reviews": []},
+    ]
+    assert [e["number"] for e in d.find_stuck([], prs, now)] == [1]
+
+
+def test_summarize_project_traegt_haengende_und_seite_rendert_sie():
+    p = d.projects.Project(name="proj", repo="org/proj", workdir="/root/proj")
+    now = d.datetime(2026, 11, 19, 12, 0, 0, tzinfo=d.timezone.utc)
+    issues = [{"number": 1, "title": "alt", "labels": [{"name": "in-arbeit"}],
+               "updatedAt": "2026-11-17T12:00:00Z"}]
+    assert d.summarize_project(p, issues, [])["haengend"] == []
+    assert [e["number"] for e in d.summarize_project(p, issues, [], now)["haengend"]] == [1]
+
+    start = d.PAGE.index("const hg=")
+    js = d.PAGE[start:d.PAGE.index("const t=$(\"projekte\")", start)]
+    assert "seit \"+x.seit_h+\" h" in js and "Nichts hängt" in js
+    assert 'id="haengend"' in d.PAGE
+    assert d.PAGE.index('id="stephan"') < d.PAGE.index('id="haengend"')
+
+
 
 # --- Takt wecken -------------------------------------------------------------------------------
 
