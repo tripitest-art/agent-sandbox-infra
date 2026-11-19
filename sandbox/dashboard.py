@@ -84,6 +84,8 @@ PAUSE_FILE: str = os.environ.get("PIPELINE_PAUSE_FILE", "/run/pipeline-pause")
 # Status- und Budget-Konstanten
 STATES = ("bereit", "in-arbeit", "blockiert", "entwurf")
 WAITING_LABEL = "braucht-stephan"
+STUCK_ISSUE_HOURS = 24
+STUCK_PR_HOURS = 48
 RED_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"})
 BUDGET_KEYS = (("LITELLM_WORKER_KEY", "worker"),
                ("LITELLM_REVIEW_KEY", "reviewer"),
@@ -380,8 +382,73 @@ def _pr_state(pr: dict) -> str:
     return "laufend" if running else "gruen"
 
 
-def summarize_project(p: projects.Project, issues: list[dict], prs: list[dict]) -> dict:
-    """Zustand eines Projekts: Issues je Zustandslabel, PR-Zahlen und wartende PRs."""
+def _parse_ts(value: object) -> datetime | None:
+    """GitHub-Zeitstempel (`2026-10-16T09:00:00Z`) als bewusste UTC-Zeit, sonst None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
+
+
+def find_stuck(issues: list[dict], prs: list[dict], now: datetime, *,
+               issue_hours: float = STUCK_ISSUE_HOURS,
+               pr_hours: float = STUCK_PR_HOURS) -> list[dict]:
+    """Hängende Fälle, sortiert nach (art, number). Einträge:
+      {"art": "in-arbeit-ohne-pr", "number": int, "title": str, "seit_h": int}
+      {"art": "pr-ohne-review",   "number": int, "title": str, "url": str, "seit_h": int}
+    - Issue: Label "in-arbeit", kein PR in prs mit headRefName "feature/issue-<number>" oder
+      "feature/issue-<number>-…", und now - updatedAt > issue_hours.
+    - PR: isDraft nicht wahr, reviews leer oder fehlend, now - createdAt > pr_hours.
+    seit_h = volle Stunden seit updatedAt bzw. createdAt (abgerundet).
+    Zeitstempel im GitHub-Format "2026-10-16T09:00:00Z"; fehlt oder ist er unlesbar, zählt der
+    Eintrag nicht als hängend. now ohne tzinfo gilt als UTC. Wirft nie."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    def alter_h(value: object) -> int | None:
+        stamp = _parse_ts(value)
+        if stamp is None:
+            return None
+        return int((now - stamp).total_seconds() // 3600)
+
+    branches = {pr.get("headRefName") for pr in prs}
+    treffer: list[dict] = []
+    for issue in issues:
+        if "in-arbeit" not in _labels(issue):
+            continue
+        number = issue.get("number")
+        if not isinstance(number, int):
+            continue
+        genau = f"feature/issue-{number}"
+        if any(branch == genau or (isinstance(branch, str) and branch.startswith(genau + "-"))
+               for branch in branches):
+            continue
+        seit = alter_h(issue.get("updatedAt"))
+        if seit is not None and seit > issue_hours:
+            treffer.append({"art": "in-arbeit-ohne-pr", "number": number,
+                            "title": issue.get("title", ""), "seit_h": seit})
+    for pr in prs:
+        if pr.get("isDraft"):
+            continue
+        if pr.get("reviews"):
+            continue
+        number = pr.get("number")
+        if not isinstance(number, int):
+            continue
+        seit = alter_h(pr.get("createdAt"))
+        if seit is not None and seit > pr_hours:
+            treffer.append({"art": "pr-ohne-review", "number": number,
+                            "title": pr.get("title", ""), "url": pr.get("url", ""), "seit_h": seit})
+    treffer.sort(key=lambda e: (e["art"], e["number"]))
+    return treffer
+
+
+def summarize_project(p: projects.Project, issues: list[dict], prs: list[dict],
+                      now: datetime | None = None) -> dict:
+    """Zustand eines Projekts: Issues je Zustandslabel, PR-Zahlen, wartende und hängende Fälle."""
     counts = {state: 0 for state in STATES}
     for issue in issues:
         for state in STATES:
@@ -403,6 +470,7 @@ def summarize_project(p: projects.Project, issues: list[dict], prs: list[dict]) 
         "repo": p.repo,
         "issues": counts,
         "prs": {"offen": len(prs), "rot": rot, "laufend": laufend, "wartet_auf_stephan": waiting},
+        "haengend": find_stuck(issues, prs, now) if now is not None else [],
     }
 
 
@@ -432,7 +500,7 @@ def build_status(items: list[projects.Project], fetch: Callable[[str, str], list
         except Exception as exc:   # noqa: BLE001 — ein kaputtes Projekt darf die anderen nicht stoppen
             projekte.append({"name": p.name, "repo": p.repo, "fehler": type(exc).__name__})
             continue
-        summary = summarize_project(p, issues, prs)
+        summary = summarize_project(p, issues, prs, now)
         projekte.append(summary)
         braucht_stephan += len(summary["prs"]["wartet_auf_stephan"])
     return {
@@ -447,10 +515,11 @@ def _gh_fetch(kind: str, repo: str) -> list[dict]:
     """Offene Issues (Label worker-task) bzw. PRs eines Repos über `gh` — nur lesend."""
     if kind == "issues":
         args = ["issue", "list", "--repo", repo, "--state", "open", "--label", "worker-task",
-                "--json", "number,title,labels", "--limit", "200"]
+                "--json", "number,title,labels,updatedAt", "--limit", "200"]
     else:
         args = ["pr", "list", "--repo", repo, "--state", "open",
-                "--json", "number,title,url,isDraft,labels,statusCheckRollup", "--limit", "100"]
+                "--json", "number,title,url,isDraft,labels,statusCheckRollup,createdAt,headRefName,reviews",
+                "--limit", "100"]
     out = subprocess.run(["gh", *args], capture_output=True, text=True, check=True)
     text = out.stdout.strip()
     return json.loads(text) if text else []
@@ -859,6 +928,7 @@ select.setting-ctrl:focus{border-color:var(--blue)}
 <h2>Worker-Slots</h2><div class="grid" id="slots"></div>
 <h2 id="wartet-titel" style="display:none">Wartet</h2><div class="grid" id="wartet"></div>
 <h2>Braucht Stephan</h2><div id="stephan"></div>
+<h2>Hängt</h2><div id="haengend"></div>
 <h2>Projekte</h2><div class="table-wrap"><table id="projekte"></table></div>
 <h2>Reviews und Merges</h2><div class="table-wrap"><table id="statistik"></table></div>
 <h2>Token je Agentenlauf</h2><div class="table-wrap"><table id="token"></table></div>
@@ -1011,6 +1081,13 @@ function render(s){
  $("stephan").replaceChildren(...(st.length?st.map(x=>{const d=el("div","card");
   const a=el("a",null,"#"+x.number+" "+x.title);a.href=x.url;a.rel="noopener";
   d.append(el("span","mut",x.projekt+" · "),a);return d}):[el("span","mut","Nichts offen")]));
+ const hg=s.projekte.flatMap(p=>(p.haengend||[]).map(x=>({...x,projekt:p.name})));
+ $("haengend").replaceChildren(...(hg.length?hg.map(x=>{const d=el("div","card");
+  const art=x.art==="pr-ohne-review"?"PR ohne Review":"in Arbeit ohne PR";
+  d.append(el("span","mut",x.projekt+" · "+art+" · "));
+  if(x.url){const a=el("a",null,"#"+x.number+" "+x.title);a.href=x.url;a.rel="noopener";d.append(a)}
+  else d.append(el("b",null,"#"+x.number+" "+x.title));
+  d.append(el("span","mut"," · seit "+x.seit_h+" h"));return d}):[el("span","mut","Nichts hängt")]));
  const t=$("projekte");t.replaceChildren();
  const h=el("tr");["Projekt","bereit","in Arbeit","blockiert","Entwurf","PRs","rot","laufend"].forEach(x=>h.append(el("th",null,x)));t.append(h);
  s.projekte.forEach(p=>{const r=el("tr");r.append(el("td",null,p.name));
