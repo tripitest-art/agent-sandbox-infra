@@ -955,7 +955,9 @@ def review_status_abdecken(prs: list[dict], labels_of) -> int:
     fremder Branch, Issue ohne Agenten-Label, aufgegeben, Zeitüberschreitung), bekommt `success`
     mit dem Grund im Text: ein Pflicht-Check, der nie grün wird, sperrt Merges dauerhaft.
     Idempotent: steht für den Head schon ein Status `review` (oder hat dieser Takt das Urteil
-    gerade gepostet), passiert nichts.
+    gerade gepostet), passiert nichts. Ausnahme: ein `pending`, den der Takt für einen Head gesetzt
+    hat, den er aufgegeben hat (key in „erledigt“), wird auf `success` gesetzt — sonst sperrt der
+    Pflicht-Check `review` den Merge dauerhaft (#607, #623).
 
     shortcut: nur die ersten PR_LIST_LIMIT offenen PRs bekommen einen Status; bei mehr offenen
     PRs die Grenze erhöhen."""
@@ -969,7 +971,10 @@ def review_status_abdecken(prs: list[dict], labels_of) -> int:
         key = f"pr{n}@{sha}"
         if key in state.get("gepostet", []):
             continue   # Urteil dieses Takts; der Rollup kann noch hinterherhinken
-        if any(e.get("context") == REVIEW_CONTEXT for e in pr.get("statusCheckRollup") or []):
+        vorhanden = [e for e in pr.get("statusCheckRollup") or [] if e.get("context") == REVIEW_CONTEXT]
+        # Ein `pending` ist kein Urteil: hat der Takt den Head aufgegeben, muss es auf success weichen.
+        if vorhanden and not (key in state.get("erledigt", [])
+                              and any(e.get("state") == "PENDING" for e in vorhanden)):
             continue   # dieser Head ist bereits bewertet
         m = re.match(r"feature/issue-(\d+)", pr.get("headRefName") or "")
         issue_no = int(m.group(1)) if m else None

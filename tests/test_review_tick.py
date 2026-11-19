@@ -2187,3 +2187,16 @@ def test_haengender_kandidat_bekommt_nach_der_wartezeit_success(monkeypatch):
     r.run_once()
     assert len(status) == 1 and "state=success" in status[0]
     assert f"description=Nicht geprüft: kein Urteil nach {r.STATUS_WAIT_MIN} Minuten" in status[0]
+
+
+def test_aufgegebener_head_behaelt_kein_pending(monkeypatch, tmp_path):
+    """Gibt der Takt auf (MAX_ROUNDS erreicht), darf der Head nicht `pending` bleiben: der
+    Pflicht-Check `review` würde sonst dauerhaft sperren, der Merge ginge nur mit --admin (#607, #623)."""
+    monkeypatch.setattr(r, "POST", True)
+    (tmp_path / "state.json").write_text(json.dumps({"runden": {"7": r.MAX_ROUNDS}}))
+    pending = {"__typename": "StatusContext", "context": "review", "state": "PENDING"}
+    status = _status_sammler(monkeypatch, [_pr(statusCheckRollup=GOOD_CHECKS + [pending])])
+    r.run_once()
+    assert len(status) == 1
+    assert "state=success" in status[0] and f"repos/{r.REPO}/statuses/{SHA}" in status[0]
+    assert "description=Nicht geprüft: Review abgeschlossen oder aufgegeben (siehe Kommentar)" in status[0]
