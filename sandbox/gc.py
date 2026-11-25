@@ -282,14 +282,16 @@ def _cpu_sekunden(stat_text: str, ticks: float) -> float:
 def lese_agenten_prozesse(
     proc_dir: str | Path = "/proc",
     namen: Sequence[str] = AGENT_PROZESS_NAMEN,
-    uid: int | None = None,
+    uid: int | None = AGENT_PROZESS_UID,
 ) -> list[dict]:
     """Sammelt laufende Prozesse aus `proc_dir`, deren Name in `namen` steht.
 
     Je Eintrag: `pid`, `name`, `uid`, `start` (Prozessstart als Unix-Zeit), `cpu_s`, `cwd`.
     Der Startzeitpunkt kommt aus der mtime von `/proc/<pid>`; `ps -o etime` ist auf CT 106
-    unbrauchbar (liefert dort Phantasiewerte). Ein gesetztes `uid` filtert auf genau diesen
-    Benutzer. Nicht lesbare Einträge werden übersprungen; die Funktion wirft nie."""
+    unbrauchbar (liefert dort Phantasiewerte). `uid` steht standardmäßig auf
+    `AGENT_PROZESS_UID` — nur der Agenten-Benutzer ist Gegenstand dieses Watchdogs; `uid=None`
+    hebt den Filter auf (für Tests und Sonderfälle). Nicht lesbare Einträge werden übersprungen;
+    die Funktion wirft nie."""
     gesucht = set(namen)
     ticks = float(os.sysconf("SC_CLK_TCK"))
     treffer: list[dict] = []
@@ -372,27 +374,72 @@ def verwaiste_agenten_prozesse(
 def beende_verwaiste_agenten(
     kandidaten: Sequence[dict],
     kill: Callable[[int, int], None] | None = None,
-    signalnummer: int | None = None,
 ) -> list[int]:
     """Sendet SIGTERM an jeden Kandidaten und meldet die PIDs, bei denen es ankam.
 
-    Bewusst SIGTERM und nie SIGKILL: die CLI schreibt ihren Zustand noch weg. Bereits beendete
-    Prozesse (ProcessLookupError) und Rechtefehler werden übersprungen, nicht geworfen.
-    `kill` ist injizierbar, damit die Tests keinen echten Prozess anfassen."""
+    Das Signal ist fest auf SIGTERM verdrahtet und nicht konfigurierbar: SIGKILL darf dieser
+    Watchdog nie senden, damit die CLI ihren Zustand noch wegschreiben kann. PIDs kleiner oder
+    gleich 0 werden übersprungen, weil `os.kill(0, …)` die eigene Prozessgruppe und
+    `os.kill(-1, …)` jeden erreichbaren Prozess träfe. Bereits beendete Prozesse
+    (ProcessLookupError) und Rechtefehler werden übersprungen, nicht geworfen. `kill` ist
+    injizierbar, damit die Tests keinen echten Prozess anfassen."""
     sender = kill or os.kill
-    nummer = signal.SIGTERM if signalnummer is None else signalnummer
     beendet: list[int] = []
     for prozess in kandidaten:
         try:
             pid = int(prozess.get("pid"))
         except (TypeError, ValueError):
             continue
+        if pid <= 0:
+            continue
         try:
-            sender(pid, nummer)
+            sender(pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             continue
         beendet.append(pid)
     return beendet
+
+
+def _alter_tage(prozess: dict, now: float | None = None) -> float:
+    """Alter eines Prozessdatensatzes in Tagen; unvollständige Einträge ergeben 0."""
+    try:
+        start = float(prozess.get("start") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    referenz = time.time() if now is None else now
+    return max(0.0, (referenz - start) / 86400)
+
+
+def raeume_agenten_sitzungen(
+    now: float | None = None,
+    trocken: bool = False,
+    uid: int | None = AGENT_PROZESS_UID,
+    kill: Callable[[int, int], None] | None = None,
+    proc_dir: str | Path = "/proc",
+) -> list[str]:
+    """Räumt verwaiste Agenten-Sitzungen auf und liefert die Meldungszeilen.
+
+    `trocken=True` beendet nichts und schreibt je Kandidat eine `gc (trocken): …`-Zeile — so
+    lässt sich der Watchdog vor dem Scharfschalten prüfen (`GC_PROZESSE_TROCKEN=1`). Sonst wird
+    beendet und je erfolgreicher PID eine `⚠ Stephan:`-Zeile geliefert. Datensätze werden
+    ausschließlich über `.get()` gelesen, damit ein unvollständiger Eintrag keine Ausnahme
+    auslöst. Die Funktion tut nichts weiter, damit `main()` und die Tests denselben Weg gehen."""
+    kandidaten = verwaiste_agenten_prozesse(lese_agenten_prozesse(proc_dir, uid=uid), now=now)
+    if trocken:
+        return [
+            f"gc (trocken): verwaiste {prozess.get('name') or '?'}-Sitzung "
+            f"PID {prozess.get('pid')}, seit {_alter_tage(prozess, now):.0f} Tagen, "
+            f"{prozess.get('cwd') or '?'}"
+            for prozess in kandidaten
+        ]
+    zeilen: list[str] = []
+    for pid in beende_verwaiste_agenten(kandidaten, kill=kill):
+        prozess = next((k for k in kandidaten if k.get("pid") == pid), {})
+        zeilen.append(
+            f"⚠ Stephan: verwaiste {prozess.get('name') or '?'}-Sitzung beendet "
+            f"(PID {pid}, seit {_alter_tage(prozess, now):.0f} Tagen, {prozess.get('cwd') or '?'})."
+        )
+    return zeilen
 
 
 def run_gc(
@@ -456,19 +503,8 @@ def main() -> int:
 
     # Verwaiste Agenten-Sitzungen: seit Tagen untätig, aber nie eingesammelt.
     trocken = os.environ.get("GC_PROZESSE_TROCKEN", "") not in ("", "0")
-    kandidaten = verwaiste_agenten_prozesse(lese_agenten_prozesse(uid=AGENT_PROZESS_UID))
-    if trocken:
-        for prozess in kandidaten:
-            alter = (time.time() - prozess["start"]) / 86400
-            print(f"gc (trocken): verwaiste {prozess['name']}-Sitzung PID {prozess['pid']}, "
-                  f"seit {alter:.0f} Tagen, {prozess['cwd'] or '?'}", flush=True)
-    else:
-        for pid in beende_verwaiste_agenten(kandidaten):
-            prozess = next((p for p in kandidaten if p["pid"] == pid), {})
-            alter = (time.time() - prozess.get("start", 0)) / 86400
-            print(f"⚠ Stephan: verwaiste {prozess.get('name', '?')}-Sitzung beendet "
-                  f"(PID {pid}, seit {alter:.0f} Tagen, {prozess.get('cwd') or '?'}).",
-                  flush=True)
+    for zeile in raeume_agenten_sitzungen(trocken=trocken):
+        print(zeile, flush=True)
     return 0
 
 

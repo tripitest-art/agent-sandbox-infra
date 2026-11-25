@@ -330,7 +330,7 @@ def test_lese_agenten_prozesse_nimmt_nur_passende_namen(tmp_path):
     _fake_proc(tmp_path, 102, "bash", start_ts=alt, cpu_s=1.0)
     _fake_proc(tmp_path, 103, "agy", start_ts=alt, cpu_s=3.0, cwd="/home/dev/b")
 
-    treffer = gc.lese_agenten_prozesse(tmp_path)
+    treffer = gc.lese_agenten_prozesse(tmp_path, uid=None)
 
     assert [p["pid"] for p in treffer] == [101, 103]
     assert all(p["name"] == "agy" for p in treffer)
@@ -355,7 +355,7 @@ def test_lese_agenten_prozesse_ueberspringt_kaputte_eintraege(tmp_path):
     (kaputt / "comm").write_text("agy\n")
     (tmp_path / "kein-prozess.txt").write_text("x")
 
-    assert gc.lese_agenten_prozesse(tmp_path) == []
+    assert gc.lese_agenten_prozesse(tmp_path, uid=None) == []
 
 
 def _prozess(pid, alter_s, cpu_s, cwd="/home/dev/a", name="agy", now=2_000_000_000.0):
@@ -422,7 +422,74 @@ def test_prozess_lesen_und_filter_passen_zusammen(tmp_path):
     _fake_proc(tmp_path, 401, "agy", start_ts=alt, cpu_s=5.0, cwd="/home/dev/orca")
     _fake_proc(tmp_path, 402, "agy", start_ts=alt, cpu_s=1.0, cwd="/home/dev/a")
 
-    gelesen = gc.lese_agenten_prozesse(tmp_path)
+    gelesen = gc.lese_agenten_prozesse(tmp_path, uid=None)
     kandidaten = gc.verwaiste_agenten_prozesse(gelesen, now=alt + 10 * 86400)
 
     assert [p["pid"] for p in kandidaten] == [401, 402]
+
+
+def test_lese_agenten_prozesse_filtert_standardmaessig_auf_den_agenten_benutzer():
+    import inspect
+
+    vorgabe = inspect.signature(gc.lese_agenten_prozesse).parameters["uid"].default
+
+    assert vorgabe == gc.AGENT_PROZESS_UID
+
+
+def test_beende_agenten_ueberspringt_pid_null_und_negativ():
+    signale = []
+
+    beendet = gc.beende_verwaiste_agenten(
+        [{"pid": 0}, {"pid": -1}, {"pid": 42}], kill=lambda pid, nummer: signale.append(pid)
+    )
+
+    assert beendet == [42]
+    assert signale == [42]
+
+
+def test_beende_agenten_sendet_nie_sigkill():
+    import inspect
+
+    assert "signalnummer" not in inspect.signature(gc.beende_verwaiste_agenten).parameters
+
+
+def test_raeume_agenten_sitzungen_trocken_beendet_nichts(tmp_path):
+    alt = 1_600_000_000.0
+    _fake_proc(tmp_path, 501, "agy", start_ts=alt, cpu_s=3.0, cwd="/home/dev/orca")
+    signale = []
+
+    zeilen = gc.raeume_agenten_sitzungen(
+        now=alt + 10 * 86400, trocken=True, uid=None, proc_dir=tmp_path,
+        kill=lambda pid, nummer: signale.append(pid),
+    )
+
+    assert signale == []
+    assert len(zeilen) == 1
+    assert zeilen[0].startswith("gc (trocken): verwaiste agy-Sitzung PID 501")
+    assert "10 Tagen" in zeilen[0]
+    assert "/home/dev/orca" in zeilen[0]
+
+
+def test_raeume_agenten_sitzungen_beendet_und_meldet(tmp_path):
+    alt = 1_600_000_000.0
+    _fake_proc(tmp_path, 502, "agy", start_ts=alt, cpu_s=3.0, cwd="/home/dev/orca")
+    _fake_proc(tmp_path, 503, "agy", start_ts=alt + 10 * 86400, cpu_s=0.5, cwd="/home/dev")
+    signale = []
+
+    zeilen = gc.raeume_agenten_sitzungen(
+        now=alt + 10 * 86400, uid=None, proc_dir=tmp_path,
+        kill=lambda pid, nummer: signale.append((pid, nummer)),
+    )
+
+    assert signale == [(502, gc.signal.SIGTERM)]
+    assert len(zeilen) == 1
+    assert zeilen[0].startswith("⚠ Stephan: verwaiste agy-Sitzung beendet (PID 502")
+    assert "10 Tagen" in zeilen[0]
+
+
+def test_raeume_agenten_sitzungen_vertraegt_unvollstaendige_datensaetze(tmp_path):
+    zeilen = gc.raeume_agenten_sitzungen(
+        now=2_000_000_000.0, trocken=True, uid=None, proc_dir=tmp_path / "gibt-es-nicht"
+    )
+
+    assert zeilen == []
