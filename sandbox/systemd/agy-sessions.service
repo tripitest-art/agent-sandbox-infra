@@ -1,0 +1,13 @@
+[Unit]
+Description=Verwaiste Agenten-Sitzungen aufraeumen (CT 106)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /root/gc.py --nur-prozesse
+StandardOutput=append:/root/worker.log
+StandardError=append:/root/worker.log

@@ -1,0 +1,10 @@
+[Unit]
+Description=Verwaiste Agenten-Sitzungen alle 6 Stunden
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

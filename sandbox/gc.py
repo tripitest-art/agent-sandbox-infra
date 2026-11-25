@@ -478,8 +478,29 @@ def run_gc(
     return statistik
 
 
-def main() -> int:
-    """Einstieg für `agent-gc.service`: Projektliste lesen und einen Durchlauf ausführen."""
+def prozesse_aufraeumen(trocken: bool | None = None) -> int:
+    """Räumt verwaiste Agenten-Sitzungen auf und gibt die Meldungszeilen aus.
+
+    `trocken=None` liest `GC_PROZESSE_TROCKEN` (Werte "", "0" = scharf). Rückgabe immer 0 —
+    ein Watchdog, der nichts findet, ist kein Fehler."""
+    if trocken is None:
+        trocken = os.environ.get("GC_PROZESSE_TROCKEN", "") not in ("", "0")
+    for zeile in raeume_agenten_sitzungen(trocken=trocken):
+        print(zeile, flush=True)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Einstieg für `agent-gc.service`: Projektliste lesen und einen Durchlauf ausführen.
+
+    Mit `--nur-prozesse` läuft ausschließlich das Aufräumen verwaister Agenten-Sitzungen. Der
+    Schalter ist für CT 106 gedacht: dort laufen die agy-Sitzungen, aber es gibt weder die
+    Belegungen unter `/var/lib/worker-claims` noch den Git-Klon des Servers. Ohne den Schalter
+    verhält sich das Skript wie bisher."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--nur-prozesse" in args:
+        return prozesse_aufraeumen()
+
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # projects.py liegt daneben
     import projects  # noqa: E402
 
@@ -502,10 +523,7 @@ def main() -> int:
         print(zeile, flush=True)
 
     # Verwaiste Agenten-Sitzungen: seit Tagen untätig, aber nie eingesammelt.
-    trocken = os.environ.get("GC_PROZESSE_TROCKEN", "") not in ("", "0")
-    for zeile in raeume_agenten_sitzungen(trocken=trocken):
-        print(zeile, flush=True)
-    return 0
+    return prozesse_aufraeumen()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1 @@
+- `gc`: `--nur-prozesse` räumt nur verwaiste Agenten-Sitzungen auf, ohne Projektliste, Worktrees oder Belegungen anzufassen; auf CT 106 läuft `/root/gc.py --nur-prozesse` per `agy-sessions.timer`, weil dort die agy-Sitzungen entstehen (CT 112 hat kein agy) (#467).

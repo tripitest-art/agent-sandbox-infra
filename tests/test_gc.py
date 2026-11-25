@@ -493,3 +493,20 @@ def test_raeume_agenten_sitzungen_vertraegt_unvollstaendige_datensaetze(tmp_path
     )
 
     assert zeilen == []
+
+
+def test_prozesse_aufraeumen_mit_trocken_schalter(monkeypatch, capsys):
+    monkeypatch.setattr(gc, "raeume_agenten_sitzungen",
+                        lambda trocken=False: [f"gc (trocken={trocken}): Zeile"])
+
+    assert gc.prozesse_aufraeumen(trocken=True) == 0
+    assert "trocken=True" in capsys.readouterr().out
+
+
+def test_main_nur_prozesse_ueberspringt_git_teil(monkeypatch, capsys):
+    # Auf CT 106 gibt es weder Projektliste noch Claims: der Schalter darf nichts davon anfassen.
+    monkeypatch.setattr(gc, "raeume_agenten_sitzungen", lambda trocken=False: ["⚠ Stephan: Zeile"])
+    monkeypatch.setattr(gc, "run_gc", lambda *a, **k: (_ for _ in ()).throw(AssertionError("darf nicht laufen")))
+
+    assert gc.main(["--nur-prozesse"]) == 0
+    assert "⚠ Stephan: Zeile" in capsys.readouterr().out
