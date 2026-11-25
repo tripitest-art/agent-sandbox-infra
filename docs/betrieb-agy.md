@@ -72,9 +72,11 @@ weekly 96 % frei, 5 h 93 % frei, Claude/GPT 100 % frei.
 - **`ps -o etime` ist auf CT 106 defekt** (ein heute gestarteter Prozess zeigt
   `441077229-08:46:56`). Für Altersprüfungen immer `ps -o lstart=` nehmen.
 - Ein vergessener AGY-Prozess kostet kein Kontingent, hält aber eine Session und den Speicher.
-  Die Orca-Automation `nacht-hygiene-sc-digger` beendet deshalb AGY-PIDs, die älter als zwei Tage
-  sind **und** unter 5 Minuten CPU-Zeit haben (SIGTERM, Protokollzeile mit PID, Start, CPU, cwd).
-  Ausnahmen: cwd unter `/home/dev/agy-review-in/` und Prompt-Dateien jünger als 30 Minuten.
+  Eingesammelt werden sie an genau einer Stelle: `sandbox/gc.py` auf CT 112, das
+  `agent-gc.timer` alle 6 Stunden startet. Beendet wird nur `agy` von uid 1000, älter als zwei
+  Tage **und** unter 300 s CPU-Zeit oder unter 1 % der Lebenszeit, per SIGTERM mit Protokollzeile
+  (PID, Alter, cwd). Ausnahme ist der laufende Review-Eingang unter `/home/dev/agy-review-in/`;
+  Trockenlauf über `GC_PROZESSE_TROCKEN=1`. Kein zweiter Wachhund im `nacht-hygiene`-Prompt.
 
 ## Zweites Review: `agent-antigravity` (LXC 117)
 
