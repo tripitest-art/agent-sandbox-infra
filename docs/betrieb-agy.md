@@ -5,7 +5,7 @@ Code oder OpenCode läuft, wie es aufgerufen wird und welche Fallstricke auf CT 
 
 ## Wann AGY statt Claude oder OpenCode
 
-AGY läuft über ein eigenes Konto (`stephanv45@gmail.com`, Google AI Pro) und verbraucht weder
+AGY läuft über ein eigenes Google-Konto (Google AI Pro) und verbraucht weder
 Claude- noch OpenCode-Pensum. Es arbeitet in der Gemini-Familie und ist damit auch als zweite
 Review-Stimme brauchbar — aber nie für die eigene Arbeit.
 
@@ -29,7 +29,8 @@ runuser -u dev -- env HOME=/config PATH=/config/.local/bin:$PATH \
 - Als `root` ohne `HOME=/config` antwortet AGY mit „authentication required" — es findet seine
   OAuth-Daten nicht.
 - `-p` ist unbeaufsichtigt; `--output-format json` liefert `{"status":"SUCCESS","response":"…"}`.
-  Es gibt **kein** `--max-turns`; begrenzt wird mit `--print-timeout` (Vorgabe `5m`).
+  Es gibt **kein** `--max-turns`. `--print-timeout` hat die Vorgabe `0s` und wartet damit bis zum
+  Ende des Turns; für unbeaufsichtigte Läufe ein Limit setzen, etwa `--print-timeout 6m`.
 - Schreibende Läufe brauchen `--dangerously-skip-permissions`, sonst bleibt AGY an der
   Rechteabfrage stehen. Nur in Wegwerf-Verzeichnissen oder für einen Auftrag, der eine einzelne
   neue Datei anlegt.
@@ -43,8 +44,10 @@ orca108 agent launch --agent antigravity --worktree "branch:<branch>" --surface 
 
 - Der Agent heißt **`antigravity`**, nicht `agy` (`Unknown TUI agent "agy"`).
 - **Jedes neue Worktree fragt einmal „Do you trust the contents of this project?" und frisst dabei
-  den `--prompt`.** Zweistufig: launch → `orca108 terminal read --terminal <handle> --screen` →
-  `terminal send --terminal <handle> --enter` → Prompt separat mit `--text "…" --enter` senden.
+  den `--prompt`.** Zweistufig vorgehen: `orca108 agent launch …` → Trust-Dialog mit `orca108
+  terminal read --terminal <handle> --screen` prüfen → mit `orca108 terminal send --terminal
+  <handle> --enter` bestätigen → Prompt danach separat mit `orca108 terminal send --terminal
+  <handle> --text "…" --enter` senden.
 - Orcas Host-Scope führt keine Antigravity-Konten (`antigravityAccounts: []`), obwohl die CLI
   angemeldet ist. Kontingent deshalb nie aus dem Orca-Panel ableiten, sondern messen.
 - **AGY beendet oft ohne Commit**, auch wenn „committen" im Auftrag stand: nach dem Lauf
