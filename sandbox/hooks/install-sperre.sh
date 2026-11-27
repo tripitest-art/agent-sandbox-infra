@@ -12,7 +12,13 @@ for repo in "$ZIEL"/*/; do
   hook="${repo}.git/hooks/pre-receive"
   install -d "$(dirname "$hook")"
   if cmp -s "$QUELLE" "$hook"; then
-    echo "Sperre aktiv: ${repo%/}"
+    # Ohne X-Bit ignoriert Git den Hook: gleicher Inhalt heißt dann nicht "aktiv".
+    if [ -x "$hook" ]; then
+      echo "Sperre aktiv: ${repo%/}"
+    else
+      install -m 755 "$QUELLE" "$hook"
+      echo "Sperre repariert: ${repo%/}"
+    fi
   elif [ -e "$hook" ]; then
     echo "FREMDER HOOK: $hook weicht ab, nicht überschrieben" >&2
   else

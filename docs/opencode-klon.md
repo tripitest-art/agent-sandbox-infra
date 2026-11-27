@@ -56,7 +56,9 @@ bash /config/projects/agent-sandbox-infra/sandbox/hooks/install-sperre.sh
 Der Installer nimmt alle Git-Repos unter `/config/projects` mit (Vorgabe, per Argument
 änderbar), ist beliebig oft lauffähig und erfasst neue Repos bei jedem Lauf. Einen
 vorhandenen fremden `pre-receive`-Hook überschreibt er nicht, sondern meldet ihn als
-`FREMDER HOOK: …`. `sandbox/install.sh` ruft denselben Installer auf, wenn `$PROJECTS_DIR`
+`FREMDER HOOK: …`. Steht der Hook mit richtigem Inhalt, aber ohne Ausführungsrecht da (Git
+ignoriert ihn dann), setzt er ihn per `install -m 755` wieder auf 0755 und meldet
+`Sperre repariert: …`. `sandbox/install.sh` ruft denselben Installer auf, wenn `$PROJECTS_DIR`
 existiert — dieser Lauf gehört Stephan und läuft auf CT 112, wo `/config/projects` fehlt,
 dort wird der Installer also übersprungen. Auf CT 106 gibt es keinen Automatismus: den
 Befehl oben nach jedem neuen Repo von Hand als `dev` fahren, sonst bleibt das neue Repo ohne

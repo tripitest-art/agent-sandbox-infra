@@ -102,6 +102,23 @@ def test_installer_laesst_fremden_hook_stehen_und_ist_wiederholbar(tmp_path):
     assert "Sperre aktiv" in zweit.stdout
 
 
+def test_installer_repariert_hook_ohne_ausfuehrungsrecht(tmp_path):
+    """Gleicher Inhalt, aber kein X-Bit: Git ignoriert den Hook, der Installer muss ihn reparieren."""
+    projects = tmp_path / "projects"
+    haupt = repo_mit_commit(projects / "haupt")
+    hook = haupt / ".git" / "hooks" / "pre-receive"
+    hook.write_bytes(HOOK.read_bytes())
+    hook.chmod(0o644)
+
+    ergebnis = sperre_installieren(projects)
+
+    assert ergebnis.returncode == 0
+    assert "Sperre repariert" in ergebnis.stdout
+    assert "FREMDER HOOK" not in ergebnis.stderr
+    assert hook.read_bytes() == HOOK.read_bytes()
+    assert os.access(hook, os.X_OK)
+
+
 def test_installer_ohne_repos_meldet_das(tmp_path):
     ergebnis = sperre_installieren(tmp_path)
 
