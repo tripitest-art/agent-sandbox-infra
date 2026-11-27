@@ -30,6 +30,55 @@ neu setzen — `git remote add x /config/projects/<repo>` oder `git push /config
 mit Pfad-URL. Dagegen hilft nur ein Verbot von `bash`/`python3`, das die Karte ausdrücklich
 ausschließt. Der Pfad-Rest ist damit Beweis- und Aufräumfunktion, keine Sperre.
 
+## Push-Weg ins Haupt-Repo: zu
+
+Der Push ins Haupt-Repo wird dort abgewiesen, wo er ankommt: Jedes Repo unter
+`/config/projects` hat den Hook `.git/hooks/pre-receive`
+([`sandbox/hooks/pre-receive-sperre`](../sandbox/hooks/pre-receive-sperre)), der eingehende
+Pushes über den Standard-Transport mit Exit 1 und dieser Zeile beendet:
+
+    Push in Haupt-Repo auf CT 106 gesperrt (Agenten-Sandbox). Ergebnis als Patch abgeben.
+
+Warum am Empfang und nicht als Kommando-Sperre: Das Kommando (`git *`, `*git *`) ist eine
+Textliste mit Lücken — `python3 -c "subprocess.run(['git', …])"` kommt durch, und `.git/config`
+im Klon ist beschreibbar. Der Hook sieht jeden Push über den Standard-Transport, gleich mit
+welchem Kommando, welcher Pfad-URL oder `file://` er geschickt wird; `git push --receive-pack`
+umgeht ihn, weil der Pusher den Empfangsprozess selbst benennt (siehe „Was der Hook nicht
+schließt“). Einen Umgehungsschalter über eine Umgebungsvariable
+hat er bewusst nicht: die könnte das Modell selbst setzen.
+
+Ausrollen (auf CT 106, als `dev` oder root):
+
+```
+bash /config/projects/agent-sandbox-infra/sandbox/hooks/install-sperre.sh
+```
+
+Der Installer nimmt alle Git-Repos unter `/config/projects` mit (Vorgabe, per Argument
+änderbar), ist beliebig oft lauffähig und erfasst neue Repos bei jedem Lauf. Einen
+vorhandenen fremden `pre-receive`-Hook überschreibt er nicht, sondern meldet ihn als
+`FREMDER HOOK: …`. Steht der Hook mit richtigem Inhalt, aber ohne Ausführungsrecht da (Git
+ignoriert ihn dann), setzt er ihn per `install -m 755` wieder auf 0755 und meldet
+`Sperre repariert: …`. `sandbox/install.sh` ruft denselben Installer auf, wenn `$PROJECTS_DIR`
+existiert — dieser Lauf gehört Stephan und läuft auf CT 112, wo `/config/projects` fehlt,
+dort wird der Installer also übersprungen. Auf CT 106 gibt es keinen Automatismus: den
+Befehl oben nach jedem neuen Repo von Hand als `dev` fahren, sonst bleibt das neue Repo ohne
+Sperre, und nur die Warnung von `opencode_run.py` erinnert daran.
+
+`opencode_run.py` prüft beim Start, ob die Sperre im Ziel-Repo liegt, und gibt sonst
+`WARNUNG: pre-receive-Sperre fehlt in <repo>` aus. Es bricht deswegen nicht ab — ein
+fehlender Deploy soll nicht alle Läufe stoppen.
+
+Fetch und Bundle-Import bleiben erlaubt: `git fetch` und `git fetch /tmp/x.bundle main:…`
+sind kein Push und laufen am Hook vorbei.
+
+Was der Hook **nicht** schließt: `git push --receive-pack="git -c core.hooksPath=… receive-pack"`
+lässt den Pusher den Empfangsprozess selbst benennen, der Hook läuft dann nie (auf CT 106,
+git 2.39.5, als `dev` reproduziert: rc=0, Branch angelegt). Ebenso darf der Prozess als `dev`
+die Haupt-Repos ohne git beschreiben — Dateien ändern, `.git/hooks` löschen, `.git/refs` direkt
+schreiben. Beides ist dieselbe Klasse: dagegen hilft nur ein eigener Unix-Benutzer oder ein
+Mount, auf dem `/config/projects` nur lesbar ist. Diese Entscheidung trifft Stephan getrennt;
+sie ist nicht Teil dieser Sperre.
+
 ## Aufruf (als `dev`, `HOME=/config`)
 
 ```
@@ -91,8 +140,13 @@ umstellbar; fehlen sie, passiert nichts.
 ## Tests
 
 - `tests/test_opencode_run.py`: Befehlsfolge (inkl. `remote remove origin`), Patch-Export,
-  Token-Summe, Abbruch bei unbekanntem Repo und bei nicht lesbarem Ref-Schnappschuss
+  Token-Summe, Abbruch bei unbekanntem Repo und bei nicht lesbarem Ref-Schnappschuss,
+  Erkennung der pre-receive-Sperre (fehlend, fremder Hook) und die Warnung im Lauf
   (ohne echtes Git und ohne Modell).
+- `tests/test_pre_receive_sperre.py`: echter Push in ein lokales Haupt-Repo — ohne Hook
+  geht er durch, mit Hook werden neuer Branch, Löschung, Tags und Pfad-URL abgewiesen und
+  die Refs bleiben unverändert; Installer überschreibt keinen fremden Hook und ist
+  wiederholbar.
 - `tests/test_gc.py`: 7-Tage-Frist für Klone, 30-Tage-Frist für Belege.
 - Echter Lauf auf CT 106: Schadenstest im Klon (inkl. `git push`-Versuch ohne Remote),
   Gegenprobe der Warnung, Ende-zu-Ende mit einem Doku-Auftrag in `home-infra` (Ergebnis

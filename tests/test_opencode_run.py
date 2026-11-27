@@ -250,6 +250,37 @@ def test_limit_hinweis_ignoriert_fehler_als_string(tmp_path):
     assert oc.limit_hinweis(log) == ""
 
 
+# ---- sperre_fehlt ----
+
+def test_sperre_fehlt_erkennt_die_installierte_sperre(tmp_path):
+    hook = tmp_path / ".git" / "hooks" / "pre-receive"
+    hook.parent.mkdir(parents=True)
+    hook.write_text(f"#!/bin/sh\necho \"{oc.SPERRE_MARKE}\" >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    assert oc.sperre_fehlt(tmp_path) is False
+
+
+def test_sperre_fehlt_bei_fehlender_datei_und_bei_fremdem_hook(tmp_path):
+    assert oc.sperre_fehlt(tmp_path) is True
+    hook = tmp_path / ".git" / "hooks" / "pre-receive"
+    hook.parent.mkdir(parents=True)
+    hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    assert oc.sperre_fehlt(tmp_path) is True
+
+
+def test_sperre_fehlt_bei_nicht_ausfuehrbarem_hook(tmp_path):
+    """Ohne X-Bit ignoriert Git den Hook — Inhalt allein ist keine Sperre."""
+    hook = tmp_path / ".git" / "hooks" / "pre-receive"
+    hook.parent.mkdir(parents=True)
+    hook.write_text(f"#!/bin/sh\necho \"{oc.SPERRE_MARKE}\" >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o644)
+
+    assert oc.sperre_fehlt(tmp_path) is True
+
+
 # ---- main ----
 
 def test_main_bricht_bei_unbekanntem_repo_ab(tmp_path):
@@ -360,3 +391,24 @@ def test_main_meldet_nicht_geschriebenen_patch_mit_drei(tmp_path, monkeypatch, c
 
     assert oc.main(args) == 3
     assert "nicht geschrieben" in capsys.readouterr().err
+
+
+def test_main_warnt_ohne_pre_receive_sperre_und_laeuft_weiter(tmp_path, monkeypatch, capsys):
+    """Fehlender Deploy darf den Lauf nicht stoppen — sonst steht die ganze Kette."""
+    args = _lauf_vorbereiten(tmp_path, monkeypatch)
+
+    assert oc.main(args) == 0
+    assert "WARNUNG: pre-receive-Sperre fehlt in home-infra" in capsys.readouterr().err
+
+
+def test_main_schweigt_bei_installierter_sperre(tmp_path, monkeypatch, capsys):
+    """Gegenprobe: liegt die ausführbare Sperre, darf keine Warnung kommen."""
+    args = _lauf_vorbereiten(tmp_path, monkeypatch)
+    hook = tmp_path / "home-infra" / ".git" / "hooks" / "pre-receive"
+    hook.parent.mkdir(parents=True)
+    hook.write_text(f"#!/bin/sh\necho \"{oc.SPERRE_MARKE}\" >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    assert oc.main(args) == 0
+    assert "WARNUNG" not in capsys.readouterr().err
+
