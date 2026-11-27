@@ -34,8 +34,8 @@ ausschließt. Der Pfad-Rest ist damit Beweis- und Aufräumfunktion, keine Sperre
 
 Der Push ins Haupt-Repo wird dort abgewiesen, wo er ankommt: Jedes Repo unter
 `/config/projects` hat den Hook `.git/hooks/pre-receive`
-([`sandbox/hooks/pre-receive-sperre`](../sandbox/hooks/pre-receive-sperre)), der jeden
-eingehenden Push mit Exit 1 und dieser Zeile beendet:
+([`sandbox/hooks/pre-receive-sperre`](../sandbox/hooks/pre-receive-sperre)), der eingehende
+Pushes über den Standard-Transport mit Exit 1 und dieser Zeile beendet:
 
     Push in Haupt-Repo auf CT 106 gesperrt (Agenten-Sandbox). Ergebnis als Patch abgeben.
 
