@@ -260,7 +260,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Fehlt die Sperre, ist der Push-Weg ins Haupt-Repo offen. Nicht abbrechen: ein
     # fehlender Deploy würde sonst alle Läufe stoppen.
     if sperre_fehlt(haupt):
-        print(f"WARNUNG: pre-receive-Sperre fehlt in {args.repo}.", file=sys.stderr, flush=True)
+        print(f"WARNUNG: pre-receive-Sperre fehlt in {args.repo}", file=sys.stderr, flush=True)
 
     # Erst fetch, dann Schnappschuss: sonst schlägt eine regulär geholte Remote-Ref als Warnung auf.
     if not fetch_main(haupt):
