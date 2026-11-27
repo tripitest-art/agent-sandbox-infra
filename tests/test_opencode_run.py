@@ -8,6 +8,7 @@ den Abbruch bei unbekanntem Repo.
 
 import json
 import subprocess
+from pathlib import Path
 
 from sandbox import opencode_run as oc
 
@@ -124,6 +125,23 @@ def test_clone_local_bricht_ab_wenn_der_klon_scheitert():
     assert len(aufrufe) == 1        # kein checkout auf einem halben Klon
 
 
+# ---- fetch_main ----
+
+def test_fetch_main_ist_erfolgreich_bei_null():
+    assert oc.fetch_main("/config/projects/home-infra", run=lambda cmd: _ok(cmd)) is True
+
+
+def test_fetch_main_meldet_fehler_bei_fehlercode():
+    assert oc.fetch_main("/config/projects/home-infra", run=lambda cmd: _fehler(cmd)) is False
+
+
+def test_fetch_main_faengt_subprozess_ausnahmen():
+    def fake_run(cmd):
+        raise OSError("git fehlt")
+
+    assert oc.fetch_main("/config/projects/home-infra", run=fake_run) is False
+
+
 # ---- export_patch ----
 
 def test_export_patch_staged_und_schreibt_binary_diff(tmp_path):
@@ -144,6 +162,26 @@ def test_export_patch_staged_und_schreibt_binary_diff(tmp_path):
     assert aufrufe[0][3:] == ["add", "-A"]
     assert aufrufe[1][-2:] == ["--cached", "--stat"]
     assert aufrufe[2][-2:] == ["--cached", "--binary"]
+
+
+def test_export_patch_bleibt_leer_wenn_stat_scheitert(tmp_path):
+    def fake_run(cmd):
+        if "--stat" in cmd:
+            return _fehler(cmd)
+        return _ok(cmd, "diff --binary-inhalt")
+
+    ziel = tmp_path / "lauf.patch"
+    assert oc.export_patch("/config/work/klon", ziel, run=fake_run) == ""
+    assert not ziel.exists()          # kein halber Patch auf der Platte
+
+
+def test_export_patch_bleibt_leer_wenn_das_schreiben_scheitert(tmp_path):
+    def fake_run(cmd):
+        return _ok(cmd, "diff --binary-inhalt" if "--binary" in cmd else "docs/x.md | 1 +")
+
+    # Elternverzeichnis fehlt -> write_text wirft FileNotFoundError (OSError).
+    ziel = tmp_path / "kein-verzeichnis" / "lauf.patch"
+    assert oc.export_patch("/config/work/klon", ziel, run=fake_run) == ""
 
 
 # ---- summarize_log ----
@@ -204,6 +242,14 @@ def test_limit_hinweis_ohne_429_bleibt_leer(tmp_path):
     assert oc.limit_hinweis(tmp_path / "gibt-es-nicht.jsonl") == ""
 
 
+def test_limit_hinweis_ignoriert_fehler_als_string(tmp_path):
+    """`error` ist nicht immer ein Dict — ein String darf keinen AttributeError auslösen."""
+    log = tmp_path / "lauf.jsonl"
+    log.write_text(json.dumps({"type": "error", "error": "kaputt"}), encoding="utf-8")
+
+    assert oc.limit_hinweis(log) == ""
+
+
 # ---- main ----
 
 def test_main_bricht_bei_unbekanntem_repo_ab(tmp_path):
@@ -230,3 +276,87 @@ def test_main_bricht_ab_wenn_der_ref_schnappschuss_nicht_lesbar_ist(tmp_path, mo
 
     assert code == 2
     assert not runs.exists()          # kein Klon und kein Modell-Call vor dem Abbruch
+
+
+def test_main_meldet_unlesbare_prompt_datei_als_aufbaufehler(tmp_path, capsys):
+    (tmp_path / "home-infra" / ".git").mkdir(parents=True)
+    runs = tmp_path / "runs"
+
+    code = oc.main(["--repo", "home-infra", "--branch", "docs/x",
+                    "--prompt-file", str(tmp_path / "gibt-es-nicht.md"),
+                    "--projects-dir", str(tmp_path), "--runs-dir", str(runs)])
+
+    assert code == 2
+    assert "nicht lesbar" in capsys.readouterr().err
+    assert not runs.exists()
+
+
+def _lauf_vorbereiten(tmp_path, monkeypatch, schnappschuesse=None, opencode=None,
+                      patch_schreiben=True):
+    """Repo, Auftrag und Stubs (git, Klon, Patch, OpenCode) für einen vollen `main()`-Lauf."""
+    (tmp_path / "home-infra" / ".git").mkdir(parents=True)
+    auftrag = tmp_path / "auftrag.md"
+    auftrag.write_text("egal", encoding="utf-8")
+    monkeypatch.setattr(oc, "fetch_main", lambda *a, **k: True)
+    folge = iter(schnappschuesse or (("refs/heads/main a\n", "") for _ in range(2)))
+    monkeypatch.setattr(oc, "ref_snapshot", lambda *a, **k: next(folge))
+
+    def fake_clone(source, target, branch, run=None):
+        Path(target).mkdir(parents=True)
+        return True
+
+    monkeypatch.setattr(oc, "clone_local", fake_clone)
+
+    def fake_export(klon, patch, run=None):
+        if patch_schreiben:
+            Path(patch).write_text("", encoding="utf-8")
+        return " docs/x.md | 1 +\n" if patch_schreiben else ""
+
+    monkeypatch.setattr(oc, "export_patch", fake_export)
+
+    def fake_opencode(cmd, **kwargs):
+        if isinstance(opencode, Exception):
+            raise opencode
+        return subprocess.CompletedProcess(cmd, opencode or 0, "", "")
+
+    monkeypatch.setattr(oc.subprocess, "run", fake_opencode)
+    return ["--repo", "home-infra", "--branch", "docs/x", "--prompt-file", str(auftrag),
+            "--projects-dir", str(tmp_path), "--runs-dir", str(tmp_path / "runs"),
+            "--logs-dir", str(tmp_path / "logs"), "--opencode", "opencode-stub"]
+
+
+def test_main_regulaerer_lauf_endet_mit_null(tmp_path, monkeypatch, capsys):
+    code = oc.main(_lauf_vorbereiten(tmp_path, monkeypatch))
+    ausgabe = capsys.readouterr().out
+
+    assert code == 0
+    assert "Klon:" in ausgabe and "Tokens:" in ausgabe
+    assert "docs/x.md | 1 +" in ausgabe
+
+
+def test_main_warnt_bei_veraenderten_haupt_repo_refs(tmp_path, monkeypatch, capsys):
+    args = _lauf_vorbereiten(tmp_path, monkeypatch, schnappschuesse=(
+        ("refs/heads/main a\n", ""),
+        ("refs/heads/main a\nrefs/heads/zz-reftest b\n", "")))
+
+    assert oc.main(args) == 1
+    assert oc.WARNUNG in capsys.readouterr().out
+
+
+def test_main_meldet_opencode_fehler_mit_drei(tmp_path, monkeypatch):
+    assert oc.main(_lauf_vorbereiten(tmp_path, monkeypatch, opencode=1)) == 3
+
+
+def test_main_meldet_zeitlimit_mit_drei(tmp_path, monkeypatch, capsys):
+    args = _lauf_vorbereiten(
+        tmp_path, monkeypatch, opencode=subprocess.TimeoutExpired("opencode", 900))
+
+    assert oc.main(args) == 3
+    assert "Zeitlimit" in capsys.readouterr().out
+
+
+def test_main_meldet_nicht_geschriebenen_patch_mit_drei(tmp_path, monkeypatch, capsys):
+    args = _lauf_vorbereiten(tmp_path, monkeypatch, patch_schreiben=False)
+
+    assert oc.main(args) == 3
+    assert "nicht geschrieben" in capsys.readouterr().err

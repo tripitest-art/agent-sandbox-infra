@@ -72,8 +72,9 @@ Ablauf:
 7. Zusammenfassung: Patch, Log, Branch, Laufzeit, Tokens (Summe aus den `step_finish`-Events),
    fehlgeschlagene und von der Sperre abgewiesene Tool-Calls.
 
-Exit-Codes: 0 in Ordnung, 1 Warnung, 2 Aufbaufehler (Repo fehlt, Ref-Schnappschuss nicht
-lesbar, Klon oder Branch scheitert), 3 OpenCode fehlgeschlagen oder Zeitlimit. Bei HTTP 429 (Gratis-Limit) nennt die
+Exit-Codes: 0 in Ordnung, 1 Warnung, 2 Aufbaufehler (Repo fehlt, Prompt-Datei nicht lesbar,
+Ref-Schnappschuss nicht lesbar, Klon oder Branch scheitert), 3 OpenCode fehlgeschlagen, Zeitlimit
+überschritten oder Patch nicht geschrieben. Bei HTTP 429 (Gratis-Limit) nennt die
 Zusammenfassung den Reset-Zeitpunkt aus `retryAfterMs` und das Ausweichmodell
 `opencode-go/hy4-flash-free` (Gratis-Modell des Go-Endpunkts, belastet das Go-Kontingent nicht).
 

@@ -18,8 +18,9 @@ Option änderbar:
     python3 sandbox/opencode_run.py --repo home-infra --branch docs/probe \
         --prompt-file /tmp/auftrag.md
 
-Exit-Codes: 0 in Ordnung, 1 Warnung (Haupt-Repo-Refs verändert), 2 Aufbaufehler,
-3 OpenCode fehlgeschlagen. Nur Standardbibliothek.
+Exit-Codes: 0 in Ordnung, 1 Warnung (Haupt-Repo-Refs verändert), 2 Aufbaufehler (Repo fehlt,
+Prompt-Datei nicht lesbar), 3 OpenCode fehlgeschlagen, Zeitlimit oder Patch nicht exportierbar.
+Nur Standardbibliothek.
 """
 from __future__ import annotations
 
@@ -134,11 +135,11 @@ def export_patch(clone: str | Path, patch_path: str | Path, run: Runner | None =
             return ""
         stat = runner(["git", "-C", str(clone), "diff", "--cached", "--stat"])
         diff = runner(["git", "-C", str(clone), "diff", "--cached", "--binary"])
+        if stat.returncode != 0 or diff.returncode != 0:
+            return ""
+        Path(patch_path).write_text(diff.stdout or "", encoding="utf-8")
     except (OSError, subprocess.SubprocessError):
         return ""
-    if diff.returncode != 0:
-        return ""
-    Path(patch_path).write_text(diff.stdout or "", encoding="utf-8")
     return stat.stdout or ""
 
 
@@ -190,7 +191,9 @@ def limit_hinweis(path: str | Path, now: float | None = None) -> str:
             continue
         if not isinstance(ereignis, dict) or ereignis.get("type") != "error":
             continue
-        fehler = ereignis.get("error") or {}
+        fehler = ereignis.get("error")
+        if not isinstance(fehler, dict):           # Log-Eintrag ohne dict-Fehler (z. B. reiner String)
+            continue
         if fehler.get("status") != 429 and fehler.get("type") != "provider.free-limit":
             continue
         reset = ""
@@ -229,7 +232,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not (haupt / ".git").exists():
         print(f"Fehler: {haupt} ist kein Git-Repo.", file=sys.stderr)
         return 2
-    auftrag = args.prompt_file.read_text(encoding="utf-8")
+    try:
+        auftrag = args.prompt_file.read_text(encoding="utf-8")
+    except OSError as ausnahme:
+        print(f"Fehler: Prompt-Datei {args.prompt_file} nicht lesbar: {ausnahme}",
+              file=sys.stderr)
+        return 2
 
     # Erst fetch, dann Schnappschuss: sonst schlägt eine regulär geholte Remote-Ref als Warnung auf.
     if not fetch_main(haupt):
@@ -273,6 +281,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     patch = args.runs_dir / f"{name}.patch"
     stat = export_patch(klon, patch)
+    # Ein nicht geschriebener Patch heißt: das Ergebnis ist verloren. Nicht als „keine Änderung" melden.
+    patch_fehler = not patch.exists()
+    if patch_fehler:
+        print(f"Fehler: Patch {patch} nicht geschrieben (git diff oder Schreibzugriff fehlgeschlagen).",
+              file=sys.stderr)
     nachher, snapshot_fehler = ref_snapshot(haupt)
     diff = ref_diff(vorher, nachher)
     tokens = summarize_log(log)
@@ -302,7 +315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(WARNUNG)
         print(diff)
         return 1
-    if code != 0:
+    if code != 0 or patch_fehler:
         return 3
     return 0
 
