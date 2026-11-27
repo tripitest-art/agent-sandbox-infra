@@ -46,18 +46,31 @@ def test_ref_snapshot_fragt_refs_worktrees_und_stashes():
         aufrufe.append(list(cmd))
         return _ok(cmd, stdout=antworten[cmd[3]])
 
-    text = oc.ref_snapshot("/config/projects/home-infra", run=fake_run)
+    text, fehler = oc.ref_snapshot("/config/projects/home-infra", run=fake_run)
     assert [cmd[3] for cmd in aufrufe] == ["for-each-ref", "worktree", "stash"]
     assert "refs/heads/main abc123" in text
     assert "worktree /config/projects/home-infra" in text
+    assert fehler == ""
 
 
-def test_ref_snapshot_meldet_git_fehler_im_text():
+def test_ref_snapshot_meldet_git_fehler_im_text_und_als_fehler():
     def fake_run(cmd):
         raise FileNotFoundError("git fehlt")
 
-    text = oc.ref_snapshot("/tmp/repo", run=fake_run)
+    text, fehler = oc.ref_snapshot("/tmp/repo", run=fake_run)
     assert "Fehler: git fehlt" in text
+    assert "git fehlt" in fehler
+
+
+def test_ref_snapshot_meldet_fehlercode_statt_leerem_text():
+    # Wie auf CT 106 gesehen: `git for-each-ref` als fremder User -> rc=128, kein stdout.
+    def fake_run(cmd):
+        return _fehler(cmd)
+
+    text, fehler = oc.ref_snapshot("/config/projects/home-infra", run=fake_run)
+    assert text.strip()      # der Text bleibt als Vergleichsgrundlage erhalten
+    assert "for-each-ref" in fehler and "worktree" in fehler
+    assert fehler.count("rc=128") == 3
 
 
 def test_ref_diff_bleibt_leer_bei_gleichem_stand():
@@ -86,6 +99,18 @@ def test_clone_local_nutzt_no_hardlinks_und_legt_branch_an():
                           "/config/projects/home-infra", "/config/work/opencode-runs/lauf"]
     assert aufrufe[1] == ["git", "-C", "/config/work/opencode-runs/lauf",
                           "checkout", "-b", "docs/probe", "origin/main"]
+    # Kein Remote im Klon: sonst ist origin eine Push-URL aufs Haupt-Repo.
+    assert aufrufe[2] == ["git", "-C", "/config/work/opencode-runs/lauf",
+                          "remote", "remove", "origin"]
+
+
+def test_clone_local_bricht_ab_wenn_das_remote_bleibt():
+    def fake_run(cmd):
+        if "remote" in cmd:
+            return _fehler(cmd)
+        return _ok(cmd)
+
+    assert oc.clone_local("/a", "/b", "x", run=fake_run) is False
 
 
 def test_clone_local_bricht_ab_wenn_der_klon_scheitert():
@@ -188,3 +213,20 @@ def test_main_bricht_bei_unbekanntem_repo_ab(tmp_path):
     code = oc.main(["--repo", "gibt-es-nicht", "--branch", "docs/x",
                     "--prompt-file", str(auftrag), "--projects-dir", str(tmp_path)])
     assert code == 2
+
+
+def test_main_bricht_ab_wenn_der_ref_schnappschuss_nicht_lesbar_ist(tmp_path, monkeypatch):
+    """Leerer Schnappschuss darf nicht als „unverändert" durchgehen: Exit 2 statt 0."""
+    (tmp_path / "home-infra" / ".git").mkdir(parents=True)
+    auftrag = tmp_path / "auftrag.md"
+    auftrag.write_text("egal", encoding="utf-8")
+    monkeypatch.setattr(oc, "fetch_main", lambda *a, **k: True, raising=False)
+    monkeypatch.setattr(oc, "ref_snapshot", lambda *a, **k: ("", "for-each-ref: rc=128"))
+    runs = tmp_path / "runs"
+
+    code = oc.main(["--repo", "home-infra", "--branch", "docs/x",
+                    "--prompt-file", str(auftrag), "--projects-dir", str(tmp_path),
+                    "--runs-dir", str(runs)])
+
+    assert code == 2
+    assert not runs.exists()          # kein Klon und kein Modell-Call vor dem Abbruch

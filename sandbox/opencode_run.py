@@ -58,10 +58,15 @@ def _run(cmd: Sequence[str]) -> subprocess.CompletedProcess:
     return subprocess.run(list(cmd), capture_output=True, text=True, check=False)
 
 
-def ref_snapshot(repo: str | Path, run: Runner | None = None) -> str:
-    """Refs, Worktrees und Stashes eines Repos als Text — die Vergleichsgrundlage."""
+def ref_snapshot(repo: str | Path, run: Runner | None = None) -> tuple[str, str]:
+    """Refs, Worktrees und Stashes eines Repos als Text plus Fehlermeldung ('' = lesbar).
+
+    Der Fehler wird zurückgegeben statt verschluckt: bei rc≠0 (z. B. „dubious ownership")
+    bleiben sonst beide Schnappschüsse leer, der Vergleich meldet nichts und die dritte
+    Barriere ist blind."""
     runner = run or _run
     teile: list[str] = []
+    fehler: list[str] = []
     for cmd in (
         ["git", "-C", str(repo), "for-each-ref", "--format=%(refname) %(objectname)"],
         ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
@@ -70,11 +75,15 @@ def ref_snapshot(repo: str | Path, run: Runner | None = None) -> str:
         kopf = " ".join(cmd[3:])
         try:
             ergebnis = runner(cmd)
-        except (OSError, subprocess.SubprocessError) as fehler:
-            teile.append(f"[{kopf}]\nFehler: {fehler}")
+        except (OSError, subprocess.SubprocessError) as ausnahme:
+            fehler.append(f"{kopf}: {ausnahme}")
+            teile.append(f"[{kopf}]\nFehler: {ausnahme}")
             continue
+        if ergebnis.returncode != 0:
+            zeilen = (ergebnis.stderr or "").strip().splitlines()
+            fehler.append(f"{kopf}: rc={ergebnis.returncode}" + (f" {zeilen[0]}" if zeilen else ""))
         teile.append(f"[{kopf}]\n{ergebnis.stdout or ''}")
-    return "\n".join(teile)
+    return "\n".join(teile), "; ".join(fehler)
 
 
 def ref_diff(vorher: str, nachher: str) -> str:
@@ -105,8 +114,12 @@ def clone_local(
         if runner(["git", "clone", "--local", "--no-hardlinks",
                    str(source), str(target)]).returncode != 0:
             return False
-        return runner(["git", "-C", str(target), "checkout", "-b", branch,
-                       "origin/main"]).returncode == 0
+        if runner(["git", "-C", str(target), "checkout", "-b", branch,
+                   "origin/main"]).returncode != 0:
+            return False
+        # `origin` zeigt nach dem Klon als Push-URL aufs Haupt-Repo: ein `git push` könnte
+        # dort Branches und Tags anlegen oder löschen. Der eigene Klon braucht kein Remote.
+        return runner(["git", "-C", str(target), "remote", "remove", "origin"]).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -221,7 +234,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Erst fetch, dann Schnappschuss: sonst schlägt eine regulär geholte Remote-Ref als Warnung auf.
     if not fetch_main(haupt):
         print("Hinweis: git fetch fehlgeschlagen, lokaler Stand wird verwendet.", flush=True)
-    vorher = ref_snapshot(haupt)
+    vorher, snapshot_fehler = ref_snapshot(haupt)
+    if snapshot_fehler:
+        print(f"Fehler: Ref-Schnappschuss nicht lesbar ({snapshot_fehler}).", file=sys.stderr)
+        return 2
 
     name = f"{args.repo}-{time.strftime('%Y%m%d-%H%M%S')}"
     klon = args.runs_dir / name
@@ -236,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args.logs_dir.mkdir(parents=True, exist_ok=True)
     log = args.logs_dir / f"{name}.jsonl"
-    umgebung = dict(os.environ, HOME="/config")
+    umgebung = dict(os.environ, HOME="/config", PWD=str(klon))
     umgebung["PATH"] = f"/config/.local/bin:{os.environ.get('PATH', '/usr/bin:/bin')}"
     # --standalone: eigener Server je Lauf. Ohne das hängt sich der Client an den
     # Hintergrunddienst, und dessen cwd (/config) gilt statt des Klons.
@@ -257,7 +273,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     patch = args.runs_dir / f"{name}.patch"
     stat = export_patch(klon, patch)
-    nachher = ref_snapshot(haupt)
+    nachher, snapshot_fehler = ref_snapshot(haupt)
     diff = ref_diff(vorher, nachher)
     tokens = summarize_log(log)
 
@@ -278,6 +294,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("Dateien:")
     print(stat or "  (keine Änderung)")
 
+    if snapshot_fehler:
+        print(f"Fehler: Ref-Schnappschuss nach dem Lauf nicht lesbar ({snapshot_fehler}).",
+              file=sys.stderr)
+        return 2
     if diff:
         print(WARNUNG)
         print(diff)

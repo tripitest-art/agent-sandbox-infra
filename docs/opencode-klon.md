@@ -19,7 +19,16 @@ Ketten wie `ls && git status`. Zwei Grenzen bleiben:
 Deshalb die zweite Barriere: `git clone --local --no-hardlinks` teilt keine Objekt-Dateien,
 Refs und Worktrees mit dem Haupt-Repo. Ein durchgerutschter Befehl (`git branch -D`,
 `git reset --hard`, `git worktree remove`, `git update-ref`) trifft nur den eigenen Klon.
+Nach dem Anlegen des Branches entfernt das Skript `origin` wieder: sonst zeigt der Remote
+als Push-URL aufs Haupt-Repo, und ein `git push` könnte dort fremde Branches und Tags
+anlegen oder löschen (nur der ausgecheckte Branch ist durch `receive.denyCurrentBranch`
+geschützt).
 Die dritte Barriere ist der Ref-Vergleich vor und nach dem Lauf.
+
+Grenze, die auch das Entfernen von `origin` nicht schließt: beliebiger Code kann den Remote
+neu setzen — `git remote add x /config/projects/<repo>` oder `git push /config/projects/<repo>`
+mit Pfad-URL. Dagegen hilft nur ein Verbot von `bash`/`python3`, das die Karte ausdrücklich
+ausschließt. Der Pfad-Rest ist damit Beweis- und Aufräumfunktion, keine Sperre.
 
 ## Aufruf (als `dev`, `HOME=/config`)
 
@@ -38,9 +47,12 @@ Ablauf:
 1. `git fetch` im Haupt-Repo; scheitert er, läuft der Lauf auf dem lokalen Stand weiter und
    sagt das.
 2. Ref-Schnappschuss **nach** dem Fetch: `for-each-ref`, `worktree list --porcelain`,
-   `stash list`.
+   `stash list`. Ist er nicht lesbar (z. B. `rc=128` bei fremdem Besitzer), bricht das
+   Skript mit Exit 2 ab — ein leerer Schnappschuss würde sonst als „unverändert" gelten
+   und die Ref-Kontrolle wäre blind.
 3. `git clone --local --no-hardlinks /config/projects/<repo> /config/work/opencode-runs/<repo>-<zeitstempel>`,
-   dann `git checkout -b <branch> origin/main`.
+   dann `git checkout -b <branch> origin/main` und `git remote remove origin` — der Klon
+   braucht kein Remote, und `origin` wäre sonst eine Push-URL aufs Haupt-Repo.
 4. `opencode run --standalone "<auftrag>" --model … --format json` im Klon, Log nach
    `/config/logs/opencode-runs/<name>.jsonl`. `--standalone` ist Pflicht: ohne das hängt sich
    der Client an den OpenCode-Hintergrunddienst, und dessen cwd (im Test `/config`) gilt
@@ -50,6 +62,9 @@ Ablauf:
    ist tabu — dort nichts ändern. Verwende keine absoluten Pfade außerhalb des Klons."
    Ohne den Satz löst das Modell Pfade aus der Doku zu absoluten Pfaden ins Haupt-Checkout
    auf und ändert dort — der Klon schützt dann nur die Refs, nicht die Dateien.
+   Das Skript setzt `PWD` auf den Klon: OpenCode liest sein Projektverzeichnis daraus, und
+   ein Aufruf aus einem für `dev` unlesbaren cwd (etwa geerbtes `/root`) scheitert sonst mit
+   `Failed to change directory to /root`.
 5. `git add -A` (macht das Skript, nicht OpenCode) und
    `git diff --cached --binary > /config/work/opencode-runs/<name>.patch`, dazu `--stat`.
 6. Ref-Schnappschuss nachher, Vergleich. Bei Abweichung die Zeile
@@ -57,8 +72,8 @@ Ablauf:
 7. Zusammenfassung: Patch, Log, Branch, Laufzeit, Tokens (Summe aus den `step_finish`-Events),
    fehlgeschlagene und von der Sperre abgewiesene Tool-Calls.
 
-Exit-Codes: 0 in Ordnung, 1 Warnung, 2 Aufbaufehler (Repo fehlt, Klon oder Branch
-scheitert), 3 OpenCode fehlgeschlagen oder Zeitlimit. Bei HTTP 429 (Gratis-Limit) nennt die
+Exit-Codes: 0 in Ordnung, 1 Warnung, 2 Aufbaufehler (Repo fehlt, Ref-Schnappschuss nicht
+lesbar, Klon oder Branch scheitert), 3 OpenCode fehlgeschlagen oder Zeitlimit. Bei HTTP 429 (Gratis-Limit) nennt die
 Zusammenfassung den Reset-Zeitpunkt aus `retryAfterMs` und das Ausweichmodell
 `opencode-go/hy4-flash-free` (Gratis-Modell des Go-Endpunkts, belastet das Go-Kontingent nicht).
 
@@ -74,8 +89,10 @@ umstellbar; fehlen sie, passiert nichts.
 
 ## Tests
 
-- `tests/test_opencode_run.py`: Befehlsfolge, Patch-Export, Token-Summe, Abbruch bei
-  unbekanntem Repo (ohne echtes Git und ohne Modell).
+- `tests/test_opencode_run.py`: Befehlsfolge (inkl. `remote remove origin`), Patch-Export,
+  Token-Summe, Abbruch bei unbekanntem Repo und bei nicht lesbarem Ref-Schnappschuss
+  (ohne echtes Git und ohne Modell).
 - `tests/test_gc.py`: 7-Tage-Frist für Klone, 30-Tage-Frist für Belege.
-- Echter Lauf auf CT 106: Schadenstest im Klon, Gegenprobe der Warnung, Ende-zu-Ende mit
-  einem Doku-Auftrag in `home-infra` (Ergebnis nur als Patch, kein PR).
+- Echter Lauf auf CT 106: Schadenstest im Klon (inkl. `git push`-Versuch ohne Remote),
+  Gegenprobe der Warnung, Ende-zu-Ende mit einem Doku-Auftrag in `home-infra` (Ergebnis
+  nur als Patch, kein PR).
