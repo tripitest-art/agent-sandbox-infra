@@ -30,8 +30,10 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
+from zoneinfo import ZoneInfo
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess]
 
@@ -162,6 +164,37 @@ def summarize_log(path: str | Path) -> dict[str, int]:
     return summe
 
 
+def limit_hinweis(path: str | Path, now: float | None = None) -> str:
+    """Nennt ein Gratis-Limit (HTTP 429) aus dem Log samt Reset-Zeit; '' wenn keins vorkam."""
+    try:
+        zeilen = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    for zeile in reversed(zeilen):
+        try:
+            ereignis = json.loads(zeile)
+        except ValueError:
+            continue
+        if not isinstance(ereignis, dict) or ereignis.get("type") != "error":
+            continue
+        fehler = ereignis.get("error") or {}
+        if fehler.get("status") != 429 and fehler.get("type") != "provider.free-limit":
+            continue
+        reset = ""
+        millisekunden = fehler.get("retryAfterMs")
+        if isinstance(millisekunden, (int, float)):
+            basis = ereignis.get("timestamp")            # Reset ab Fehlerzeitpunkt, nicht ab jetzt
+            if not isinstance(basis, (int, float)):
+                basis = (time.time() if now is None else now) * 1000
+            zeit = (basis + millisekunden) / 1000
+            # CT 106 läuft in UTC; die Reset-Zeit ist in Freiburg gemeint.
+            reset = (", Reset um " + datetime.fromtimestamp(zeit, ZoneInfo("Europe/Berlin"))
+                     .strftime("%d.%m. %H:%M") + " (Europe/Berlin)")
+        return ("Gratis-Limit erreicht (HTTP 429" + reset + "). Anderes Modell per --model, "
+                "z. B. opencode-go/hy4-flash-free.")
+    return ""
+
+
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OpenCode in einem Wegwerf-Klon laufen lassen und den Patch exportieren.")
@@ -239,6 +272,9 @@ def main(argv: Sequence[str] | None = None) -> int:
           f"in {tokens['schritte']} Schritten")
     print(f"Tool-Calls: {tokens['tool_fehler']} fehlgeschlagen, "
           f"davon {tokens['gesperrt']} von der git-Sperre abgewiesen")
+    hinweis = limit_hinweis(log)
+    if hinweis:
+        print(hinweis)
     print("Dateien:")
     print(stat or "  (keine Änderung)")
 

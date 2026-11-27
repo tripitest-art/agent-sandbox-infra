@@ -154,6 +154,31 @@ def test_summarize_log_fehlende_datei_liefert_nullen(tmp_path):
     assert summe["input"] == 0 and summe["schritte"] == 0 and summe["gesperrt"] == 0
 
 
+# ---- limit_hinweis ----
+
+def test_limit_hinweis_nennt_reset_zeit_und_alternatives_modell(tmp_path):
+    log = tmp_path / "lauf.jsonl"
+    log.write_text(json.dumps({"type": "error", "timestamp": 1_000_000_000_000, "error": {
+        "type": "provider.free-limit", "status": 429, "retryAfterMs": 3_600_000}}),
+        encoding="utf-8")
+
+    text = oc.limit_hinweis(log)
+    assert "Gratis-Limit erreicht (HTTP 429" in text
+    assert "Reset um 09.09. 04:46 (Europe/Berlin)" in text
+    assert "opencode-go/hy4-flash-free" in text
+
+
+def test_limit_hinweis_ohne_429_bleibt_leer(tmp_path):
+    log = tmp_path / "lauf.jsonl"
+    log.write_text("\n".join([
+        _ereignis("step_finish", {"tokens": {"input": 1}}),
+        json.dumps({"type": "error", "error": {"status": 500}}),
+    ]), encoding="utf-8")
+
+    assert oc.limit_hinweis(log) == ""
+    assert oc.limit_hinweis(tmp_path / "gibt-es-nicht.jsonl") == ""
+
+
 # ---- main ----
 
 def test_main_bricht_bei_unbekanntem_repo_ab(tmp_path):

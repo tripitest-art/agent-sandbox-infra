@@ -58,7 +58,9 @@ Ablauf:
    fehlgeschlagene und von der Sperre abgewiesene Tool-Calls.
 
 Exit-Codes: 0 in Ordnung, 1 Warnung, 2 Aufbaufehler (Repo fehlt, Klon oder Branch
-scheitert), 3 OpenCode fehlgeschlagen oder Zeitlimit.
+scheitert), 3 OpenCode fehlgeschlagen oder Zeitlimit. Bei HTTP 429 (Gratis-Limit) nennt die
+Zusammenfassung den Reset-Zeitpunkt aus `retryAfterMs` und das Ausweichmodell
+`opencode-go/hy4-flash-free` (Gratis-Modell des Go-Endpunkts, belastet das Go-Kontingent nicht).
 
 ## Aufräumen
 
