@@ -1,0 +1,7 @@
+#!/bin/sh
+# Sperrt jeden eingehenden Push in ein Haupt-Repo (/config/projects auf CT 106).
+# Warum hier und nicht als Kommando-Sperre im Agenten: das Kommando lässt sich über
+# beliebigen Code aufrufen, der Empfang im Ziel-Repo nicht. Kein Umgehungsschalter über
+# eine Umgebungsvariable — die könnte das Modell selbst setzen.
+echo "Push in Haupt-Repo auf CT 106 gesperrt (Agenten-Sandbox). Ergebnis als Patch abgeben." >&2
+exit 1

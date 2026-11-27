@@ -587,6 +587,16 @@ systemctl daemon-reload
 systemctl enable agent-gc.timer >/dev/null; systemctl restart agent-gc.timer
 echo "agent-gc: $(systemctl is-active agent-gc.timer) (alle 6 Stunden)"
 
+echo "== Pre-receive-Sperre in den Haupt-Repos"
+# Der Push ins Haupt-Repo wird im Ziel-Repo abgewiesen (docs/opencode-klon.md); install.sh
+# läuft auf CT 112, die Haupt-Repos liegen auf CT 106. Dort den Installer einmal starten —
+# neue Repos erfasst der nächste Lauf von selbst.
+if [ -d "${PROJECTS_DIR:-/config/projects}" ]; then
+  bash "$SCRIPT_DIR/hooks/install-sperre.sh" "${PROJECTS_DIR:-/config/projects}"
+else
+  echo "übersprungen: ${PROJECTS_DIR:-/config/projects} fehlt (Installation auf CT 106 ausführen)"
+fi
+
 echo "== Infra-Repo: Deploy-Key (nur lesen)"
 # Das Repo ist privat. git pull läuft über einen eigenen SSH-Schlüssel, der nur dieses Repo
 # lesen darf (GitHub → Settings → Deploy keys, ohne Schreibrecht). Bewusst nicht über den

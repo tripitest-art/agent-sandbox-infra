@@ -44,6 +44,10 @@ LOGS_DIR = Path("/config/logs/opencode-runs")
 DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"
 DEFAULT_TIMEOUT = 900
 WARNUNG = "WARNUNG: Haupt-Repo-Refs verändert"
+# Text aus sandbox/hooks/pre-receive-sperre: daran erkennt der Lauf, ob die Sperre im
+# Haupt-Repo wirklich liegt (ein fremder Hook mit anderem Text sperrt nicht).
+SPERRE_MARKE = "Push in Haupt-Repo auf CT 106 gesperrt"
+
 WEGWEIS = ("\n\nArbeite ausschließlich im aktuellen Arbeitsverzeichnis (Wegwerf-Klon). "
            "Das Haupt-Checkout {repo} ist tabu — dort nichts ändern. "
            "Verwende keine absoluten Pfade außerhalb des Klons.")
@@ -211,6 +215,20 @@ def limit_hinweis(path: str | Path, now: float | None = None) -> str:
     return ""
 
 
+def sperre_fehlt(haupt: str | Path) -> bool:
+    """True, wenn im Haupt-Repo keine aktive pre-receive-Sperre liegt (Deploy fehlt).
+
+    Geprüft wird der Inhalt, nicht nur die Datei: ein Hook mit fremdem Text sperrt nicht,
+    und ein Modell könnte die Datei anlegen. Der Lauf bricht deswegen nicht ab — sonst
+    stoppt ein fehlender Deploy alle Läufe."""
+    hook = Path(haupt) / ".git" / "hooks" / "pre-receive"
+    try:
+        return not (os.access(hook, os.X_OK)
+                    and SPERRE_MARKE in hook.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return True
+
+
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OpenCode in einem Wegwerf-Klon laufen lassen und den Patch exportieren.")
@@ -238,6 +256,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Fehler: Prompt-Datei {args.prompt_file} nicht lesbar: {ausnahme}",
               file=sys.stderr)
         return 2
+
+    # Fehlt die Sperre, ist der Push-Weg ins Haupt-Repo offen. Nicht abbrechen: ein
+    # fehlender Deploy würde sonst alle Läufe stoppen.
+    if sperre_fehlt(haupt):
+        print(f"WARNUNG: pre-receive-Sperre fehlt in {args.repo}.", file=sys.stderr, flush=True)
 
     # Erst fetch, dann Schnappschuss: sonst schlägt eine regulär geholte Remote-Ref als Warnung auf.
     if not fetch_main(haupt):
