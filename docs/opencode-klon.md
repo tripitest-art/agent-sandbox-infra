@@ -1,0 +1,79 @@
+# OpenCode-Läufe in einem Wegwerf-Klon (CT 106)
+
+OpenCode arbeitet auf der Entwicklungsbox in einem eigenen Klon statt in einem Worktree
+des Haupt-Repos. `sandbox/opencode_run.py` legt ihn an, startet den Lauf, exportiert den
+Ergebnis-Patch und belegt, dass das Haupt-Repo unberührt blieb.
+
+## Warum
+
+Die git-Sperre in `/config/.config/opencode/opencode.json` ist ein Textmuster auf
+Shell-Segmente (`{"*": "allow", "git *": "deny", "*git *": "deny"}`). Sie hält die
+naheliegenden Wege dicht — auch `/usr/bin/git`, `env git`, `bash -c`, `xargs git` und
+Ketten wie `ls && git status`. Zwei Grenzen bleiben:
+
+- **Nebenwirkung:** `*git *` ist reiner Text. Auch `grep -r "git log" docs/` wird abgewiesen.
+- **Restrisiko:** beliebiger Code kommt vorbei. `python3 -c "import subprocess;
+  subprocess.run(['git','checkout',…])"` und ein Shell-Skript, das git aufruft, liefen im
+  Test durch. Nur ein Verbot von `python3`/`bash` würde das schließen.
+
+Deshalb die zweite Barriere: `git clone --local --no-hardlinks` teilt keine Objekt-Dateien,
+Refs und Worktrees mit dem Haupt-Repo. Ein durchgerutschter Befehl (`git branch -D`,
+`git reset --hard`, `git worktree remove`, `git update-ref`) trifft nur den eigenen Klon.
+Die dritte Barriere ist der Ref-Vergleich vor und nach dem Lauf.
+
+## Aufruf (als `dev`, `HOME=/config`)
+
+```
+runuser -u dev -- env HOME=/config PATH=/config/.local/bin:/usr/bin:/bin \
+  python3 /config/projects/agent-sandbox-infra/sandbox/opencode_run.py \
+  --repo home-infra --branch docs/opencode-klon-probe --prompt-file /tmp/auftrag.md
+```
+
+Optionen: `--model` (Vorgabe `opencode/deepseek-v4.1-flash-free`), `--timeout` (Vorgabe
+900 s), `--projects-dir`, `--runs-dir`, `--logs-dir`, `--opencode` (Vorgabe `$OPENCODE_BIN`
+oder `opencode`).
+
+Ablauf:
+
+1. `git fetch` im Haupt-Repo; scheitert er, läuft der Lauf auf dem lokalen Stand weiter und
+   sagt das.
+2. Ref-Schnappschuss **nach** dem Fetch: `for-each-ref`, `worktree list --porcelain`,
+   `stash list`.
+3. `git clone --local --no-hardlinks /config/projects/<repo> /config/work/opencode-runs/<repo>-<zeitstempel>`,
+   dann `git checkout -b <branch> origin/main`.
+4. `opencode run --standalone "<auftrag>" --model … --format json` im Klon, Log nach
+   `/config/logs/opencode-runs/<name>.jsonl`. `--standalone` ist Pflicht: ohne das hängt sich
+   der Client an den OpenCode-Hintergrunddienst, und dessen cwd (im Test `/config`) gilt
+   statt des Klons — das Modell arbeitet dann mit relativen Pfaden im Haupt-Checkout.
+   An den Auftrag hängt das Skript zusätzlich einen Satz: „Arbeite ausschließlich im
+   aktuellen Arbeitsverzeichnis (Wegwerf-Klon). Das Haupt-Checkout /config/projects/<repo>
+   ist tabu — dort nichts ändern. Verwende keine absoluten Pfade außerhalb des Klons."
+   Ohne den Satz löst das Modell Pfade aus der Doku zu absoluten Pfaden ins Haupt-Checkout
+   auf und ändert dort — der Klon schützt dann nur die Refs, nicht die Dateien.
+5. `git add -A` (macht das Skript, nicht OpenCode) und
+   `git diff --cached --binary > /config/work/opencode-runs/<name>.patch`, dazu `--stat`.
+6. Ref-Schnappschuss nachher, Vergleich. Bei Abweichung die Zeile
+   `WARNUNG: Haupt-Repo-Refs verändert`, der Diff und Exit 1.
+7. Zusammenfassung: Patch, Log, Branch, Laufzeit, Tokens (Summe aus den `step_finish`-Events),
+   fehlgeschlagene und von der Sperre abgewiesene Tool-Calls.
+
+Exit-Codes: 0 in Ordnung, 1 Warnung, 2 Aufbaufehler (Repo fehlt, Klon oder Branch
+scheitert), 3 OpenCode fehlgeschlagen oder Zeitlimit.
+
+## Aufräumen
+
+`prune_opencode_runs()` in `sandbox/gc.py` läuft im vorhandenen Housekeeping mit — kein
+zweiter Wachhund. Auf CT 106 ist das der Timer `agy-sessions`
+(`gc.py --nur-prozesse`, den `prozesse_aufraeumen()` bedient): Klone unter
+`/config/work/opencode-runs` werden nach 7 Tagen entfernt, Patches und die JSONL-Logs in
+`/config/logs/opencode-runs` nach 30 Tagen. Im Trockenlauf (`GC_PROZESSE_TROCKEN=1`) bleibt
+alles stehen. Die Verzeichnisse sind per `OPENCODE_RUNS_DIR` und `OPENCODE_LOGS_DIR`
+umstellbar; fehlen sie, passiert nichts.
+
+## Tests
+
+- `tests/test_opencode_run.py`: Befehlsfolge, Patch-Export, Token-Summe, Abbruch bei
+  unbekanntem Repo (ohne echtes Git und ohne Modell).
+- `tests/test_gc.py`: 7-Tage-Frist für Klone, 30-Tage-Frist für Belege.
+- Echter Lauf auf CT 106: Schadenstest im Klon, Gegenprobe der Warnung, Ende-zu-Ende mit
+  einem Doku-Auftrag in `home-infra` (Ergebnis nur als Patch, kein PR).

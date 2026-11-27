@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -31,6 +32,12 @@ GESCHUETZTE_BRANCHES = frozenset({"main", "master"})
 STREU_ORTE: tuple[str, ...] = ("/tmp", "/home/worker")
 STREU_MIN_ALTER_S: int = 86400
 STREU_MARKE: str = os.path.join(CLAIM_DIR, "gc-streukopien.json")
+
+# Wegwerf-Klone der OpenCode-Läufe (`sandbox/opencode_run.py`) auf CT 106.
+OPENCODE_RUNS_DIR = os.environ.get("OPENCODE_RUNS_DIR", "/config/work/opencode-runs")
+OPENCODE_LOGS_DIR = os.environ.get("OPENCODE_LOGS_DIR", "/config/logs/opencode-runs")
+OPENCODE_CLONE_MAX_AGE_SECONDS = 7 * 86400
+OPENCODE_DATEI_MAX_AGE_SECONDS = 30 * 86400
 
 
 def _run(cmd: Sequence[str]) -> subprocess.CompletedProcess:
@@ -442,6 +449,62 @@ def raeume_agenten_sitzungen(
     return zeilen
 
 
+def _scandir(pfad: str | Path | None) -> list[os.DirEntry]:
+    """Einträge eines Verzeichnisses; ein fehlendes Verzeichnis ergibt eine leere Liste."""
+    if pfad is None:
+        return []
+    try:
+        return list(os.scandir(pfad))
+    except OSError:
+        return []
+
+
+def prune_opencode_runs(
+    runs_dir: str | Path,
+    logs_dir: str | Path | None = None,
+    clone_max_age_seconds: float = OPENCODE_CLONE_MAX_AGE_SECONDS,
+    datei_max_age_seconds: float = OPENCODE_DATEI_MAX_AGE_SECONDS,
+    now: float | None = None,
+) -> dict[str, int]:
+    """Räumt Wegwerf-Klone der OpenCode-Läufe und ihre Belege auf.
+
+    Klone sind Verzeichnisse unter `runs_dir`, daneben liegen die `.patch`-Dateien; die
+    JSONL-Logs stehen in `logs_dir`. Maßstab ist die mtime: Klone älter als
+    `clone_max_age_seconds`, Patches und Logs älter als `datei_max_age_seconds`. Junge
+    Einträge und fremde Dateien bleiben stehen. Gibt {'klone', 'patches', 'logs'} zurück;
+    fehlende Verzeichnisse und nicht löschbare Einträge ergeben keinen Fehler."""
+    referenz = time.time() if now is None else now
+    clone_grenze = referenz - clone_max_age_seconds
+    datei_grenze = referenz - datei_max_age_seconds
+    statistik = {"klone": 0, "patches": 0, "logs": 0}
+
+    for eintrag in _scandir(runs_dir):
+        try:
+            alter = eintrag.stat(follow_symlinks=False).st_mtime
+            if eintrag.is_dir(follow_symlinks=False) and alter < clone_grenze:
+                shutil.rmtree(eintrag.path)
+                statistik["klone"] += 1
+            elif (eintrag.is_file(follow_symlinks=False)
+                  and eintrag.name.endswith(".patch") and alter < datei_grenze):
+                os.unlink(eintrag.path)
+                statistik["patches"] += 1
+        except OSError:
+            continue
+
+    for eintrag in _scandir(logs_dir):
+        try:
+            if not eintrag.is_file(follow_symlinks=False):
+                continue
+            if not eintrag.name.endswith(".jsonl"):
+                continue
+            if eintrag.stat(follow_symlinks=False).st_mtime < datei_grenze:
+                os.unlink(eintrag.path)
+                statistik["logs"] += 1
+        except OSError:
+            continue
+    return statistik
+
+
 def run_gc(
     claim_dir: str | Path,
     project_dirs: Sequence[str | Path],
@@ -479,14 +542,20 @@ def run_gc(
 
 
 def prozesse_aufraeumen(trocken: bool | None = None) -> int:
-    """Räumt verwaiste Agenten-Sitzungen auf und gibt die Meldungszeilen aus.
+    """Räumt verwaiste Agenten-Sitzungen und alte OpenCode-Wegwerf-Klone auf.
 
     `trocken=None` liest `GC_PROZESSE_TROCKEN` (Werte "", "0" = scharf). Rückgabe immer 0 —
-    ein Watchdog, der nichts findet, ist kein Fehler."""
+    ein Watchdog, der nichts findet, ist kein Fehler. Das ist der CT-106-Pfad
+    (`--nur-prozesse`, Timer `agy-sessions`): dort liegen die Klone der OpenCode-Läufe."""
     if trocken is None:
         trocken = os.environ.get("GC_PROZESSE_TROCKEN", "") not in ("", "0")
     for zeile in raeume_agenten_sitzungen(trocken=trocken):
         print(zeile, flush=True)
+    if not trocken:
+        aufgeraeumt = prune_opencode_runs(OPENCODE_RUNS_DIR, OPENCODE_LOGS_DIR)
+        if any(aufgeraeumt.values()):
+            print("gc: opencode-runs: {klone} Klone, {patches} Patches, {logs} Logs "
+                  "entfernt.".format(**aufgeraeumt), flush=True)
     return 0
 
 

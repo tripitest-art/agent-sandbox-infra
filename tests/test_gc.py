@@ -503,10 +503,90 @@ def test_prozesse_aufraeumen_mit_trocken_schalter(monkeypatch, capsys):
     assert "trocken=True" in capsys.readouterr().out
 
 
-def test_main_nur_prozesse_ueberspringt_git_teil(monkeypatch, capsys):
+def test_main_nur_prozesse_ueberspringt_git_teil(monkeypatch, capsys, tmp_path):
     # Auf CT 106 gibt es weder Projektliste noch Claims: der Schalter darf nichts davon anfassen.
     monkeypatch.setattr(gc, "raeume_agenten_sitzungen", lambda trocken=False: ["⚠ Stephan: Zeile"])
     monkeypatch.setattr(gc, "run_gc", lambda *a, **k: (_ for _ in ()).throw(AssertionError("darf nicht laufen")))
+    monkeypatch.setattr(gc, "OPENCODE_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(gc, "OPENCODE_LOGS_DIR", str(tmp_path / "logs"))
 
     assert gc.main(["--nur-prozesse"]) == 0
     assert "⚠ Stephan: Zeile" in capsys.readouterr().out
+
+
+# ---- prune_opencode_runs (Wegwerf-Klone der OpenCode-Läufe) ----
+
+def _klon(runs, name, mtime):
+    pfad = runs / name
+    pfad.mkdir()
+    (pfad / "datei").write_text("x", encoding="utf-8")
+    os.utime(pfad, (mtime, mtime))
+    return pfad
+
+
+def test_prune_opencode_runs_entfernt_alte_klone_und_behaelt_junge(tmp_path):
+    runs = tmp_path / "opencode-runs"
+    runs.mkdir()
+    alt = _klon(runs, "home-infra-20260101-000000", 0.0)
+    jung = _klon(runs, "home-infra-20261127-000000", 900.0)
+
+    stats = gc.prune_opencode_runs(runs, now=1000.0, clone_max_age_seconds=500.0,
+                                   datei_max_age_seconds=500.0)
+    assert stats == {"klone": 1, "patches": 0, "logs": 0}
+    assert not alt.exists()
+    assert jung.is_dir()
+
+
+def test_prune_opencode_runs_haelt_patches_und_logs_laenger(tmp_path):
+    runs = tmp_path / "runs"
+    logs = tmp_path / "logs"
+    runs.mkdir()
+    logs.mkdir()
+    alt_patch = runs / "a.patch"
+    neu_patch = runs / "b.patch"
+    alt_log = logs / "a.jsonl"
+    neu_log = logs / "b.jsonl"
+    fremd = logs / "notiz.txt"
+    for datei in (alt_patch, neu_patch, alt_log, neu_log, fremd):
+        datei.write_text("x", encoding="utf-8")
+    for datei in (alt_patch, alt_log, fremd):
+        os.utime(datei, (0.0, 0.0))
+    for datei in (neu_patch, neu_log):
+        os.utime(datei, (900.0, 900.0))
+
+    stats = gc.prune_opencode_runs(runs, logs, clone_max_age_seconds=100.0,
+                                   datei_max_age_seconds=500.0, now=1000.0)
+    assert stats == {"klone": 0, "patches": 1, "logs": 1}
+    assert not alt_patch.exists() and neu_patch.exists()
+    assert not alt_log.exists() and neu_log.exists()
+    assert fremd.exists()
+
+
+def test_prune_opencode_runs_fehlende_verzeichnisse_sind_kein_fehler(tmp_path):
+    assert gc.prune_opencode_runs(tmp_path / "keine-klone", tmp_path / "keine-logs") == {
+        "klone": 0, "patches": 0, "logs": 0}
+
+
+def test_prozesse_aufraeumen_raeumt_alte_opencode_klone_auf(tmp_path, monkeypatch, capsys):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    alt = _klon(runs, "home-infra-20260101-000000", 0.0)     # 1970: älter als jede Vorgabe
+    monkeypatch.setattr(gc, "raeume_agenten_sitzungen", lambda trocken=False: [])
+    monkeypatch.setattr(gc, "OPENCODE_RUNS_DIR", str(runs))
+    monkeypatch.setattr(gc, "OPENCODE_LOGS_DIR", str(tmp_path / "logs"))
+
+    assert gc.prozesse_aufraeumen(trocken=False) == 0
+    assert not alt.exists()
+    assert "opencode-runs: 1 Klone" in capsys.readouterr().out
+
+
+def test_prozesse_aufraeumen_trocken_laesst_die_klone_stehen(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    alt = _klon(runs, "home-infra-20260101-000000", 0.0)
+    monkeypatch.setattr(gc, "raeume_agenten_sitzungen", lambda trocken=False: [])
+    monkeypatch.setattr(gc, "OPENCODE_RUNS_DIR", str(runs))
+    monkeypatch.setattr(gc, "OPENCODE_LOGS_DIR", str(tmp_path / "logs"))
+
+    assert gc.prozesse_aufraeumen(trocken=True) == 0
+    assert alt.is_dir()
