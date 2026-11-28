@@ -189,6 +189,12 @@ Grenzen: nur das Repo `agent-sandbox-infra-oc` ist für uid 999 eingerichtet. Wo
 Haupt-Repos (`/opt/claude-desktop/config/projects/…`) bleiben `dev`-Sache — dort kann
 `opencode` nicht schreiben, weil das gitdir in `/config/projects` liegt.
 
+Grenze der Basis: `worktreeBaseRef` ist für dieses Repo `null`, Orca zweigt neue Worktrees
+deshalb vom lokalen `main` des Klons ab. Der Klon hängt per `origin` am lokalen
+Haupt-Checkout und stand am 28.11.2026 auf `0cfcbe7` (vor #468–#471). Vor neuen Worktrees
+also `main` im Haupt-Checkout aktualisieren und im Klon `git -C … pull --ff-only` nachziehen,
+sonst entstehen Diffs gegen einen alten Base.
+
 ## Aufruf (als `opencode`, `HOME=/home/opencode`)
 
 ```
