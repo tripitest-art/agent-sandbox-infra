@@ -147,7 +147,7 @@ Runtime: `content_hash` ist `sha256(payload)`, die Revision der Zeile `meta.revi
 `meta.revision` zieht mit. Läuft `orcad` dabei, bricht es mit
 `ProfileStateRevisionConflictError (expected … found …)` ab und schreibt danach keinen
 Zustand mehr — also: Runtime stoppen, Zeile schreiben, Runtime starten. Vorher eine Kopie per
-`sqlite3.Connection.backup` ziehen (ein Dateikopi verliert das WAL).
+`sqlite3.Connection.backup` ziehen (eine Dateikopie verliert das WAL).
 
 **Worktree.** Orcas `workspaceDir` ist global (`/home/dev/orca/workspaces`, `dev:dev`) und
 darf nicht auf einen Opencode-Pfad zeigen, sonst träfe es Claude und Antigravity. Statt
