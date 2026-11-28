@@ -107,13 +107,87 @@ Wer frische `origin/main` braucht, fetcht vorher als `dev` im Haupt-Repo.
 Also `sudo -n -u opencode -H /opt/opencode/bin/opencode …`. Der Launcher braucht die Regel
 nicht — er wird direkt als `opencode` gestartet (`runuser -u opencode …`).
 
-Das `context-mode`-Plugin aus `opencode.json` ist im neuen HOME nicht installiert
-(`opencode plugin list` findet keins). Der Headless-Lauf braucht es nicht; ohne Plugin fehlen
-dem Modell dessen Shell-Werkzeuge (`ctx_execute`, `ctx_batch`).
+`opencode.json` im neuen HOME deklariert dasselbe Plugin `context-mode` wie das Profil von
+`dev`; es ist unter `/home/opencode/.cache/opencode/npm/context-mode@latest` abgelegt, und
+beim Orca-Probelauf entstand `/home/opencode/.context-mode/projects` — das Plugin läuft also
+auch als uid 999. `opencode plugin list` meldet trotzdem „No plugins found"; der Unterbefehl
+listet nur anders installierte Plugins, nicht die Deklaration aus der Config.
 
-Orca startet OpenCode weiterhin als `dev`: Orca kennt `opencode`/`opencode2` als eingebaute
-Agenten und ruft das Binary über den PATH; ein PATH-Wrapper wäre kein Schutz, weil `dev` die
-Verzeichnisse selbst besitzt. Offene Ausnahme, Stephan entscheidet separat.
+## Orca startet OpenCode als `opencode` (uid 999)
+
+Orca kennt `opencode`/`opencode2` als eingebaute Agenten und rief bisher das Binary über den
+PATH — also als `dev`. Das ist geschlossen: beide Agenten laufen jetzt als uid 999 in einem
+Worktree, den `opencode` beschreiben darf.
+
+**Wrapper `/opt/opencode-isolated/opencode`** (root:root 755) — der Dateiname muss mit
+`opencode` beginnen, weil Orcas opencode-Parser das Programm am Basename erkennt
+(`/^opencode2?(\.(exe|cmd))?$/i`); ein anders benannter Wrapper bekommt weder `--standalone`
+noch die erwartete Argumentform.
+
+```sh
+#!/bin/sh
+for a in "$@"; do
+  [ "$a" = "--standalone" ] && exec sudo -Hn -u opencode /opt/opencode/bin/opencode "$@"
+done
+exec sudo -Hn -u opencode /opt/opencode/bin/opencode --standalone "$@"
+```
+
+`--standalone` ist Pflicht: ohne das Flag hängt sich die Instanz an den Hintergrunddienst
+des Users und scheitert am festen Port 49374, den der Dienst von `dev` hält
+(`Managed service port 49374 on 127.0.0.1 is already in use`). Deshalb genügt die
+sudo-Regel aus dem vorigen Abschnitt; ein zweiter Eintrag ist nicht nötig.
+
+**Orca-Override.** `agentCmdOverrides` ist ein Host-Wert in der Settings-Zeile von
+`/home/dev/.config/orca/profiles/local-default/profile-state.db`:
+
+    {"opencode": "/opt/opencode-isolated/opencode", "opencode2": "/opt/opencode-isolated/opencode"}
+
+Die Orca-CLI hat keinen Settings-Befehl. Schreiben von außen geht nur bei **gestoppter**
+Runtime: `content_hash` ist `sha256(payload)`, die Revision der Zeile `meta.revision + 1`, und
+`meta.revision` zieht mit. Läuft `orcad` dabei, bricht es mit
+`ProfileStateRevisionConflictError (expected … found …)` ab und schreibt danach keinen
+Zustand mehr — also: Runtime stoppen, Zeile schreiben, Runtime starten. Vorher eine Kopie per
+`sqlite3.Connection.backup` ziehen (ein Dateikopi verliert das WAL).
+
+**Worktree.** Orcas `workspaceDir` ist global (`/home/dev/orca/workspaces`, `dev:dev`) und
+darf nicht auf einen Opencode-Pfad zeigen, sonst träfe es Claude und Antigravity. Statt
+dessen existiert ein eigener Klon als Orca-Repo:
+
+| Pfad | Besitzer | Rolle |
+|---|---|---|
+| `/config/work/orca-opencode/src/agent-sandbox-infra-oc` | opencode:opencode | Klon von `/config/projects/agent-sandbox-infra` (origin = lokaler Pfad), Orca-Repo `agent-sandbox-infra-oc` |
+| `/home/dev/orca/workspaces/agent-sandbox-infra-oc/<name>` | dev:dev | von Orca angelegte Worktrees dieses Repos |
+
+Damit `dev` im opencode-eigenen Klon Worktrees anlegen und `opencode` sie beschreiben kann,
+tragen Klon und Worktree-Elternverzeichnis ACLs:
+
+```sh
+setfacl -R -m u:dev:rwX -m u:opencode:rwX -m d:u:dev:rwX -m d:u:opencode:rwX \
+  /config/work/orca-opencode/src/agent-sandbox-infra-oc
+setfacl -m u:opencode:rwx -m d:u:opencode:rwx /home/dev/orca/workspaces/agent-sandbox-infra-oc
+```
+
+Die Default-Einträge vererben sich auf jedes später angelegte Worktree und auf dessen
+gitdir unter `<klon>/.git/worktrees/<name>`. Kein `chmod -R` auf `/home/dev`, keine Änderung
+an `/config/projects`. `git` braucht auf beiden Seiten `safe.directory = *`: `dev` in
+`/config/.gitconfig` **und** `/home/dev/.gitconfig` (die Runtime startet mit
+`HOME=/home/dev`), `opencode` in `/home/opencode/.gitconfig`. Commit-Identität von
+`opencode`: `opencode <opencode@claude-desktop.local>`.
+
+Belegt am 28.11.2026 (`orca agent launch --agent opencode --worktree path:<worktree>`):
+
+- Prozess `opencode` (uid 999), cwd = Worktree, Aufruf
+  `/opt/opencode/bin/opencode --standalone --prompt …`; Agent schreibt `probe-opencode.txt`,
+  `git status --porcelain` zeigt sie, `git commit` als `opencode` läuft durch.
+- Lesen aus `/config/projects` funktioniert; `touch /config/projects/home-infra/.git/zz-probe`
+  endet mit `Permission denied` (rc=1); in `.git` des Haupt-Repos änderte sich keine Datei,
+  die Ref-Liste blieb gleich.
+- `opencode2` verhält sich identisch; Claude und Antigravity starten weiter als `dev` im
+  eigenen Worktree (`⏵⏵ auto mode on` bzw. `agy`-Prozess mit cwd im Worktree).
+
+Grenzen: nur das Repo `agent-sandbox-infra-oc` ist für uid 999 eingerichtet. Worktrees des
+Haupt-Repos (`/opt/claude-desktop/config/projects/…`) bleiben `dev`-Sache — dort kann
+`opencode` nicht schreiben, weil das gitdir in `/config/projects` liegt.
 
 ## Aufruf (als `opencode`, `HOME=/home/opencode`)
 
