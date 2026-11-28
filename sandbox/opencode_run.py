@@ -12,11 +12,13 @@ Nebenwirkung des Musters `*git *`: es ist reiner Text, deshalb wird auch
 `grep -r "git log" docs/` abgewiesen. Restrisiko beliebiger Code bleibt — genau deswegen
 der Klon.
 
-Das Skript läuft als `dev` mit `HOME=/config`; die Pfade sind Vorgaben für CT 106 und per
-Option änderbar:
+Das Skript läuft als eigener Unix-User `opencode` (uid ≠ dev, kein Schreibrecht auf
+`/config/projects`); nur so gehören Klon, Patch und Log ihm, und das Modell kann die
+Haupt-Repos nicht ändern. `HOME` und Binary sind per Option änderbar:
 
-    python3 sandbox/opencode_run.py --repo home-infra --branch docs/probe \
-        --prompt-file /tmp/auftrag.md
+    runuser -u opencode -- env HOME=/home/opencode \
+        python3 /config/projects/agent-sandbox-infra/sandbox/opencode_run.py \
+        --repo home-infra --branch docs/probe --prompt-file /tmp/auftrag.md
 
 Exit-Codes: 0 in Ordnung, 1 Warnung (Haupt-Repo-Refs verändert), 2 Aufbaufehler (Repo fehlt,
 Prompt-Datei nicht lesbar), 3 OpenCode fehlgeschlagen, Zeitlimit oder Patch nicht exportierbar.
@@ -41,6 +43,9 @@ Runner = Callable[[Sequence[str]], subprocess.CompletedProcess]
 PROJECTS_DIR = Path("/config/projects")
 RUNS_DIR = Path("/config/work/opencode-runs")
 LOGS_DIR = Path("/config/logs/opencode-runs")
+# Eigener Unix-User ohne Schreibrecht auf /config/projects: nur er darf den Klon bearbeiten.
+DEFAULT_HOME = Path(os.environ.get("OPENCODE_HOME", "/home/opencode"))
+DEFAULT_BIN = os.environ.get("OPENCODE_BIN", "/opt/opencode/bin/opencode")
 DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"
 DEFAULT_TIMEOUT = 900
 WARNUNG = "WARNUNG: Haupt-Repo-Refs verändert"
@@ -240,7 +245,9 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--projects-dir", type=Path, default=PROJECTS_DIR)
     parser.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
     parser.add_argument("--logs-dir", type=Path, default=LOGS_DIR)
-    parser.add_argument("--opencode", default=os.environ.get("OPENCODE_BIN", "opencode"))
+    parser.add_argument("--opencode", default=DEFAULT_BIN)
+    parser.add_argument("--home", type=Path, default=DEFAULT_HOME,
+                        help="HOME des Lauf-Users (Vorgabe /home/opencode)")
     return parser.parse_args(argv)
 
 
@@ -263,7 +270,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"WARNUNG: pre-receive-Sperre fehlt in {args.repo}", file=sys.stderr, flush=True)
 
     # Erst fetch, dann Schnappschuss: sonst schlägt eine regulär geholte Remote-Ref als Warnung auf.
-    if not fetch_main(haupt):
+    # Als Nur-Lese-User schreibt fetch in .git/FETCH_HEAD und scheitert; dann bleibt der lokale Stand.
+    if not os.access(haupt / ".git", os.W_OK):
+        print("Hinweis: kein Schreibrecht auf das Haupt-Repo (Lauf-User opencode) — "
+              "git fetch übersprungen, lokaler Stand wird verwendet.", flush=True)
+    elif not fetch_main(haupt):
         print("Hinweis: git fetch fehlgeschlagen, lokaler Stand wird verwendet.", flush=True)
     vorher, snapshot_fehler = ref_snapshot(haupt)
     if snapshot_fehler:
@@ -283,8 +294,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args.logs_dir.mkdir(parents=True, exist_ok=True)
     log = args.logs_dir / f"{name}.jsonl"
-    umgebung = dict(os.environ, HOME="/config", PWD=str(klon))
-    umgebung["PATH"] = f"/config/.local/bin:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    umgebung = dict(os.environ, HOME=str(args.home), PWD=str(klon))
+    umgebung["PATH"] = "/opt/opencode/bin:/usr/local/bin:/usr/bin:/bin"
     # --standalone: eigener Server je Lauf. Ohne das hängt sich der Client an den
     # Hintergrunddienst, und dessen cwd (/config) gilt statt des Klons.
     befehl = [args.opencode, "run", "--standalone", auftrag_mit_hinweis(auftrag, haupt),

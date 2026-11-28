@@ -73,28 +73,64 @@ sind kein Push und laufen am Hook vorbei.
 
 Was der Hook **nicht** schließt: `git push --receive-pack="git -c core.hooksPath=… receive-pack"`
 lässt den Pusher den Empfangsprozess selbst benennen, der Hook läuft dann nie (auf CT 106,
-git 2.39.5, als `dev` reproduziert: rc=0, Branch angelegt). Ebenso darf der Prozess als `dev`
+git 2.39.5, als `dev` reproduziert: rc=0, Branch angelegt). Ebenso dürfte ein Prozess als `dev`
 die Haupt-Repos ohne git beschreiben — Dateien ändern, `.git/hooks` löschen, `.git/refs` direkt
-schreiben. Beides ist dieselbe Klasse: dagegen hilft nur ein eigener Unix-Benutzer oder ein
-Mount, auf dem `/config/projects` nur lesbar ist. Diese Entscheidung trifft Stephan getrennt;
-sie ist nicht Teil dieser Sperre.
+schreiben. Beides schließt erst der eigene Unix-User (nächster Abschnitt); der Hook bleibt die
+zweite Barriere.
 
-## Aufruf (als `dev`, `HOME=/config`)
+## Eigener Unix-User `opencode`
+
+Der Lauf läuft als `opencode` (uid 999, gid 995, **nicht** in `dev`). `/config/projects` bleibt
+`dev:dev 755/644`: der Lauf kann lesen und klonen, aber nichts schreiben — auch nicht über
+`git push --receive-pack`, `.git/config` oder `.git/hooks`.
+
+| Pfad | Besitzer | Modus | Inhalt |
+|---|---|---|---|
+| `/home/opencode` | opencode:opencode | 700 | HOME des Laufs |
+| `/home/opencode/.config/opencode/opencode.json` | opencode:opencode | 600 | Provider, git-Sperre |
+| `/home/opencode/.config/opencode/AGENTS.md` | opencode:opencode | 600 | globale Agenten-Regeln (Kopie) |
+| `/home/opencode/.local/share/opencode/auth.json` | opencode:opencode | 600 | Anmeldung (Kopie) |
+| `/home/opencode/.gitconfig` | opencode:opencode | 600 | `safe.directory = *` — die Haupt-Repos gehören `dev` |
+| `/config/work/opencode-runs` | opencode:opencode | 700 | Klone + Patches |
+| `/config/logs/opencode-runs` | opencode:opencode | 700 | JSONL-Logs |
+| `/opt/opencode/bin/opencode` | root:root | 755 | echte CLI 2.4.2 (Kopie des ELF) |
+
+Der Launcher läuft **selbst** als `opencode`; nur dann gehören Klon, Patch und Log ihm, und
+`/config/work/opencode-runs` mit 700 bleibt benutzbar. `git fetch` überspringt das Skript
+deshalb (kein Schreibrecht auf `.git/FETCH_HEAD`): der Klon entsteht aus dem lokalen Stand.
+Wer frische `origin/main` braucht, fetcht vorher als `dev` im Haupt-Repo.
+
+`dev` darf OpenCode als `opencode` starten, mehr nicht (`/etc/sudoers.d/opencode`):
+
+    dev ALL=(opencode) NOPASSWD: /opt/opencode/bin/opencode
+
+Also `sudo -n -u opencode -H /opt/opencode/bin/opencode …`. Der Launcher braucht die Regel
+nicht — er wird direkt als `opencode` gestartet (`runuser -u opencode …`).
+
+Das `context-mode`-Plugin aus `opencode.json` ist im neuen HOME nicht installiert
+(`opencode plugin list` findet keins). Der Headless-Lauf braucht es nicht; ohne Plugin fehlen
+dem Modell dessen Shell-Werkzeuge (`ctx_execute`, `ctx_batch`).
+
+Orca startet OpenCode weiterhin als `dev`: Orca kennt `opencode`/`opencode2` als eingebaute
+Agenten und ruft das Binary über den PATH; ein PATH-Wrapper wäre kein Schutz, weil `dev` die
+Verzeichnisse selbst besitzt. Offene Ausnahme, Stephan entscheidet separat.
+
+## Aufruf (als `opencode`, `HOME=/home/opencode`)
 
 ```
-runuser -u dev -- env HOME=/config PATH=/config/.local/bin:/usr/bin:/bin \
+runuser -u opencode -- env HOME=/home/opencode \
   python3 /config/projects/agent-sandbox-infra/sandbox/opencode_run.py \
   --repo home-infra --branch docs/opencode-klon-probe --prompt-file /tmp/auftrag.md
 ```
 
 Optionen: `--model` (Vorgabe `opencode/deepseek-v4.1-flash-free`), `--timeout` (Vorgabe
-900 s), `--projects-dir`, `--runs-dir`, `--logs-dir`, `--opencode` (Vorgabe `$OPENCODE_BIN`
-oder `opencode`).
+900 s), `--home` (Vorgabe `/home/opencode`), `--opencode` (Vorgabe
+`/opt/opencode/bin/opencode`), `--projects-dir`, `--runs-dir`, `--logs-dir`.
 
 Ablauf:
 
-1. `git fetch` im Haupt-Repo; scheitert er, läuft der Lauf auf dem lokalen Stand weiter und
-   sagt das.
+1. `git fetch` im Haupt-Repo, wenn der Lauf-User dort schreiben darf. Als `opencode` fehlt das
+   Recht: das Skript überspringt den Fetch, sagt das und nutzt den lokalen Stand.
 2. Ref-Schnappschuss **nach** dem Fetch: `for-each-ref`, `worktree list --porcelain`,
    `stash list`. Ist er nicht lesbar (z. B. `rc=128` bei fremdem Besitzer), bricht das
    Skript mit Exit 2 ab — ein leerer Schnappschuss würde sonst als „unverändert" gelten
@@ -112,8 +148,9 @@ Ablauf:
    Ohne den Satz löst das Modell Pfade aus der Doku zu absoluten Pfaden ins Haupt-Checkout
    auf und ändert dort — der Klon schützt dann nur die Refs, nicht die Dateien.
    Das Skript setzt `PWD` auf den Klon: OpenCode liest sein Projektverzeichnis daraus, und
-   ein Aufruf aus einem für `dev` unlesbaren cwd (etwa geerbtes `/root`) scheitert sonst mit
-   `Failed to change directory to /root`.
+   ein Aufruf aus einem für den Lauf-User unlesbaren cwd (etwa geerbtes `/root`) scheitert
+   sonst mit `Failed to change directory to /root`. `HOME` zeigt auf `/home/opencode`; PATH
+   ist `/opt/opencode/bin:/usr/local/bin:/usr/bin:/bin`.
 5. `git add -A` (macht das Skript, nicht OpenCode) und
    `git diff --cached --binary > /config/work/opencode-runs/<name>.patch`, dazu `--stat`.
 6. Ref-Schnappschuss nachher, Vergleich. Bei Abweichung die Zeile
@@ -130,7 +167,7 @@ Zusammenfassung den Reset-Zeitpunkt aus `retryAfterMs` und das Ausweichmodell
 ## Aufräumen
 
 `prune_opencode_runs()` in `sandbox/gc.py` läuft im vorhandenen Housekeeping mit — kein
-zweiter Wachhund. Auf CT 106 ist das der Timer `agy-sessions`
+zweiter Wachhund. Auf CT 106 ist das der Timer `agy-sessions` als root
 (`gc.py --nur-prozesse`, den `prozesse_aufraeumen()` bedient): Klone unter
 `/config/work/opencode-runs` werden nach 7 Tagen entfernt, Patches und die JSONL-Logs in
 `/config/logs/opencode-runs` nach 30 Tagen. Im Trockenlauf (`GC_PROZESSE_TROCKEN=1`) bleibt
@@ -141,7 +178,8 @@ umstellbar; fehlen sie, passiert nichts.
 
 - `tests/test_opencode_run.py`: Befehlsfolge (inkl. `remote remove origin`), Patch-Export,
   Token-Summe, Abbruch bei unbekanntem Repo und bei nicht lesbarem Ref-Schnappschuss,
-  Erkennung der pre-receive-Sperre (fehlend, fremder Hook) und die Warnung im Lauf
+  Erkennung der pre-receive-Sperre (fehlend, fremder Hook), die Warnung im Lauf sowie
+  `HOME`/`PWD` des Modellprozesses und der übersprungene Fetch ohne Schreibrecht
   (ohne echtes Git und ohne Modell).
 - `tests/test_pre_receive_sperre.py`: echter Push in ein lokales Haupt-Repo — ohne Hook
   geht er durch, mit Hook werden neuer Branch, Löschung, Tags und Pfad-URL abgewiesen und

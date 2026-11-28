@@ -33,6 +33,15 @@ def test_auftrag_bekommt_den_hinweis_auf_das_arbeitsverzeichnis():
     assert text.endswith("außerhalb des Klons.")
 
 
+def test_vorgaben_zeigen_auf_das_home_des_lauf_users(monkeypatch):
+    monkeypatch.delenv("OPENCODE_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_BIN", raising=False)
+    args = oc._parse_args(["--repo", "home-infra", "--branch", "x", "--prompt-file", "y"])
+
+    assert args.home == Path("/home/opencode")
+    assert args.opencode == "/opt/opencode/bin/opencode"
+
+
 # ---- ref_snapshot / ref_diff ----
 
 def test_ref_snapshot_fragt_refs_worktrees_und_stashes():
@@ -412,3 +421,36 @@ def test_main_schweigt_bei_installierter_sperre(tmp_path, monkeypatch, capsys):
     assert oc.main(args) == 0
     assert "WARNUNG" not in capsys.readouterr().err
 
+
+
+def test_main_setzt_home_und_pwd_fuer_den_lauf(tmp_path, monkeypatch):
+    """Klon, Patch und Log gehören dem Lauf-User: HOME kommt aus --home, PWD ist der Klon."""
+    args = _lauf_vorbereiten(tmp_path, monkeypatch)
+    haus = tmp_path / "home"
+    haus.mkdir()
+    gesehen = {}
+
+    def fake_run(cmd, **kwargs):
+        gesehen["cmd"], gesehen["cwd"] = list(cmd), kwargs["cwd"]
+        gesehen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(oc.subprocess, "run", fake_run)
+
+    assert oc.main(args + ["--home", str(haus)]) == 0
+    assert gesehen["env"]["HOME"] == str(haus)
+    assert gesehen["env"]["PWD"] == str(gesehen["cwd"])
+    assert gesehen["cwd"].parent == tmp_path / "runs"
+    assert gesehen["cmd"][:3] == ["opencode-stub", "run", "--standalone"]
+
+
+def test_main_ueberspringt_fetch_ohne_schreibrecht(tmp_path, monkeypatch, capsys):
+    """Als Nur-Lese-User scheitert fetch an .git/FETCH_HEAD — dann gar nicht erst starten."""
+    args = _lauf_vorbereiten(tmp_path, monkeypatch)
+    aufgerufen = []
+    monkeypatch.setattr(oc, "fetch_main", lambda *a, **k: aufgerufen.append(1) or True)
+    monkeypatch.setattr(oc.os, "access", lambda *a, **k: False)
+
+    assert oc.main(args) == 0
+    assert "kein Schreibrecht" in capsys.readouterr().out
+    assert aufgerufen == []
